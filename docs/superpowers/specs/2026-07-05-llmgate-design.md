@@ -28,8 +28,8 @@ tracked in the Roadmap section.
 | Language/runtime | Python + FastAPI (async/ASGI) | I/O-bound proxying + streaming; ML ecosystem is Python-first; matches domain conventions (LiteLLM, vLLM server). |
 | API surface | OpenAI-compatible `/v1/chat/completions`, translated to Anthropic Messages API | Universal drop-in — any OpenAI SDK/tool points at it via `base_url`. Strongest real-usage story. |
 | Persistence | Postgres + Redis, via docker-compose | Postgres = durable state (keys, logs, prompt versions, eval data) + pgvector for embeddings; Redis = rate-limit counters + exact-match cache. Production-standard. |
-| Caching | Tiered: exact-hash (Redis) → semantic (embed → pgvector cosine > threshold) | Demonstrates an embeddings-based ML feature with real cost savings; exact tier avoids wasted compute + false hits. |
-| Eval gate | Prompt-version regression gate (CLI + CI); scored by deterministic checks + Claude-as-judge rubric; blocks promotion on regression vs baseline | Clearest "CI for prompts" narrative; demonstrates model evaluation. |
+| Caching | Tiered: exact-hash (Redis) → semantic (embed → pgvector cosine > threshold). Embeddings via a **local `sentence-transformers` model** (`all-MiniLM-L6-v2`), in-process | Demonstrates an embeddings-based ML feature with real cost savings; exact tier avoids wasted compute + false hits. Local model = $0 embedding cost, no second API vendor (Anthropic has no embeddings API), keeps the clone-and-run story dependency-light. |
+| Eval gate | Prompt-version regression gate (CLI + CI); scored by deterministic checks + Claude-as-judge rubric; blocks promotion on regression vs baseline. **Judge model configurable, defaults to Haiku 4.5** | Clearest "CI for prompts" narrative; demonstrates model evaluation. Haiku default keeps eval-run cost low (~$0.30 per 50-case run). |
 | Eval dataset | Seed set shipped in repo + curation pipeline that mines logged traffic (dedupe incl. semantic near-dupes, PII scrub, error filtering, stratified sampling) | Works out-of-box AND demonstrates data engineering & cleaning + a self-reinforcing loop. |
 | Observability | Prometheus metrics + shipped Grafana dashboard; eval results as CLI/HTML report | Industry-standard MLOps signal, cheap to build, visually demoable. |
 
@@ -73,13 +73,18 @@ Each unit has one clear purpose and is independently testable.
   - `auth` — API-key lookup/validation.
   - `ratelimit` — per-key Redis token bucket.
   - `cache` — tiered: exact hash → semantic via pgvector cosine > threshold.
+    Embeddings computed in-process by a local `sentence-transformers` model
+    (`all-MiniLM-L6-v2`) — no external embedding vendor.
   - `accounting` — per-request token→cost, emits Prometheus metrics + writes a
     log row.
 - **`prompts/`** — prompt registry: versioned prompt templates, an "active"
   pointer per prompt, resolve-at-request-time.
 - **`eval/`** — replays an eval dataset against a candidate prompt version;
   scorers = deterministic checks (regex / JSON-schema / exact) + **Claude-as-judge**
-  rubric scoring; produces pass/fail vs baseline + HTML/CLI report.
+  rubric scoring; produces pass/fail vs baseline + HTML/CLI report. Judge model
+  is configurable (env/config), defaulting to **Haiku 4.5** to minimize
+  eval-run cost; pin the model + low temperature + structured output for
+  reproducible scoring.
 - **`data/curation.py`** — offline pipeline: pull logged traffic → normalize →
   dedupe (exact + semantic near-dupe) → PII scrub → drop errors/outliers →
   stratified sample → write promotable eval cases.
@@ -135,6 +140,25 @@ Each target skill maps to concrete, reviewer-visible surface area.
 - **Eval-gate self-test** — a fixture dataset plus a known-good and a known-bad prompt version, asserting the gate *passes* the good one and *blocks* the bad one. This proves the differentiator actually works.
 - **Judge reliability** — pin the judge model, low temperature, structured/JSON output; test that rubric parsing is robust to formatting variance.
 - **CI** — GitHub Actions runs unit + integration suites, then runs the eval gate against the seed dataset on every PR.
+
+## Cost Model
+
+Infrastructure and CI are free; the only recurring cost is Anthropic API calls,
+dominated by the eval gate.
+
+- **Infra + CI: $0.** GitHub Actions (free tier covers the few-minute eval job),
+  Prometheus, Grafana, Postgres, Redis, and the gateway are all open-source and
+  self-hosted via docker-compose. Anyone who clones the repo runs the full stack
+  locally at no cost (bringing their own Anthropic API key).
+- **Embeddings: $0.** Local `sentence-transformers` model — no embedding vendor.
+- **Claude API — the only real cost.** Driven by eval runs (candidate responses +
+  Claude-as-judge). At ~50 eval cases, a full run is ~$0.30 with a Haiku judge
+  (Haiku 4.5 $1/$5 per 1M in/out; Sonnet 5 intro $2/$10 through 2026-08-31).
+  Running the gate on every PR during active development stays in the
+  single-digit-dollars-per-month range. Plus incidental cost from manual test
+  traffic through the gateway.
+- **Realistic total while building v1: under ~$10/month.** $0 for a third party
+  who clones it and supplies their own key.
 
 ## Roadmap (post-v1 iterations)
 
