@@ -50,6 +50,27 @@ async def test_requires_auth(client):
     assert r.status_code == 401
 
 
+async def test_missing_auth_returns_openai_shaped_401(client):
+    r = await client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 401
+    body = r.json()
+    assert body["error"]["type"] == "authentication_error"
+
+
+async def test_invalid_body_returns_openai_shaped_400(client, raw_key):
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"model": "gpt-4o"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["type"] == "invalid_request_error"
+
+
 async def test_non_streaming_completion(client, raw_key):
     r = await client.post(
         "/v1/chat/completions",

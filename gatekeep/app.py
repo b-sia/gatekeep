@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import time
 
 from anthropic import AsyncAnthropic
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.requests import Request
 
 from gatekeep.api.errors import map_anthropic_error, openai_error
 from gatekeep.api.openai_schemas import ChatCompletionRequest
@@ -22,6 +26,20 @@ from gatekeep.middleware.auth import require_api_key
 from gatekeep.providers.anthropic import AnthropicProvider, StreamEnd, TextDelta
 
 app = FastAPI(title="gatekeep")
+
+
+@app.exception_handler(FastAPIHTTPException)
+async def _http_exception_handler(request: Request, exc: FastAPIHTTPException) -> JSONResponse:
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return openai_error(400, str(exc), "invalid_request_error")
 
 
 def get_provider() -> AnthropicProvider:
@@ -80,15 +98,16 @@ async def _sse(provider: AnthropicProvider, payload: dict, model: str):
                     final_chunk(ev.stop_reason, id=completion_id, created=created, model=model)
                 )
     except Exception as exc:  # surface upstream errors inside the stream
-        yield f'data: {{"error": {{"message": {_json(str(exc))}, "type": "upstream_error"}}}}\n\n'
+        error_payload = {
+            "error": {
+                "message": str(exc),
+                "type": "upstream_error",
+                "code": "anthropic_error",
+            }
+        }
+        yield f"data: {json.dumps(error_payload)}\n\n"
     yield "data: [DONE]\n\n"
 
 
 def _event(chunk) -> str:
     return f"data: {chunk.model_dump_json()}\n\n"
-
-
-def _json(s: str) -> str:
-    import json
-
-    return json.dumps(s)
