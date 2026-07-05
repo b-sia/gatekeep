@@ -1,4 +1,4 @@
-# llmgate — Self-Hosted LLM Gateway with Prompt-Eval Gating
+# gatekeep — Self-Hosted LLM Gateway with Prompt-Eval Gating
 
 **Status:** Draft complete, pending user review (2026-07-05)
 **Author:** briansia93@gmail.com
@@ -40,11 +40,11 @@ A single async **FastAPI** gateway service fronting Anthropic's API, backed by
 pgvector for embeddings) and **Redis** (ephemeral: rate-limit counters,
 exact-match cache). Everything comes up with `docker-compose up`: gateway,
 Postgres, Redis, Prometheus, Grafana. Two ancillary tools live alongside the
-service: a **CLI** (`llmgate ...`) for the eval gate + dataset curation, and a
+service: a **CLI** (`gatekeep ...`) for the eval gate + dataset curation, and a
 **GitHub Actions** workflow that runs the eval gate in CI.
 
 ```
-client (OpenAI SDK, base_url=llmgate)
+client (OpenAI SDK, base_url=gatekeep)
       │  POST /v1/chat/completions
       ▼
 ┌─────────────── FastAPI gateway ───────────────┐
@@ -88,8 +88,8 @@ Each unit has one clear purpose and is independently testable.
 - **`data/curation.py`** — offline pipeline: pull logged traffic → normalize →
   dedupe (exact + semantic near-dupe) → PII scrub → drop errors/outliers →
   stratified sample → write promotable eval cases.
-- **`cli.py`** — `llmgate eval run`, `llmgate prompt promote`,
-  `llmgate dataset curate`, etc.
+- **`cli.py`** — `gatekeep eval run`, `gatekeep prompt promote`,
+  `gatekeep dataset curate`, etc.
 - **`observability/`** — Prometheus exporter + shipped Grafana dashboard JSON.
 
 ## Skill Demonstration Mapping
