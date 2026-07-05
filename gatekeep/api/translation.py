@@ -29,6 +29,7 @@ class TranslationError(ValueError):
 
 
 def _extract_text(content: Any) -> str:
+    """Flatten an OpenAI message's content (string or multimodal parts) to plain text."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -41,6 +42,11 @@ def _extract_text(content: Any) -> str:
 
 
 def resolve_model(requested: str, *, default_model: str, aliases: dict[str, str]) -> str:
+    """Map a client-requested model name to a Claude model ID.
+
+    Checks the alias table first, passes through anything already prefixed
+    `claude-`, and otherwise falls back to `default_model`.
+    """
     if requested in aliases:
         return aliases[requested]
     if requested.startswith("claude-"):
@@ -55,6 +61,16 @@ def openai_to_anthropic(
     default_model: str,
     model_aliases: dict[str, str],
 ) -> dict[str, Any]:
+    """Build an Anthropic Messages API payload from an OpenAI chat completion request.
+
+    Lifts `system`/`developer` messages into a single Anthropic `system` string,
+    resolves the model via `resolve_model`, and always sets `max_tokens`.
+    Sampling parameters (`temperature`/`top_p`/`top_k`) are never forwarded,
+    since Anthropic rejects non-default values for them.
+
+    Raises TranslationError if a message role is unsupported or no
+    user/assistant message remains after lifting system content out.
+    """
     system_parts: list[str] = []
     messages: list[dict[str, str]] = []
     for msg in req.messages:
@@ -84,10 +100,12 @@ def openai_to_anthropic(
 
 
 def new_completion_id() -> str:
+    """Generate a fresh OpenAI-style `chatcmpl-...` completion ID."""
     return "chatcmpl-" + uuid.uuid4().hex
 
 
 def result_to_openai(result: Any, *, model: str) -> ChatCompletionResponse:
+    """Convert a normalized provider CompletionResult into an OpenAI chat completion response."""
     return ChatCompletionResponse(
         id=new_completion_id(),
         created=int(time.time()),
@@ -108,6 +126,7 @@ def result_to_openai(result: Any, *, model: str) -> ChatCompletionResponse:
 
 
 def role_chunk(*, id: str, created: int, model: str) -> ChatCompletionChunk:
+    """Build the first SSE chunk of a stream, announcing the assistant role."""
     return ChatCompletionChunk(
         id=id,
         created=created,
@@ -117,6 +136,7 @@ def role_chunk(*, id: str, created: int, model: str) -> ChatCompletionChunk:
 
 
 def text_chunk(text: str, *, id: str, created: int, model: str) -> ChatCompletionChunk:
+    """Build a mid-stream SSE chunk carrying one text delta."""
     return ChatCompletionChunk(
         id=id,
         created=created,
@@ -126,6 +146,7 @@ def text_chunk(text: str, *, id: str, created: int, model: str) -> ChatCompletio
 
 
 def final_chunk(stop_reason: str | None, *, id: str, created: int, model: str) -> ChatCompletionChunk:
+    """Build the terminal SSE chunk carrying the mapped OpenAI finish_reason."""
     return ChatCompletionChunk(
         id=id,
         created=created,

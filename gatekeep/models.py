@@ -9,10 +9,13 @@ from gatekeep.db import Base
 
 
 def _utcnow() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
 
 class ApiKey(Base):
+    """A client's gateway API key, stored as a salted hash rather than plaintext."""
+
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

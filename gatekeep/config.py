@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Gateway configuration, loaded from the environment or a local .env file."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
@@ -26,4 +28,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return the process-wide cached Settings instance."""
     return Settings()

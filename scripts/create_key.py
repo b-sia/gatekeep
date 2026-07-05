@@ -12,6 +12,7 @@ from gatekeep.models import ApiKey
 
 
 async def main(name: str) -> None:
+    """Create a new API key for `name`, print the raw key once, and exit."""
     raw = generate_key()
     async with SessionLocal() as session:
         session.add(ApiKey(name=name, key_hash=hash_key(raw)))

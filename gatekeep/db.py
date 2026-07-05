@@ -13,7 +13,7 @@ from gatekeep.config import get_settings
 
 
 class Base(DeclarativeBase):
-    pass
+    """Declarative base class shared by all ORM models."""
 
 
 engine = create_async_engine(get_settings().database_url, future=True)
@@ -21,5 +21,6 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency that yields a request-scoped async DB session."""
     async with SessionLocal() as session:
         yield session

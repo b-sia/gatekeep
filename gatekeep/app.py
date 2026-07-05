@@ -30,6 +30,12 @@ app = FastAPI(title="gatekeep")
 
 @app.exception_handler(FastAPIHTTPException)
 async def _http_exception_handler(request: Request, exc: FastAPIHTTPException) -> JSONResponse:
+    """Serialize HTTPException bodies as flat, top-level OpenAI-shaped errors.
+
+    FastAPI's default handler nests HTTPException.detail under a "detail"
+    key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
+    require_api_key raises), this returns it verbatim at the top level.
+    """
     if isinstance(exc.detail, dict) and "error" in exc.detail:
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
@@ -39,10 +45,12 @@ async def _http_exception_handler(request: Request, exc: FastAPIHTTPException) -
 async def _validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    """Return pydantic request-validation failures as an OpenAI-shaped 400."""
     return openai_error(400, str(exc), "invalid_request_error")
 
 
 def get_provider() -> AnthropicProvider:
+    """FastAPI dependency constructing an AnthropicProvider from settings."""
     settings = get_settings()
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     return AnthropicProvider(client)
@@ -50,6 +58,7 @@ def get_provider() -> AnthropicProvider:
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
+    """Liveness check."""
     return {"status": "ok"}
 
 
@@ -59,6 +68,12 @@ async def chat_completions(
     _key=Depends(require_api_key),
     provider: AnthropicProvider = Depends(get_provider),
 ):
+    """OpenAI-compatible chat completions endpoint, proxying to Claude.
+
+    Requires a valid API key. Translates the request to Anthropic's Messages
+    API, then either streams the response as SSE (when `stream: true`) or
+    returns a single OpenAI-shaped JSON completion.
+    """
     settings = get_settings()
     try:
         payload = openai_to_anthropic(
@@ -86,6 +101,12 @@ async def chat_completions(
 
 
 async def _sse(provider: AnthropicProvider, payload: dict, model: str):
+    """Stream a chat completion as OpenAI-style Server-Sent Events.
+
+    Emits a role chunk, then a text chunk per delta, then a final chunk
+    carrying the mapped finish_reason. An upstream error mid-stream is
+    surfaced as an in-band error event before the closing [DONE].
+    """
     completion_id = new_completion_id()
     created = int(time.time())
     yield _event(role_chunk(id=completion_id, created=created, model=model))
@@ -110,4 +131,5 @@ async def _sse(provider: AnthropicProvider, payload: dict, model: str):
 
 
 def _event(chunk) -> str:
+    """Format a ChatCompletionChunk as one SSE `data:` event."""
     return f"data: {chunk.model_dump_json()}\n\n"
