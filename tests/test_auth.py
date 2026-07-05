@@ -1,6 +1,9 @@
+import json
+
 import pytest
 from fastapi import HTTPException
 
+from gatekeep.api.errors import map_anthropic_error
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.auth import extract_bearer, require_api_key
 from gatekeep.models import ApiKey
@@ -25,12 +28,14 @@ async def test_require_api_key_rejects_missing(session):
     with pytest.raises(HTTPException) as ei:
         await require_api_key(authorization=None, x_api_key=None, session=session)
     assert ei.value.status_code == 401
+    assert ei.value.detail["error"]["type"] == "authentication_error"
 
 
 async def test_require_api_key_rejects_unknown(session):
     with pytest.raises(HTTPException) as ei:
         await require_api_key(authorization="Bearer nope", x_api_key=None, session=session)
     assert ei.value.status_code == 401
+    assert ei.value.detail["error"]["type"] == "authentication_error"
 
 
 async def test_require_api_key_rejects_inactive(session):
@@ -40,3 +45,28 @@ async def test_require_api_key_rejects_inactive(session):
     with pytest.raises(HTTPException) as ei:
         await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
     assert ei.value.status_code == 401
+    assert ei.value.detail["error"]["type"] == "authentication_error"
+
+
+def test_map_anthropic_error_with_status_and_message():
+    class FakeAnthropicError(Exception):
+        def __init__(self, status_code, message):
+            super().__init__(message)
+            self.status_code = status_code
+            self.message = message
+
+    exc = FakeAnthropicError(429, "rate limited")
+    response = map_anthropic_error(exc)
+    assert response.status_code == 429
+    body = json.loads(response.body)
+    assert body["error"]["message"] == "rate limited"
+    assert body["error"]["type"] == "upstream_error"
+
+
+def test_map_anthropic_error_fallback_defaults():
+    exc = Exception("boom")
+    response = map_anthropic_error(exc)
+    assert response.status_code == 502
+    body = json.loads(response.body)
+    assert body["error"]["message"] == "boom"
+    assert body["error"]["type"] == "upstream_error"
