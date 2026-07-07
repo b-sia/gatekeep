@@ -23,6 +23,17 @@ if ! command -v psql &> /dev/null; then
     exit 1
 fi
 
+# Check if api_keys table exists; if not, run migrations
+echo "🔍 Checking database schema..."
+TABLE_EXISTS=$(PGPASSWORD=gatekeep psql -U gatekeep -h localhost -d gatekeep -t -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'api_keys');" 2>/dev/null || echo "f")
+if [ "$TABLE_EXISTS" != "t" ]; then
+    echo "⚠️  api_keys table not found. Running migrations..."
+    if ! alembic upgrade head; then
+        echo "❌ Error: alembic migration failed"
+        exit 1
+    fi
+fi
+
 # Generate raw key and hash
 echo "🔑 Generating API key..."
 RAW_KEY=$(python3 -c "from gatekeep.auth_keys import generate_key; print(generate_key())")
