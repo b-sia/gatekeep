@@ -74,20 +74,43 @@ class FakeClient:
 
 async def test_complete_returns_normalized_result():
     provider = AnthropicProvider(FakeClient(FakeMessages()))
-    result = await provider.complete({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})
+    result = await provider.complete(
+        {"model": "claude-sonnet-5", "messages": [], "max_tokens": 10}
+    )
     assert isinstance(result, CompletionResult)
     assert result.text == "hello world"
     assert result.input_tokens == 5
     assert result.output_tokens == 2
-    assert result.stop_reason == "end_turn"
+    assert result.stop_reason == "stop"
 
 
 async def test_stream_yields_deltas_then_end():
     provider = AnthropicProvider(FakeClient(FakeMessagesStreaming()))
-    events = [e async for e in provider.stream({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})]
+    events = [
+        e
+        async for e in provider.stream(
+            {"model": "claude-sonnet-5", "messages": [], "max_tokens": 10}
+        )
+    ]
     deltas = [e for e in events if isinstance(e, TextDelta)]
     ends = [e for e in events if isinstance(e, StreamEnd)]
     assert "".join(d.text for d in deltas) == "hello"
     assert len(ends) == 1
-    assert ends[0].stop_reason == "max_tokens"
+    assert ends[0].stop_reason == "length"
     assert ends[0].output_tokens == 2
+
+
+async def test_complete_maps_unknown_stop_reason_to_stop():
+    class FakeMessagesUnknownReason(FakeMessages):
+        async def create(self, **payload):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="hi")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                stop_reason="tool_use",
+            )
+
+    provider = AnthropicProvider(FakeClient(FakeMessagesUnknownReason()))
+    result = await provider.complete(
+        {"model": "claude-sonnet-5", "messages": [], "max_tokens": 10}
+    )
+    assert result.stop_reason == "tool_calls"

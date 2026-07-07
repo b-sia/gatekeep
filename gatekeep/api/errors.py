@@ -13,8 +13,8 @@ def openai_error(
     )
 
 
-def map_anthropic_error(exc: Exception) -> JSONResponse:
-    """Convert an exception raised by the Anthropic SDK into an OpenAI-shaped error response.
+def map_provider_error(exc: Exception) -> JSONResponse:
+    """Convert an exception raised by a provider SDK into an OpenAI-shaped error response.
 
     Falls back to a 502 with the exception's string representation if the
     exception doesn't carry a `status_code`/`message` (as the SDK's own
@@ -22,4 +22,4 @@ def map_anthropic_error(exc: Exception) -> JSONResponse:
     """
     status = getattr(exc, "status_code", 502)
     message = getattr(exc, "message", None) or str(exc)
-    return openai_error(status, message, "upstream_error", "anthropic_error")
+    return openai_error(status, message, "upstream_error", "provider_error")
