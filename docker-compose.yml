@@ -18,12 +18,20 @@ services:
     ports:
       - "6379:6379"
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+
   gateway:
     build: .
     environment:
       DATABASE_URL: postgresql+asyncpg://gatekeep:gatekeep@postgres:5432/gatekeep
       REDIS_URL: redis://redis:6379/0
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      PROVIDER: ${PROVIDER:-ollama}
+      OLLAMA_HOST: http://ollama:11434
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-llama3.2}
     ports:
       - "8100:8000"
     depends_on:
@@ -31,3 +39,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      ollama:
+        condition: service_started
+
+volumes:
+  ollama-data:
