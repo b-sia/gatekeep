@@ -52,6 +52,12 @@ INSERT INTO api_keys (name, key_hash, active)
 VALUES ('$KEY_NAME', '$HASH', true);
 EOF
 
+# Get default model from environment, .env file, or fallback
+if [ -z "$DEFAULT_MODEL" ] && [ -f .env ]; then
+    DEFAULT_MODEL=$(grep "^DEFAULT_MODEL=" .env | cut -d= -f2)
+fi
+DEFAULT_MODEL="${DEFAULT_MODEL:-claude-sonnet-5}"
+
 # Display results
 echo ""
 echo "✅ Test API key created successfully!"
@@ -66,5 +72,5 @@ echo ""
 echo "curl -X POST http://localhost:8100/v1/chat/completions \\"
 echo "  -H \"Authorization: Bearer $RAW_KEY\" \\"
 echo "  -H \"Content-Type: application/json\" \\"
-echo "  -d '{\"model\": \"gpt-4\", \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}'"
+echo "  -d '{\"model\": \"$DEFAULT_MODEL\", \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}'"
 echo ""
