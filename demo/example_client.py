@@ -213,7 +213,7 @@ async def example_6_provider_switching():
 
     models = [
         ("claude-sonnet-5", "Anthropic's Claude Sonnet"),
-        ("claude-opus-4-8", "Anthropic's Claude Opus"),
+        ("claude-haiku-4-5", "Anthropic's Claude Haiku"),
         ("ollama-llama3.2", "Local Ollama - Llama 3.2"),
     ]
 
