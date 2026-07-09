@@ -1,0 +1,110 @@
+# Gatekeep
+
+Self-hosted, OpenAI-compatible LLM gateway with prompt-eval gating.
+
+Point your app at Gatekeep instead of OpenAI/Anthropic directly. It authenticates requests with its own API keys and routes them to the configured provider (Claude, local Ollama models, etc), so you get one stable interface regardless of which model is behind it.
+
+```
+Your App -> Gatekeep (auth + routing) -> Provider (Claude, Ollama, ...)
+```
+
+## Setup
+
+1. Copy the environment template and fill in your provider credentials:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Start the gateway and its dependencies (Postgres, Redis, Ollama):
+   ```bash
+   docker-compose up -d
+   ```
+
+3. Create an API key for calling the gateway:
+   ```bash
+   bash scripts/init-test-key.sh
+   ```
+   This prints a raw key like `sk-...` - save it, it's only shown once.
+
+The gateway now listens on `http://localhost:8100`.
+
+## Test it with curl
+
+```bash
+curl -X POST http://localhost:8100/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-5",
+    "messages": [{"role": "user", "content": "hi"}]
+  }'
+```
+
+Swap `"model"` for any model your configured provider(s) support, e.g. `llama3.2` if you're running the Ollama service from `docker-compose.yml`.
+
+## Run the demo app
+
+`demo/` contains a small chat web app that shows Gatekeep used the way a real client would - not just a single curl call.
+
+```bash
+export GATEKEEP_API_KEY=sk-your-key   # from init-test-key.sh above
+python demo/app.py
+```
+
+Open `http://localhost:8200` and chat. Use the model dropdown to switch between providers, and toggle streaming on/off. The page's "How this works" section walks through the same integration examples as below.
+
+Env vars the demo app reads (also loaded from `.env` if present):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GATEKEEP_URL` | `http://localhost:8100` | Address of the gateway |
+| `GATEKEEP_API_KEY` | none (required) | Key created via `init-test-key.sh` |
+| `DEFAULT_MODEL` | `claude-sonnet-5` | Model used when none is specified |
+
+`demo/example_client.py` has runnable, standalone versions of the integration patterns below (basic request, streaming, retries, multi-turn, provider switching) if you want to see them outside the web UI.
+
+## Integrate Gatekeep into your own app
+
+**Using the OpenAI client library** (recommended if you already use it):
+
+```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(
+    api_key="sk-your-key",              # a Gatekeep key, not an OpenAI one
+    base_url="http://localhost:8100/v1",
+)
+
+response = await client.chat.completions.create(
+    model="claude-sonnet-5",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
+**Using httpx directly:**
+
+```python
+import httpx
+
+async with httpx.AsyncClient() as client:
+    response = await client.post(
+        "http://localhost:8100/v1/chat/completions",
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "Hello!"}],
+        },
+        headers={"Authorization": "Bearer sk-your-key"},
+    )
+```
+
+Both streaming (`"stream": true`) and non-streaming requests are supported, matching the OpenAI chat completions API shape.
+
+## Project layout
+
+```
+gatekeep/       gateway source (FastAPI app, providers, middleware)
+migrations/     Alembic database migrations
+scripts/        setup helpers (init-test-key.sh, run-demo.sh)
+demo/           example chat app showing gateway integration
+docs/           design docs and specs
+```
