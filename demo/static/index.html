@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gatekeep Demo - Chat Interface</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>🔐 Gatekeep Demo Chat</h1>
+        <p class="subtitle">
+          Using Gatekeep as an OpenAI-compatible gateway for LLM access
+        </p>
+      </header>
+
+      <div class="config-panel">
+        <h3>Configuration</h3>
+        <div class="config-row">
+          <label for="model">Model:</label>
+          <select id="model">
+            <option value="claude-sonnet-5">Claude Sonnet 5 (Anthropic)</option>
+            <option value="claude-opus-4-8">Claude Opus 4.8 (Anthropic)</option>
+            <option value="ollama-llama3.2">Llama 3.2 (Local Ollama)</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label for="streaming">Streaming:</label>
+          <input type="checkbox" id="streaming" checked />
+          <span class="help-text"
+            >Enable real-time streaming responses (check your server logs)</span
+          >
+        </div>
+      </div>
+
+      <div class="chat-container">
+        <div id="messages" class="messages"></div>
+        <div class="input-area">
+          <textarea
+            id="messageInput"
+            class="message-input"
+            placeholder="Ask me anything... (Shift+Enter to send, or click Send)"
+            rows="3"
+          ></textarea>
+          <button id="sendBtn" class="send-button">Send</button>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <details>
+          <summary>How this works (click to expand)</summary>
+          <div class="explanation">
+            <h4>Architecture:</h4>
+            <pre>
+Your App → Gatekeep Gateway → LLM Provider (Claude, Ollama, etc)
+           (Auth + Routing)
+            </pre>
+
+            <h4>Benefits over direct API calls:</h4>
+            <ul>
+              <li>
+                <strong>Single Authentication:</strong> One API key instead of
+                managing multiple provider keys
+              </li>
+              <li>
+                <strong>Provider Flexibility:</strong> Switch between Claude,
+                Ollama, or other providers without changing your code
+              </li>
+              <li>
+                <strong>Self-Hosted:</strong> Run locally for privacy and cost
+                control
+              </li>
+              <li>
+                <strong>Prompt Gating:</strong> Future feature to evaluate/filter
+                prompts before they reach models
+              </li>
+            </ul>
+
+            <h4>How to switch your app to use Gatekeep:</h4>
+            <p>
+              If you're already using the OpenAI client library, just change the
+              API base URL:
+            </p>
+            <pre>
+from openai import AsyncOpenAI
+
+# Before (direct to OpenAI):
+# client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# After (using Gatekeep):
+client = AsyncOpenAI(
+    api_key=os.getenv("GATEKEEP_API_KEY"),
+    base_url="http://localhost:8100/v1"
+)
+
+# Rest of your code stays the same!
+response = await client.chat.completions.create(
+    model="claude-sonnet-5",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+            </pre>
+
+            <h4>In Python requests (without SDK):</h4>
+            <pre>
+import httpx
+
+async with httpx.AsyncClient() as client:
+    response = await client.post(
+        "http://localhost:8100/v1/chat/completions",  # Gatekeep URL
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "Hello!"}]
+        },
+        headers={"Authorization": "Bearer sk-your-key"}
+    )
+            </pre>
+          </div>
+        </details>
+      </footer>
+    </div>
+
+    <script src="/static/chat.js"></script>
+  </body>
+</html>
