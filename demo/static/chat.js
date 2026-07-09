@@ -74,7 +74,8 @@ async function sendMessage() {
     }
   } catch (error) {
     removeLoadingMessage();
-    addMessage(`Error: ${error.message}`, "error");
+    const errorMsg = error?.message || error?.toString?.() || 'Unknown error';
+    addMessage(`Error: ${errorMsg}`, "error");
   } finally {
     isLoading = false;
     sendBtn.disabled = false;
@@ -121,7 +122,10 @@ async function streamResponse(model, content, loadingMsg) {
             const data = JSON.parse(json);
 
             if (data.error) {
-              contentDiv.textContent += `[Error: ${data.error}]`;
+              const errorMsg = typeof data.error === 'object'
+                ? data.error.message || JSON.stringify(data.error)
+                : data.error;
+              contentDiv.textContent += `[Error: ${errorMsg}]`;
               continue;
             }
 

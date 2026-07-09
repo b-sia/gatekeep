@@ -10,6 +10,7 @@ This app demonstrates:
 To use: Update GATEKEEP_URL and API_KEY below, then run this app.
 """
 
+import json
 import os
 import pathlib
 from typing import AsyncGenerator
@@ -84,16 +85,19 @@ async def chat_stream(message: Message) -> StreamingResponse:
                 ) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
-                        yield f"data: {{'error': 'Gateway error: {error_text.decode()}'}}\n\n"
+                        payload = json.dumps(
+                            {"error": f"Gateway error: {error_text.decode()}"}
+                        )
+                        yield f"data: {payload}\n\n"
                         return
 
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             yield line + "\n"
         except httpx.RequestError as e:
-            yield f"data: {{'error': '{str(e)}'}}\n\n"
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
         except Exception as e:
-            yield f"data: {{'error': 'Unexpected error: {str(e)}'}}\n\n"
+            yield f"data: {json.dumps({'error': f'Unexpected error: {e}'})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

@@ -23,8 +23,8 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "gpt-4": "claude-sonnet-5",
             "gpt-4o": "claude-sonnet-5",
-            "gpt-4o-mini": "claude-haiku-4-5",
-            "gpt-3.5-turbo": "claude-haiku-4-5",
+            "gpt-4o-mini": "claude-haiku-4-5-20251001",
+            "gpt-3.5-turbo": "claude-haiku-4-5-20251001",
         }
     )
 
