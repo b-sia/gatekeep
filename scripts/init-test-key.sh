@@ -25,7 +25,7 @@ fi
 
 # Check if api_keys table exists; if not, run migrations
 echo "🔍 Checking database schema..."
-TABLE_EXISTS=$(PGPASSWORD=gatekeep psql -U gatekeep -h localhost -d gatekeep -t -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'api_keys');" 2>/dev/null || echo "f")
+TABLE_EXISTS=$(PGPASSWORD=gatekeep psql -U gatekeep -h localhost -d gatekeep -t -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'api_keys');" 2>/dev/null | tr -d '[:space:]' || echo "f")
 if [ "$TABLE_EXISTS" != "t" ]; then
     echo "⚠️  api_keys table not found. Running migrations..."
     if ! alembic upgrade head; then

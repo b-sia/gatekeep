@@ -22,15 +22,11 @@ fi
 # Initialize test key if needed
 echo ""
 echo "🔑 Initializing API key..."
-if ! bash scripts/init-test-key.sh test-key false > /dev/null 2>&1; then
-    echo "Creating new test key..."
-    bash scripts/init-test-key.sh test-key true
-else
-    echo "✅ Test key already exists"
-fi
+INIT_OUTPUT=$(bash scripts/init-test-key.sh test-key true)
+echo "$INIT_OUTPUT" | grep -v "^Raw Key:"
 
-# Extract the API key from the previous init script output
-API_KEY=$(python3 -c "from gatekeep.auth_keys import generate_key, hash_key; key = generate_key(); print(key)" 2>/dev/null || echo "sk-test-key")
+# Extract the actual API key that init-test-key.sh inserted into the database
+API_KEY=$(echo "$INIT_OUTPUT" | sed -n 's/^Raw Key: *//p')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
