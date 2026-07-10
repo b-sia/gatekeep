@@ -5,6 +5,8 @@ services:
       POSTGRES_USER: gatekeep
       POSTGRES_PASSWORD: gatekeep
       POSTGRES_DB: gatekeep
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -44,3 +46,4 @@ services:
 
 volumes:
   ollama-data:
+  postgres-data:
