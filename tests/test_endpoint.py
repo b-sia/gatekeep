@@ -11,6 +11,7 @@ from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, RequestLog
+from gatekeep.prompts import create_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
@@ -175,3 +176,46 @@ async def test_streaming_completion_logs_request(client, raw_key, session):
     assert log.prompt_tokens == 3
     assert log.completion_tokens == 2
     assert log.total_tokens == 5
+
+
+async def test_prompt_name_substitutes_active_template_as_system_message(
+    client, raw_key, session
+):
+    await create_prompt("system-context", "You are a pirate.", session)
+    captured = {}
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        captured["payload"] = payload
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "gpt-4o",
+                "prompt_name": "system-context",
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
+    assert r.status_code == 200
+    assert captured["payload"]["system"] == "You are a pirate."
+
+
+async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "prompt_name": "does-not-exist",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["type"] == "invalid_request_error"

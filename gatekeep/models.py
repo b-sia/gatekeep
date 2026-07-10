@@ -50,6 +50,44 @@ class RequestLog(Base):
     response_id: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class Prompt(Base):
+    """A named prompt template whose active version is served at request time."""
+
+    __tablename__ = "prompts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    active_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "prompt_versions.id", use_alter=True, name="fk_prompts_active_version_id"
+        ),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class PromptVersion(Base):
+    """One immutable version of a prompt's template text."""
+
+    __tablename__ = "prompt_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prompt_id: Mapped[int] = mapped_column(ForeignKey("prompts.id"), nullable=False)
+    version_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 class CachedResponse(Base):
     """A cached completion response with its embedding, for semantic-cache lookups."""
 

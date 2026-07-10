@@ -14,7 +14,7 @@ from starlette.requests import Request
 
 from gatekeep.accounting import calculate_cost, log_request
 from gatekeep.api.errors import map_provider_error, openai_error
-from gatekeep.api.openai_schemas import ChatCompletionRequest
+from gatekeep.api.openai_schemas import ChatCompletionRequest, ChatMessage
 from gatekeep.api.translation import (
     TranslationError,
     final_chunk,
@@ -40,6 +40,7 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
 from gatekeep.models import ApiKey
+from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
@@ -105,8 +106,20 @@ async def chat_completions(
     through to the provider, and the fresh response is written to both
     caches afterwards. Every completed request is logged via `log_request`
     for cost accounting.
+
+    If `prompt_name` is set on the request, the active template registered
+    under that name is resolved via `get_prompt` and prepended to
+    `req.messages` as a system message, ahead of any system/developer
+    messages the client also sent (openai_to_payload lifts and concatenates
+    all of them into one `system` string, in message order).
     """
     settings = get_settings()
+    if req.prompt_name is not None:
+        try:
+            template = await get_prompt(req.prompt_name, session)
+        except PromptNotFoundError as exc:
+            return openai_error(400, str(exc), "invalid_request_error")
+        req.messages = [ChatMessage(role="system", content=template)] + req.messages
     try:
         provider_name, payload = openai_to_payload(
             req,
