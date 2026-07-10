@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,13 +43,15 @@ async def store_cached_response(
     response_text: str,
     model: str,
     cost_usd: float,
+    prompt_name: str | None = None,
 ) -> CachedResponse | None:
     """Insert a new semantic-cache row and commit it.
 
     If a row with the same `exact_hash` was inserted concurrently by another
     request (unique-constraint violation), rolls back and returns None
     instead of raising, since the cache write is best-effort and the
-    original request's response has already been served.
+    original request's response has already been served. `prompt_name`, if
+    set, tags the row so a later prompt promotion can find and delete it.
     """
     row = CachedResponse(
         exact_hash=exact_hash,
@@ -58,6 +60,7 @@ async def store_cached_response(
         response_text=response_text,
         model=model,
         cost_usd=cost_usd,
+        prompt_name=prompt_name,
     )
     session.add(row)
     try:
@@ -66,6 +69,20 @@ async def store_cached_response(
         await session.rollback()
         return None
     return row
+
+
+async def delete_cached_responses_by_prompt(
+    session: AsyncSession, prompt_name: str
+) -> None:
+    """Delete every semantic-cache row tagged with `prompt_name`.
+
+    Does not commit; the caller (promote_prompt) commits this alongside its
+    own version-pointer change so both updates land in one transaction.
+    No-op if no rows are tagged with this prompt name.
+    """
+    await session.execute(
+        delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name)
+    )
 
 
 @dataclass

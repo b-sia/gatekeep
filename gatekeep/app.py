@@ -78,10 +78,14 @@ async def _http_exception_handler(
 
     FastAPI's default handler nests HTTPException.detail under a "detail"
     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
-    require_api_key raises), this returns it verbatim at the top level.
+    require_api_key and require_rate_limit raise), this returns it verbatim
+    at the top level. Preserves any headers set on the exception (e.g.
+    Retry-After from a 429), which would otherwise be silently dropped.
     """
     if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(
+            status_code=exc.status_code, content=exc.detail, headers=exc.headers
+        )
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
 
 

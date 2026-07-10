@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gatekeep.middleware.cache_exact import invalidate_prompt_cache
+from gatekeep.middleware.cache_semantic import delete_cached_responses_by_prompt
 from gatekeep.models import Prompt, PromptVersion
 
 
@@ -102,7 +105,7 @@ async def add_prompt_version(
 
 
 async def promote_prompt(
-    name: str, version_num: int, session: AsyncSession
+    name: str, version_num: int, session: AsyncSession, *, redis: Redis | None = None
 ) -> PromptVersion:
     """Atomically repoint a prompt's active version to an existing version_num.
 
@@ -114,6 +117,14 @@ async def promote_prompt(
     version_num - 1). Raises PromptNotFoundError if the prompt doesn't
     exist, or PromptVersionNotFoundError if version_num doesn't exist for
     it.
+
+    Every promotion invalidates the cache entries this prompt previously
+    produced, since they were built from substituted text that may no
+    longer match the newly-active template: semantic-cache rows tagged with
+    `name` are deleted in the same transaction as the version-pointer
+    change, and, if `redis` is given, exact-cache entries tagged with `name`
+    are deleted afterwards. Requests that never used `prompt_name` are
+    untouched by this.
     """
     prompt = await _get_prompt_row(name, session)
     target = (
@@ -137,12 +148,17 @@ async def promote_prompt(
 
     target.active = True
     prompt.active_version_id = target.id
+    await delete_cached_responses_by_prompt(session, name)
     await session.commit()
     await session.refresh(target)
+    if redis is not None:
+        await invalidate_prompt_cache(redis, name)
     return target
 
 
-async def rollback_prompt(name: str, session: AsyncSession) -> PromptVersion:
+async def rollback_prompt(
+    name: str, session: AsyncSession, *, redis: Redis | None = None
+) -> PromptVersion:
     """Revert a prompt to the version that was active immediately before its current one.
 
     Uses Prompt.previous_version_id, which promote_prompt keeps pointed at
@@ -162,7 +178,7 @@ async def rollback_prompt(name: str, session: AsyncSession) -> PromptVersion:
     if prompt.previous_version_id is None:
         raise ValueError(f"prompt {name!r} has no earlier version to roll back to")
     previous = await session.get(PromptVersion, prompt.previous_version_id)
-    return await promote_prompt(name, previous.version_num, session)
+    return await promote_prompt(name, previous.version_num, session, redis=redis)
 
 
 async def get_active_prompt_version(name: str, session: AsyncSession) -> PromptVersion:

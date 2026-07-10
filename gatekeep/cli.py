@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import sys
 
+from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -53,16 +55,18 @@ async def _show(name: str) -> None:
 
 
 async def _promote(name: str, version_num: int) -> None:
-    """Promote an existing prompt version to active."""
+    """Promote an existing prompt version to active, invalidating its cached responses."""
+    redis = get_redis(get_settings())
     async with SessionLocal() as session:
-        promoted = await promote_prompt(name, version_num, session)
+        promoted = await promote_prompt(name, version_num, session, redis=redis)
     print(f"promoted {name!r} to version {promoted.version_num}")
 
 
 async def _rollback(name: str) -> None:
-    """Revert a prompt to the version that was active immediately before its current one."""
+    """Revert a prompt to its previous version, invalidating its cached responses."""
+    redis = get_redis(get_settings())
     async with SessionLocal() as session:
-        rolled_back = await rollback_prompt(name, session)
+        rolled_back = await rollback_prompt(name, session, redis=redis)
     print(f"rolled back {name!r} to version {rolled_back.version_num}")
 
 

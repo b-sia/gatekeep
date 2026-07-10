@@ -38,6 +38,11 @@ def _redis_key(request_hash: str) -> str:
     return f"{_KEY_PREFIX}{request_hash}"
 
 
+def _by_prompt_key(prompt_name: str) -> str:
+    """Build the Redis key of the set indexing cache hashes tagged with a prompt name."""
+    return f"{_KEY_PREFIX}by-prompt:{prompt_name}"
+
+
 async def get_cached_response(
     redis: Redis, request_hash: str
 ) -> ChatCompletionResponse | None:
@@ -54,13 +59,33 @@ async def set_cached_response(
     response: ChatCompletionResponse,
     *,
     ttl_seconds: int,
+    prompt_name: str | None = None,
 ) -> None:
-    """Store a chat completion response in the exact-match cache with a TTL."""
+    """Store a chat completion response in the exact-match cache with a TTL.
+
+    If `prompt_name` is set, the request hash is also added to a per-prompt
+    Redis set (`cache:exact:by-prompt:{prompt_name}`) so a later prompt
+    promotion can find and invalidate every exact-cache entry it produced.
+    """
     await redis.set(
         _redis_key(request_hash), response.model_dump_json(), ex=ttl_seconds
     )
+    if prompt_name is not None:
+        await redis.sadd(_by_prompt_key(prompt_name), request_hash)
 
 
 async def clear_cached_response(redis: Redis, request_hash: str) -> None:
     """Manually invalidate one cached response by request hash."""
     await redis.delete(_redis_key(request_hash))
+
+
+async def invalidate_prompt_cache(redis: Redis, prompt_name: str) -> None:
+    """Delete every exact-cache entry tagged with `prompt_name`, plus its index set.
+
+    No-op if no cache entries have ever been tagged with this prompt name.
+    """
+    index_key = _by_prompt_key(prompt_name)
+    hashes = await redis.smembers(index_key)
+    if hashes:
+        await redis.delete(*(_redis_key(h) for h in hashes))
+    await redis.delete(index_key)

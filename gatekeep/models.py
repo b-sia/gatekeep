@@ -113,3 +113,4 @@ class CachedResponse(Base):
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
