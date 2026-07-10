@@ -1,11 +1,14 @@
+import json
+
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport
+from sqlalchemy import select
 
 import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.models import ApiKey
+from gatekeep.models import ApiKey, RequestLog
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
@@ -109,3 +112,53 @@ async def test_streaming_completion(client, raw_key):
     assert "chat.completion.chunk" in text
     assert '"content":"po"' in text
     assert "[DONE]" in text
+
+
+async def test_non_streaming_completion_logs_request(client, raw_key, session):
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+    response_id = r.json()["id"]
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == response_id)
+        )
+    ).scalar_one()
+    assert log.model == "claude-sonnet-5"
+    assert log.prompt_tokens == 3
+    assert log.completion_tokens == 1
+    assert log.total_tokens == 4
+    assert log.cached is False
+    assert log.cache_key is None
+
+
+async def test_streaming_completion_logs_request(client, raw_key, session):
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        chunks = [line async for line in r.aiter_lines()]
+    first_chunk = json.loads(chunks[0].removeprefix("data: "))
+    response_id = first_chunk["id"]
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == response_id)
+        )
+    ).scalar_one()
+    assert log.prompt_tokens == 3
+    assert log.completion_tokens == 2
+    assert log.total_tokens == 5
