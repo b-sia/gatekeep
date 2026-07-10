@@ -16,8 +16,9 @@ import pathlib
 from typing import AsyncGenerator
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse, FileResponse 
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -31,6 +32,20 @@ except ImportError:
     pass
 
 app = FastAPI(title="Gatekeep Demo Chat")
+
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    """Prevent caching of all responses in development."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+
+app.add_middleware(NoCacheMiddleware)
 
 # Configuration - point to your Gatekeep instance
 GATEKEEP_URL = os.getenv("GATEKEEP_URL", "http://localhost:8100")
@@ -51,7 +66,11 @@ async def index():
     import pathlib
     html_path = pathlib.Path(__file__).parent / "static" / "index.html"
     if html_path.exists():
-        return FileResponse(html_path, media_type="text/html")
+        response = FileResponse(html_path, media_type="text/html")
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     return {
         "message": "Chat demo API ready",
         "endpoints": {
