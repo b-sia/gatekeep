@@ -23,7 +23,7 @@ from gatekeep.api.translation import (
     text_chunk,
 )
 from gatekeep.config import get_settings
-from gatekeep.middleware.auth import require_api_key
+from gatekeep.middleware.ratelimit import require_rate_limit
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
@@ -74,14 +74,15 @@ async def healthz() -> dict[str, str]:
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
-    _key=Depends(require_api_key),
+    _key=Depends(require_rate_limit),
 ):
     """OpenAI-compatible chat completions endpoint, routed per-request by model.
 
-    Requires a valid API key. Translates the request to a provider-neutral
-    payload, resolves which provider (Anthropic or Ollama) should serve the
-    requested model, then either streams the response as SSE (when
-    `stream: true`) or returns a single OpenAI-shaped JSON completion.
+    Requires a valid, rate-limit-unexhausted API key. Translates the request
+    to a provider-neutral payload, resolves which provider (Anthropic or
+    Ollama) should serve the requested model, then either streams the
+    response as SSE (when `stream: true`) or returns a single OpenAI-shaped
+    JSON completion.
     """
     settings = get_settings()
     try:
