@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import ollama
+from redis.exceptions import RedisError
 from anthropic import AsyncAnthropic
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
@@ -55,6 +57,8 @@ from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
 
@@ -162,7 +166,13 @@ async def chat_completions(
 
     redis = get_redis(settings)
     request_hash = hash_request(payload)
-    cached = await get_cached_response(redis, request_hash)
+    try:
+        cached = await get_cached_response(redis, request_hash)
+    except RedisError:
+        logger.warning(
+            "Exact cache lookup failed (Redis unavailable); treating as a cache miss."
+        )
+        cached = None
     if cached is not None:
         cache_exact_hits.labels(model=model).inc()
         cost_usd = calculate_cost(
@@ -232,13 +242,18 @@ async def chat_completions(
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error(exc)
     response = result_to_openai(result, model=model)
-    await set_cached_response(
-        redis,
-        request_hash,
-        response,
-        ttl_seconds=settings.cache_exact_ttl_seconds,
-        prompt_name=req.prompt_name,
-    )
+    try:
+        await set_cached_response(
+            redis,
+            request_hash,
+            response,
+            ttl_seconds=settings.cache_exact_ttl_seconds,
+            prompt_name=req.prompt_name,
+        )
+    except RedisError:
+        logger.warning(
+            "Exact cache write failed (Redis unavailable); serving response uncached."
+        )
     if embedding is not None:
         await store_cached_response(
             session,

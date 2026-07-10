@@ -2,6 +2,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 
 import gatekeep.app as app_module
@@ -267,3 +268,55 @@ async def test_streaming_requests_bypass_cache(client, raw_key, counting_provide
     ) as r:
         [line async for line in r.aiter_lines()]
     assert counting_provider.calls == 2
+
+
+# -- fail-open on a Redis outage -------------------------------------------
+
+
+async def test_cache_lookup_failure_falls_through_to_provider(
+    client, raw_key, counting_provider, monkeypatch
+):
+    """A Redis outage on the cache-read path must not 500 the request."""
+    redis = get_redis()
+
+    async def _broken_get(*args, **kwargs):
+        raise RedisConnectionError("simulated Redis outage")
+
+    monkeypatch.setattr(redis, "get", _broken_get)
+
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "fail-open-get"}],
+    }
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body,
+    )
+    assert r.status_code == 200
+    assert counting_provider.calls == 1
+
+
+async def test_cache_write_failure_still_returns_provider_response(
+    client, raw_key, counting_provider, monkeypatch
+):
+    """A Redis outage on the cache-write path must not 500 the request."""
+    redis = get_redis()
+
+    async def _broken_set(*args, **kwargs):
+        raise RedisConnectionError("simulated Redis outage")
+
+    monkeypatch.setattr(redis, "set", _broken_set)
+
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "fail-open-set"}],
+    }
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body,
+    )
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "pong"
+    assert counting_provider.calls == 1

@@ -5,6 +5,7 @@ import time
 
 from fastapi import Depends, HTTPException
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from gatekeep.config import Settings, get_settings
 from gatekeep.middleware.auth import require_api_key
@@ -78,6 +79,25 @@ def _too_many_requests(retry_after: int) -> HTTPException:
     )
 
 
+def _rate_limiter_unavailable() -> HTTPException:
+    """Build a 503 HTTPException with an OpenAI-shaped body for a rate-limiter outage.
+
+    Rate limiting fails closed: if Redis is unreachable we can't verify a
+    key's remaining budget, and letting requests through unchecked risks
+    unbounded spend during the outage, so the request is rejected instead.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "message": "Rate limiter temporarily unavailable. Please retry shortly.",
+                "type": "service_unavailable_error",
+                "code": None,
+            }
+        },
+    )
+
+
 async def check_rate_limit(
     redis: Redis,
     key_id: int,
@@ -108,14 +128,20 @@ async def require_rate_limit(key: ApiKey = Depends(require_api_key)) -> ApiKey:
 
     Chains after `require_api_key` so it has the resolved `ApiKey.id` to use
     as the Redis bucket key. Raises `HTTPException(429)` with a Retry-After
-    header when the key's bucket has no tokens left.
+    header when the key's bucket has no tokens left. Fails closed: if Redis
+    itself is unreachable, raises `HTTPException(503)` rather than either
+    silently letting the request through or crashing with an unhandled 500,
+    since fail-open on spend controls during an outage is the bigger risk.
     """
     settings = get_settings()
     redis = get_redis(settings)
     capacity = settings.rate_limit_tokens_per_min
     refill_rate = settings.rate_limit_refill_rate
 
-    allowed, tokens = await check_rate_limit(redis, key.id, capacity, refill_rate)
+    try:
+        allowed, tokens = await check_rate_limit(redis, key.id, capacity, refill_rate)
+    except RedisError:
+        raise _rate_limiter_unavailable() from None
     rate_limit_remaining.labels(key_id=str(key.id)).set(tokens)
     if not allowed:
         deficit = 1 - tokens

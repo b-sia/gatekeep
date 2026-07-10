@@ -34,7 +34,9 @@ async def test_check_rate_limit_allows_up_to_capacity():
 async def test_check_rate_limit_rejects_once_exhausted():
     redis = get_redis()
     for _ in range(2):
-        await check_rate_limit(redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0)
+        await check_rate_limit(
+            redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0
+        )
     allowed, remaining = await check_rate_limit(
         redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0
     )
@@ -80,7 +82,9 @@ async def test_require_rate_limit_allows_when_tokens_available(session, monkeypa
     assert result.id == key.id
 
 
-async def test_require_rate_limit_rejects_with_429_and_retry_after(session, monkeypatch):
+async def test_require_rate_limit_rejects_with_429_and_retry_after(
+    session, monkeypatch
+):
     from gatekeep.config import get_settings
 
     settings = get_settings()
@@ -100,3 +104,28 @@ async def test_require_rate_limit_rejects_with_429_and_retry_after(session, monk
     assert ei.value.detail["error"]["type"] == "rate_limit_error"
     assert "Retry-After" in ei.value.headers
     assert int(ei.value.headers["Retry-After"]) >= 1
+
+
+async def test_require_rate_limit_fails_closed_with_503_on_redis_outage(
+    session, monkeypatch
+):
+    """A Redis outage during the rate-limit check must reject with 503, not 500 or pass through."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    redis_client = get_redis()
+
+    async def _broken_eval(*args, **kwargs):
+        raise RedisConnectionError("simulated Redis outage")
+
+    monkeypatch.setattr(redis_client, "eval", _broken_eval)
+
+    raw = generate_key()
+    key = ApiKey(name="c", key_hash=hash_key(raw))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    with pytest.raises(HTTPException) as ei:
+        await require_rate_limit(key=key)
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error"]["type"] == "service_unavailable_error"
