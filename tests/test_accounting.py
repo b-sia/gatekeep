@@ -74,3 +74,28 @@ async def test_log_request_can_record_cache_hit(session):
     )
     assert log.cached is True
     assert log.cache_key == "abc123"
+
+
+async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
+    session,
+):
+    raw = generate_key()
+    key = ApiKey(name="c", key_hash=hash_key(raw))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    log = await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=0,
+        completion_tokens=0,
+        response_id="chatcmpl-semantic-hit",
+        cached=True,
+        cache_key="semantic",
+        cost_usd_override=0.0042,
+    )
+
+    assert log.cost_usd == 0.0042
+    assert log.cost_usd != calculate_cost("claude-sonnet-5", 0, 0)

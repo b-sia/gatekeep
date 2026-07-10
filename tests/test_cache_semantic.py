@@ -89,10 +89,53 @@ async def test_store_cached_response_persists_row(session):
     assert row.model == "claude-sonnet-5"
 
 
+async def test_store_cached_response_ignores_duplicate_exact_hash(session):
+    """A concurrent second insert with the same exact_hash must not raise;
+    the losing write is simply skipped."""
+    embedding = embed_text("what is the capital of France?")
+    first = await store_cached_response(
+        session,
+        exact_hash="dup-hash",
+        user_messages_text="what is the capital of France?",
+        embedding=embedding,
+        response_text="Paris",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+    )
+    assert first is not None
+
+    second = await store_cached_response(
+        session,
+        exact_hash="dup-hash",
+        user_messages_text="what is the capital of France?",
+        embedding=embedding,
+        response_text="Paris (from the losing request)",
+        model="claude-sonnet-5",
+        cost_usd=0.002,
+    )
+    assert second is None
+
+    rows = (
+        (
+            await session.execute(
+                select(CachedResponse).where(CachedResponse.exact_hash == "dup-hash")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].response_text == "Paris"
+
+
 async def test_find_semantic_match_returns_none_when_empty(session):
     embedding = embed_text("anything")
     match = await find_semantic_match(
-        session, embedding, threshold=0.95, max_age_seconds=604800
+        session,
+        embedding,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
     )
     assert match is None
 
@@ -110,10 +153,36 @@ async def test_find_semantic_match_finds_similar_above_threshold(session):
     )
     query_embedding = embed_text("What is the capital of France?")
     match = await find_semantic_match(
-        session, query_embedding, threshold=0.95, max_age_seconds=604800
+        session,
+        query_embedding,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
     )
     assert match is not None
     assert match.response_text == "Paris"
+
+
+async def test_find_semantic_match_ignores_row_from_different_model(session):
+    stored_text = "What is the capital of France?"
+    await store_cached_response(
+        session,
+        exact_hash="hash-diff-model",
+        user_messages_text=stored_text,
+        embedding=embed_text(stored_text),
+        response_text="Paris",
+        model="claude-haiku-4-5-20251001",
+        cost_usd=0.001,
+    )
+    query_embedding = embed_text(stored_text)
+    match = await find_semantic_match(
+        session,
+        query_embedding,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+    )
+    assert match is None
 
 
 async def test_find_semantic_match_none_below_threshold(session):
@@ -128,7 +197,11 @@ async def test_find_semantic_match_none_below_threshold(session):
     )
     query_embedding = embed_text("Please write a haiku about a walrus.")
     match = await find_semantic_match(
-        session, query_embedding, threshold=0.95, max_age_seconds=604800
+        session,
+        query_embedding,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
     )
     assert match is None
 
@@ -149,7 +222,11 @@ async def test_find_semantic_match_excludes_expired_rows(session):
 
     query_embedding = embed_text(stored_text)
     match = await find_semantic_match(
-        session, query_embedding, threshold=0.95, max_age_seconds=500
+        session,
+        query_embedding,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=500,
     )
     assert match is None
 
@@ -306,6 +383,63 @@ async def test_dissimilar_requests_both_call_provider(
         json=body2,
     )
     assert counting_provider.calls == 2
+
+
+async def test_semantically_similar_request_against_different_model_misses_cache(
+    client, raw_key, counting_provider
+):
+    """A cached response for one resolved model must not serve a request that
+    resolves to a different model, even if the prompts are near-identical."""
+    body1 = {
+        "model": "gpt-4o",  # resolves to claude-sonnet-5
+        "messages": [{"role": "user", "content": "What is the capital of Italy?"}],
+    }
+    body2 = {
+        "model": "gpt-4o-mini",  # resolves to claude-haiku-4-5-20251001
+        "messages": [{"role": "user", "content": "What's the capital city of Italy?"}],
+    }
+    r1 = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body1,
+    )
+    r2 = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body2,
+    )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert counting_provider.calls == 2
+
+
+async def test_concurrent_identical_requests_both_succeed(
+    client, raw_key, counting_provider
+):
+    """Two concurrent requests with identical text can both miss the caches
+    and race to write the same exact_hash cache row; the client-visible
+    response must still succeed for both, even though only one cache write
+    wins."""
+    import asyncio
+
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "What is the capital of Portugal?"}],
+    }
+    r1, r2 = await asyncio.gather(
+        client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        ),
+        client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        ),
+    )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
 
 
 async def test_streaming_requests_bypass_semantic_cache(

@@ -33,19 +33,27 @@ async def log_request(
     response_id: str,
     cached: bool = False,
     cache_key: str | None = None,
+    cost_usd_override: float | None = None,
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
-    Cost is derived via calculate_cost. `cached`/`cache_key` default to a
-    non-cache-hit request, since no caching layer exists yet.
+    Cost is derived via calculate_cost, unless `cost_usd_override` is given,
+    in which case that value is used directly (e.g. a semantic-cache hit
+    logging the original generation's cost instead of $0). `cached`/
+    `cache_key` default to a non-cache-hit request.
     """
+    cost_usd = (
+        cost_usd_override
+        if cost_usd_override is not None
+        else calculate_cost(model, prompt_tokens, completion_tokens)
+    )
     log = RequestLog(
         key_id=key_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        cost_usd=calculate_cost(model, prompt_tokens, completion_tokens),
+        cost_usd=cost_usd,
         cached=cached,
         cache_key=cache_key,
         response_id=response_id,

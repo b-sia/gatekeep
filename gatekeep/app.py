@@ -147,6 +147,7 @@ async def chat_completions(
         semantic_match = await find_semantic_match(
             session,
             embedding,
+            model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
         )
@@ -161,6 +162,7 @@ async def chat_completions(
                 response_id=semantic_response.id,
                 cached=True,
                 cache_key="semantic",
+                cost_usd_override=semantic_match.cost_usd,
             )
             return JSONResponse(content=semantic_response.model_dump())
 

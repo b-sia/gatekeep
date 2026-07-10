@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.api.openai_schemas import (
@@ -41,8 +42,14 @@ async def store_cached_response(
     response_text: str,
     model: str,
     cost_usd: float,
-) -> CachedResponse:
-    """Insert a new semantic-cache row and commit it."""
+) -> CachedResponse | None:
+    """Insert a new semantic-cache row and commit it.
+
+    If a row with the same `exact_hash` was inserted concurrently by another
+    request (unique-constraint violation), rolls back and returns None
+    instead of raising, since the cache write is best-effort and the
+    original request's response has already been served.
+    """
     row = CachedResponse(
         exact_hash=exact_hash,
         user_messages_text=user_messages_text,
@@ -52,7 +59,11 @@ async def store_cached_response(
         cost_usd=cost_usd,
     )
     session.add(row)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return None
     return row
 
 
@@ -60,6 +71,7 @@ async def find_semantic_match(
     session: AsyncSession,
     embedding: list[float],
     *,
+    model: str,
     threshold: float,
     max_age_seconds: int,
 ) -> CachedResponse | None:
@@ -67,13 +79,16 @@ async def find_semantic_match(
 
     Similarity is cosine similarity (1 - cosine_distance). Rows older than
     `max_age_seconds` are excluded, matching the exact cache's TTL so both
-    caches invalidate together.
+    caches invalidate together. Only rows cached for the same `model` are
+    considered, so a semantically-similar prompt never returns a different
+    model's cached answer.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     distance = CachedResponse.embedding.cosine_distance(embedding)
     stmt = (
         select(CachedResponse, distance.label("distance"))
         .where(CachedResponse.created_at >= cutoff)
+        .where(CachedResponse.model == model)
         .order_by(distance)
         .limit(1)
     )
