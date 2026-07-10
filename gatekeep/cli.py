@@ -60,7 +60,7 @@ async def _promote(name: str, version_num: int) -> None:
 
 
 async def _rollback(name: str) -> None:
-    """Revert a prompt's active version to version_num - 1."""
+    """Revert a prompt to the version that was active immediately before its current one."""
     async with SessionLocal() as session:
         rolled_back = await rollback_prompt(name, session)
     print(f"rolled back {name!r} to version {rolled_back.version_num}")

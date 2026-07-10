@@ -63,6 +63,14 @@ class Prompt(Base):
         ),
         nullable=True,
     )
+    previous_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "prompt_versions.id",
+            use_alter=True,
+            name="fk_prompts_previous_version_id",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

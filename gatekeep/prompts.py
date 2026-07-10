@@ -108,9 +108,12 @@ async def promote_prompt(
 
     Flips the previously-active version's `active` flag to False and the
     newly-active one to True, keeping the denormalized flag consistent with
-    Prompt.active_version_id. Raises PromptNotFoundError if the prompt
-    doesn't exist, or PromptVersionNotFoundError if version_num doesn't
-    exist for it.
+    Prompt.active_version_id. Also records the version being promoted away
+    from in Prompt.previous_version_id, so rollback_prompt can revert to the
+    version that was actually active before this promotion (not just
+    version_num - 1). Raises PromptNotFoundError if the prompt doesn't
+    exist, or PromptVersionNotFoundError if version_num doesn't exist for
+    it.
     """
     prompt = await _get_prompt_row(name, session)
     target = (
@@ -130,6 +133,7 @@ async def promote_prompt(
         previous = await session.get(PromptVersion, prompt.active_version_id)
         if previous is not None:
             previous.active = False
+        prompt.previous_version_id = prompt.active_version_id
 
     target.active = True
     prompt.active_version_id = target.id
@@ -139,25 +143,26 @@ async def promote_prompt(
 
 
 async def rollback_prompt(name: str, session: AsyncSession) -> PromptVersion:
-    """Revert a prompt to the version immediately before its current active one.
+    """Revert a prompt to the version that was active immediately before its current one.
 
-    Interpretation: the schema has no promotion-history table, so "previous
-    version" is read as version_num - 1 relative to whatever is currently
-    active (not necessarily what was active immediately before the last
-    promote call, if promotions skipped versions). This is the simplest
-    reading of "revert to previous version" given the schema; if a richer
-    interpretation (true promotion history) is wanted, that requires a
-    schema change and is flagged as a concern rather than guessed at.
+    Uses Prompt.previous_version_id, which promote_prompt keeps pointed at
+    whatever was active right before the most recent promotion - this is
+    real promotion history, not a guess based on version numbers, so it
+    correctly handles prompts with drafted-but-never-promoted versions in
+    between. Because rollback itself goes through promote_prompt, rolling
+    back twice in a row toggles between the last two actually-active
+    versions.
 
     Raises PromptNotFoundError if the prompt doesn't exist, or ValueError if
-    the active version is already version 1 (nothing to roll back to).
+    there is no recorded previous version to roll back to (e.g. the prompt
+    has only ever had one version, or has never been promoted since
+    creation).
     """
     prompt = await _get_prompt_row(name, session)
-    current = await session.get(PromptVersion, prompt.active_version_id)
-    target_num = current.version_num - 1
-    if target_num < 1:
+    if prompt.previous_version_id is None:
         raise ValueError(f"prompt {name!r} has no earlier version to roll back to")
-    return await promote_prompt(name, target_num, session)
+    previous = await session.get(PromptVersion, prompt.previous_version_id)
+    return await promote_prompt(name, previous.version_num, session)
 
 
 async def get_active_prompt_version(name: str, session: AsyncSession) -> PromptVersion:

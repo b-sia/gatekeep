@@ -87,7 +87,7 @@ async def test_promote_raises_for_unknown_prompt(session):
         await promote_prompt("does-not-exist", 1, session)
 
 
-async def test_rollback_reverts_to_version_minus_one(session):
+async def test_rollback_reverts_to_previously_active_version(session):
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
     await promote_prompt("system-context", 2, session)
@@ -99,10 +99,38 @@ async def test_rollback_reverts_to_version_minus_one(session):
     assert template == "v1"
 
 
-async def test_rollback_raises_when_already_at_version_1(session):
+async def test_rollback_raises_when_no_previous_version_recorded(session):
     await create_prompt("system-context", "v1", session)
     with pytest.raises(ValueError):
         await rollback_prompt("system-context", session)
+
+
+async def test_rollback_skips_drafted_but_never_promoted_version(session):
+    # create v1 (active) -> add-version v2 (never promoted) -> add-version v3
+    # -> promote v3 -> rollback should go to v1 (the last *actually active*
+    # version), NOT v2, which was drafted but never live.
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await add_prompt_version("system-context", "v3 text", session)
+    await promote_prompt("system-context", 3, session)
+
+    rolled_back = await rollback_prompt("system-context", session)
+    assert rolled_back.version_num == 1
+
+    template = await get_prompt("system-context", session)
+    assert template == "v1"
+
+
+async def test_rollback_twice_toggles_between_last_two_active_versions(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await promote_prompt("system-context", 2, session)
+
+    first_rollback = await rollback_prompt("system-context", session)
+    assert first_rollback.version_num == 1
+
+    second_rollback = await rollback_prompt("system-context", session)
+    assert second_rollback.version_num == 2
 
 
 async def test_list_prompts_returns_all_prompts(session):
