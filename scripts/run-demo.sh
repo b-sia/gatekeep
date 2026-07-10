@@ -2,7 +2,9 @@
 set -e
 
 # Helper script to run the complete Gatekeep + Demo setup
-# This starts both the gateway and demo app, and initializes a test key
+# This starts both the gateway and demo app.
+# Requires GATEKEEP_API_KEY to already be set in .env - run
+# scripts/init-test-key.sh first if you don't have a key yet.
 
 echo "🚀 Starting Gatekeep Demo Setup"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -19,14 +21,15 @@ else
     echo "✅ Gatekeep server is running"
 fi
 
-# Initialize test key if needed
-echo ""
-echo "🔑 Initializing API key..."
-INIT_OUTPUT=$(bash scripts/init-test-key.sh test-key true)
-echo "$INIT_OUTPUT" | grep -v "^Raw Key:"
-
-# Extract the actual API key that init-test-key.sh inserted into the database
-API_KEY=$(echo "$INIT_OUTPUT" | sed -n 's/^Raw Key: *//p')
+# Make sure a GATEKEEP_API_KEY is configured before starting the demo
+if [ -f .env ]; then
+    GATEKEEP_API_KEY=$(grep "^GATEKEEP_API_KEY=" .env | cut -d= -f2)
+fi
+if [ -z "$GATEKEEP_API_KEY" ]; then
+    echo "❌ Error: GATEKEEP_API_KEY is not set in .env"
+    echo "   Run: bash scripts/init-test-key.sh"
+    exit 1
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -39,8 +42,8 @@ echo ""
 echo "💬 Demo Chat App:"
 echo "   http://localhost:8200"
 echo ""
-echo "🔑 Test API Key:"
-echo "   $API_KEY"
+echo "🔑 Using API Key from .env:"
+echo "   $GATEKEEP_API_KEY"
 echo ""
 
 # Check if demo dependencies are installed
