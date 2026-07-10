@@ -1,25 +1,18 @@
 from gatekeep.app import get_provider
-from gatekeep.config import get_settings
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.ollama import OllamaProvider
 
 
-def _set_common_env(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
-    monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-
-
-def test_get_provider_returns_anthropic_by_default(monkeypatch):
-    _set_common_env(monkeypatch)
-    get_settings.cache_clear()
-    provider = get_provider()
+def test_get_provider_returns_anthropic_instance():
+    provider = get_provider("anthropic")
     assert isinstance(provider, AnthropicProvider)
 
 
-def test_get_provider_returns_ollama_when_configured(monkeypatch):
-    _set_common_env(monkeypatch)
-    monkeypatch.setenv("PROVIDER", "ollama")
-    get_settings.cache_clear()
-    provider = get_provider()
+def test_get_provider_returns_ollama_instance():
+    provider = get_provider("ollama")
     assert isinstance(provider, OllamaProvider)
+
+
+def test_get_provider_returns_same_instance_across_calls():
+    assert get_provider("anthropic") is get_provider("anthropic")
+    assert get_provider("ollama") is get_provider("ollama")

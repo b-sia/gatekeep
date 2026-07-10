@@ -2,7 +2,8 @@ import httpx
 import pytest_asyncio
 from httpx import ASGITransport
 
-from gatekeep.app import app, get_provider
+import gatekeep.app as app_module
+from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.models import ApiKey
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
@@ -11,7 +12,9 @@ from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 class FakeProvider:
     async def complete(self, payload):
         assert "temperature" not in payload
-        return CompletionResult(text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn")
+        return CompletionResult(
+            text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn"
+        )
 
     async def stream(self, payload):
         for t in ["po", "ng"]:
@@ -28,12 +31,13 @@ async def raw_key(session):
 
 
 @pytest_asyncio.fixture
-async def client():
-    app.dependency_overrides[get_provider] = lambda: FakeProvider()
+async def client(monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", fake)
+    monkeypatch.setitem(app_module._providers, "ollama", fake)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 async def test_healthz(client):

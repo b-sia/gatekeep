@@ -17,7 +17,7 @@ from gatekeep.api.translation import (
     TranslationError,
     final_chunk,
     new_completion_id,
-    openai_to_anthropic,
+    openai_to_payload,
     result_to_openai,
     role_chunk,
     text_chunk,
@@ -29,6 +29,17 @@ from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
 
 app = FastAPI(title="gatekeep")
+
+_settings = get_settings()
+_providers: dict[str, AnthropicProvider | OllamaProvider] = {
+    "anthropic": AnthropicProvider(AsyncAnthropic(api_key=_settings.anthropic_api_key)),
+    "ollama": OllamaProvider(ollama.AsyncClient(host=_settings.ollama_host)),
+}
+
+
+def get_provider(name: str) -> AnthropicProvider | OllamaProvider:
+    """Look up the pre-built provider instance for a resolved provider name."""
+    return _providers[name]
 
 
 @app.exception_handler(FastAPIHTTPException)
@@ -54,20 +65,6 @@ async def _validation_exception_handler(
     return openai_error(400, str(exc), "invalid_request_error")
 
 
-def get_provider() -> AnthropicProvider | OllamaProvider:
-    """FastAPI dependency constructing a provider from settings.
-
-    Returns an OllamaProvider when `settings.provider` is "ollama"
-    (for free local testing), otherwise an AnthropicProvider.
-    """
-    settings = get_settings()
-    if settings.provider == "ollama":
-        client = ollama.AsyncClient(host=settings.ollama_host)
-        return OllamaProvider(client)
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return AnthropicProvider(client)
-
-
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     """Liveness check."""
@@ -78,25 +75,25 @@ async def healthz() -> dict[str, str]:
 async def chat_completions(
     req: ChatCompletionRequest,
     _key=Depends(require_api_key),
-    provider: AnthropicProvider | OllamaProvider = Depends(get_provider),
 ):
-    """OpenAI-compatible chat completions endpoint, proxying to the configured provider.
+    """OpenAI-compatible chat completions endpoint, routed per-request by model.
 
-    Requires a valid API key. Translates the request to Anthropic's Messages
-    API shape, then either streams the response as SSE (when `stream: true`) or
-    returns a single OpenAI-shaped JSON completion.
+    Requires a valid API key. Translates the request to a provider-neutral
+    payload, resolves which provider (Anthropic or Ollama) should serve the
+    requested model, then either streams the response as SSE (when
+    `stream: true`) or returns a single OpenAI-shaped JSON completion.
     """
     settings = get_settings()
     try:
-        payload = openai_to_anthropic(
+        provider_name, payload = openai_to_payload(
             req,
             default_max_tokens=settings.default_max_tokens,
-            default_model=settings.default_model,
             model_aliases=settings.model_aliases,
         )
     except TranslationError as exc:
         return openai_error(400, str(exc), "invalid_request_error")
 
+    provider = get_provider(provider_name)
     model = payload["model"]
 
     if req.stream:

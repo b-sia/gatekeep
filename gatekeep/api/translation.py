@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from gatekeep.api.openai_schemas import (
     ChatCompletionChunk,
@@ -33,34 +33,34 @@ def _extract_text(content: Any) -> str:
     return "".join(parts)
 
 
-def resolve_model(
-    requested: str, *, default_model: str, aliases: dict[str, str]
-) -> str:
-    """Map a client-requested model name to a Claude model ID.
+def resolve_route(
+    requested: str, *, aliases: dict[str, str]
+) -> tuple[Literal["anthropic", "ollama"], str]:
+    """Determine which provider should serve `requested` and its resolved model id.
 
     Checks the alias table first, passes through anything already prefixed
-    `claude-`, and otherwise falls back to `default_model`.
+    `claude-` as Anthropic, and otherwise routes to Ollama with the model
+    name unchanged (assumed to be a local Ollama tag).
     """
     if requested in aliases:
-        return aliases[requested]
+        return "anthropic", aliases[requested]
     if requested.startswith("claude-"):
-        return requested
-    return default_model
+        return "anthropic", requested
+    return "ollama", requested
 
 
-def openai_to_anthropic(
+def openai_to_payload(
     req: ChatCompletionRequest,
     *,
     default_max_tokens: int,
-    default_model: str,
     model_aliases: dict[str, str],
-) -> dict[str, Any]:
-    """Build an Anthropic Messages API payload from an OpenAI chat completion request.
+) -> tuple[Literal["anthropic", "ollama"], dict[str, Any]]:
+    """Build a provider-neutral completion payload from an OpenAI chat completion request.
 
-    Lifts `system`/`developer` messages into a single Anthropic `system` string,
-    resolves the model via `resolve_model`, and always sets `max_tokens`.
-    Sampling parameters (`temperature`/`top_p`/`top_k`) are never forwarded,
-    since Anthropic rejects non-default values for them.
+    Lifts `system`/`developer` messages into a single `system` string,
+    resolves the target provider and model via `resolve_route`, and always
+    sets `max_tokens`. Sampling parameters (`temperature`/`top_p`/`top_k`)
+    are never forwarded, since Anthropic rejects non-default values for them.
 
     Raises TranslationError if a message role is unsupported or no
     user/assistant message remains after lifting system content out.
@@ -82,10 +82,10 @@ def openai_to_anthropic(
             "request must contain at least one user or assistant message"
         )
 
+    provider, model = resolve_route(req.model, aliases=model_aliases)
+
     payload: dict[str, Any] = {
-        "model": resolve_model(
-            req.model, default_model=default_model, aliases=model_aliases
-        ),
+        "model": model,
         "messages": messages,
         "max_tokens": req.max_tokens or req.max_completion_tokens or default_max_tokens,
     }
@@ -96,7 +96,7 @@ def openai_to_anthropic(
             [req.stop] if isinstance(req.stop, str) else list(req.stop)
         )
     # temperature/top_p/top_k intentionally omitted (rejected by Sonnet 5 / Opus 4.8).
-    return payload
+    return provider, payload
 
 
 def new_completion_id() -> str:

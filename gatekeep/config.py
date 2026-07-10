@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,7 +14,6 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
     anthropic_api_key: str
-    provider: Literal["anthropic", "ollama"] = "anthropic"
     ollama_host: str = "http://localhost:11434"
     default_model: str = "claude-sonnet-5"
     default_max_tokens: int = 4096

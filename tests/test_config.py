@@ -1,4 +1,3 @@
-import gatekeep.config as config_module
 from gatekeep.config import Settings, get_settings
 
 
@@ -6,6 +5,9 @@ def test_settings_reads_env(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
     monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    # Isolate from whatever DEFAULT_MODEL currently happens to be in the
+    # repo's local .env file, which Settings otherwise falls back to.
+    monkeypatch.setenv("DEFAULT_MODEL", "claude-sonnet-5")
     get_settings.cache_clear()
     s = get_settings()
     assert isinstance(s, Settings)
@@ -23,23 +25,20 @@ def test_unknown_model_alias_default(monkeypatch):
     assert s.model_aliases["gpt-4"] == "claude-sonnet-5"
 
 
-def test_provider_defaults_to_anthropic(monkeypatch):
+def test_ollama_host_defaults_to_localhost(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
     monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     get_settings.cache_clear()
     s = get_settings()
-    assert s.provider == "anthropic"
     assert s.ollama_host == "http://localhost:11434"
 
 
-def test_provider_reads_ollama_from_env(monkeypatch):
+def test_ollama_host_reads_from_env(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
     monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    monkeypatch.setenv("PROVIDER", "ollama")
     monkeypatch.setenv("OLLAMA_HOST", "http://ollama-box:11434")
     get_settings.cache_clear()
     s = get_settings()
-    assert s.provider == "ollama"
     assert s.ollama_host == "http://ollama-box:11434"

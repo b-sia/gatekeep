@@ -6,8 +6,8 @@ from gatekeep.api.openai_schemas import ChatCompletionRequest
 from gatekeep.api.translation import (
     TranslationError,
     final_chunk,
-    openai_to_anthropic,
-    resolve_model,
+    openai_to_payload,
+    resolve_route,
     result_to_openai,
     role_chunk,
     text_chunk,
@@ -31,21 +31,20 @@ def _req(**kw):
     return ChatCompletionRequest.model_validate(base)
 
 
-def test_resolve_model_alias_passthrough_default():
-    assert (
-        resolve_model("gpt-4o", default_model="claude-sonnet-5", aliases=ALIASES)
-        == "claude-sonnet-5"
+def test_resolve_route_alias_hit_routes_anthropic():
+    assert resolve_route("gpt-4o", aliases=ALIASES) == ("anthropic", "claude-sonnet-5")
+
+
+def test_resolve_route_claude_prefix_routes_anthropic():
+    assert resolve_route("claude-opus-4-8", aliases=ALIASES) == (
+        "anthropic",
+        "claude-opus-4-8",
     )
-    assert (
-        resolve_model(
-            "claude-opus-4-8", default_model="claude-sonnet-5", aliases=ALIASES
-        )
-        == "claude-opus-4-8"
-    )
-    assert (
-        resolve_model("mystery", default_model="claude-sonnet-5", aliases=ALIASES)
-        == "claude-sonnet-5"
-    )
+
+
+def test_resolve_route_unrecognized_routes_ollama_unchanged():
+    assert resolve_route("llama3.2", aliases=ALIASES) == ("ollama", "llama3.2")
+    assert resolve_route("mystery", aliases=ALIASES) == ("ollama", "mystery")
 
 
 def test_system_message_lifted_and_sampling_dropped():
@@ -58,12 +57,12 @@ def test_system_message_lifted_and_sampling_dropped():
         top_p=0.5,
         max_tokens=100,
     )
-    payload = openai_to_anthropic(
+    provider, payload = openai_to_payload(
         req,
         default_max_tokens=4096,
-        default_model="claude-sonnet-5",
         model_aliases=ALIASES,
     )
+    assert provider == "anthropic"
     assert payload["system"] == "be terse"
     assert payload["messages"] == [{"role": "user", "content": "hi"}]
     assert payload["max_tokens"] == 100
@@ -73,22 +72,30 @@ def test_system_message_lifted_and_sampling_dropped():
 
 
 def test_default_max_tokens_applied():
-    payload = openai_to_anthropic(
+    provider, payload = openai_to_payload(
         _req(),
         default_max_tokens=777,
-        default_model="claude-sonnet-5",
         model_aliases=ALIASES,
     )
     assert payload["max_tokens"] == 777
 
 
+def test_unrecognized_model_routes_ollama():
+    provider, payload = openai_to_payload(
+        _req(model="llama3.2"),
+        default_max_tokens=4096,
+        model_aliases=ALIASES,
+    )
+    assert provider == "ollama"
+    assert payload["model"] == "llama3.2"
+
+
 def test_no_conversational_message_raises():
     req = _req(messages=[{"role": "system", "content": "only system"}])
     with pytest.raises(TranslationError):
-        openai_to_anthropic(
+        openai_to_payload(
             req,
             default_max_tokens=10,
-            default_model="claude-sonnet-5",
             model_aliases=ALIASES,
         )
 
