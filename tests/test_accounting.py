@@ -17,6 +17,15 @@ def test_calculate_cost_scales_linearly():
     assert cost == 1.0
 
 
+def test_calculate_cost_haiku_alias_is_priced():
+    cost = calculate_cost(
+        "claude-haiku-4-5-20251001",
+        prompt_tokens=1_000_000,
+        completion_tokens=1_000_000,
+    )
+    assert cost > 0.0
+
+
 def test_calculate_cost_unknown_model_is_free():
     cost = calculate_cost(
         "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000

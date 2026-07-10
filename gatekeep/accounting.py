@@ -6,8 +6,12 @@ from gatekeep.models import RequestLog
 
 # Per-model USD pricing as (input_price_per_1m_tokens, output_price_per_1m_tokens).
 # Models not listed here (e.g. locally-served Ollama models) cost $0.
+# claude-haiku-4-5-20251001 pricing is an approximate estimate consistent with
+# Haiku's usual cost tier relative to Sonnet; reconcile with current published
+# Anthropic pricing before relying on it for exact billing.
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (2.0, 10.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
 
 
