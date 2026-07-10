@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from gatekeep.accounting import log_request
+from gatekeep.accounting import calculate_cost, log_request
 from gatekeep.api.errors import map_provider_error, openai_error
 from gatekeep.api.openai_schemas import ChatCompletionRequest
 from gatekeep.api.translation import (
@@ -26,10 +26,17 @@ from gatekeep.api.translation import (
 )
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
+from gatekeep.embeddings import embed_text
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
     set_cached_response,
+)
+from gatekeep.middleware.cache_semantic import (
+    build_response_from_cache,
+    extract_embeddable_text,
+    find_semantic_match,
+    store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
 from gatekeep.models import ApiKey
@@ -93,9 +100,11 @@ async def chat_completions(
     Ollama) should serve the requested model, then either streams the
     response as SSE (when `stream: true`) or returns a single OpenAI-shaped
     JSON completion. Non-streaming requests are first checked against the
-    exact-match cache and served from it on a hit; a miss falls through to
-    the provider and the fresh response is cached afterwards. Every completed
-    request is logged via `log_request` for cost accounting.
+    exact-match cache; on a miss, the semantic cache is checked next (an
+    embedding-similarity match above threshold); a miss on both falls
+    through to the provider, and the fresh response is written to both
+    caches afterwards. Every completed request is logged via `log_request`
+    for cost accounting.
     """
     settings = get_settings()
     try:
@@ -132,6 +141,29 @@ async def chat_completions(
         )
         return JSONResponse(content=cached.model_dump())
 
+    embeddable_text = extract_embeddable_text(payload)
+    embedding = embed_text(embeddable_text)
+    if embedding is not None:
+        semantic_match = await find_semantic_match(
+            session,
+            embedding,
+            threshold=settings.semantic_cache_similarity_threshold,
+            max_age_seconds=settings.cache_exact_ttl_seconds,
+        )
+        if semantic_match is not None:
+            semantic_response = build_response_from_cache(semantic_match)
+            await log_request(
+                session,
+                key_id=key.id,
+                model=model,
+                prompt_tokens=semantic_response.usage.prompt_tokens,
+                completion_tokens=semantic_response.usage.completion_tokens,
+                response_id=semantic_response.id,
+                cached=True,
+                cache_key="semantic",
+            )
+            return JSONResponse(content=semantic_response.model_dump())
+
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
@@ -140,6 +172,16 @@ async def chat_completions(
     await set_cached_response(
         redis, request_hash, response, ttl_seconds=settings.cache_exact_ttl_seconds
     )
+    if embedding is not None:
+        await store_cached_response(
+            session,
+            exact_hash=request_hash,
+            user_messages_text=embeddable_text,
+            embedding=embedding,
+            response_text=response.choices[0].message.content or "",
+            model=model,
+            cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+        )
     await log_request(
         session,
         key_id=key.id,
