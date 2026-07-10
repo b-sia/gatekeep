@@ -19,8 +19,9 @@ import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
+from gatekeep.middleware.cache_exact import get_cached_response
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, RequestLog
+from gatekeep.models import ApiKey, CachedResponse, RequestLog
 from gatekeep.prompts import create_prompt, promote_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
@@ -266,6 +267,25 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
     assert r1.status_code == 200
     assert provider.calls == 1
 
+    # -- Directly verify the real HTTP write tagged both caches with "greeting". --
+    redis = get_redis()
+    by_prompt_key = "cache:exact:by-prompt:greeting"
+    tagged_hashes = await redis.smembers(by_prompt_key)
+    assert tagged_hashes, "expected the exact-cache write to tag a hash under greeting"
+    for h in tagged_hashes:
+        assert await get_cached_response(redis, h) is not None
+
+    tagged_rows = (
+        (
+            await session.execute(
+                select(CachedResponse).where(CachedResponse.prompt_name == "greeting")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert tagged_rows, "expected the semantic-cache write to tag a row with greeting"
+
     # Repeating the same request now hits the exact cache tagged with "greeting".
     r2 = await client.post(
         "/v1/chat/completions",
@@ -279,8 +299,23 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
     from gatekeep.prompts import add_prompt_version
 
     await add_prompt_version("greeting", "You are a casual assistant.", session)
-    redis = get_redis()
     await promote_prompt("greeting", 2, session, redis=redis)
+
+    # -- Directly verify invalidation cleared both caches' tagged entries. --
+    assert await redis.smembers(by_prompt_key) == set()
+    for h in tagged_hashes:
+        assert await get_cached_response(redis, h) is None
+
+    remaining_rows = (
+        (
+            await session.execute(
+                select(CachedResponse).where(CachedResponse.prompt_name == "greeting")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert remaining_rows == []
 
     r3 = await client.post(
         "/v1/chat/completions",

@@ -233,7 +233,11 @@ async def chat_completions(
         return map_provider_error(exc)
     response = result_to_openai(result, model=model)
     await set_cached_response(
-        redis, request_hash, response, ttl_seconds=settings.cache_exact_ttl_seconds
+        redis,
+        request_hash,
+        response,
+        ttl_seconds=settings.cache_exact_ttl_seconds,
+        prompt_name=req.prompt_name,
     )
     if embedding is not None:
         await store_cached_response(
@@ -244,6 +248,7 @@ async def chat_completions(
             response_text=response.choices[0].message.content or "",
             model=model,
             cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+            prompt_name=req.prompt_name,
         )
     await log_request(
         session,
