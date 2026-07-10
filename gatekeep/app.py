@@ -8,7 +8,8 @@ from anthropic import AsyncAnthropic
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
@@ -40,6 +41,16 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
 from gatekeep.models import ApiKey
+from gatekeep.observability.metrics import (
+    cache_cost_saved_usd,
+    cache_exact_hits,
+    cache_exact_misses,
+    cache_semantic_hits,
+    cache_semantic_misses,
+    cache_semantic_similarity,
+    observe_request,
+    requests_total,
+)
 from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
@@ -88,6 +99,12 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Expose Prometheus-format metrics for scraping; unauthenticated like /healthz."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
@@ -131,6 +148,7 @@ async def chat_completions(
 
     provider = get_provider(provider_name)
     model = payload["model"]
+    requests_total.labels(model=model, key_id=str(key.id)).inc()
 
     if req.stream:
         return StreamingResponse(
@@ -142,6 +160,11 @@ async def chat_completions(
     request_hash = hash_request(payload)
     cached = await get_cached_response(redis, request_hash)
     if cached is not None:
+        cache_exact_hits.labels(model=model).inc()
+        cost_usd = calculate_cost(
+            model, cached.usage.prompt_tokens, cached.usage.completion_tokens
+        )
+        cache_cost_saved_usd.inc(cost_usd)
         await log_request(
             session,
             key_id=key.id,
@@ -152,7 +175,15 @@ async def chat_completions(
             cached=True,
             cache_key=request_hash,
         )
+        observe_request(
+            model=model,
+            key_id=key.id,
+            prompt_tokens=cached.usage.prompt_tokens,
+            completion_tokens=cached.usage.completion_tokens,
+            cost_usd=cost_usd,
+        )
         return JSONResponse(content=cached.model_dump())
+    cache_exact_misses.labels(model=model).inc()
 
     embeddable_text = extract_embeddable_text(payload)
     embedding = embed_text(embeddable_text)
@@ -165,7 +196,12 @@ async def chat_completions(
             max_age_seconds=settings.cache_exact_ttl_seconds,
         )
         if semantic_match is not None:
-            semantic_response = build_response_from_cache(semantic_match)
+            cache_semantic_hits.labels(model=model).inc()
+            cache_semantic_similarity.labels(model=model).observe(
+                semantic_match.similarity
+            )
+            cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
+            semantic_response = build_response_from_cache(semantic_match.cached)
             await log_request(
                 session,
                 key_id=key.id,
@@ -175,9 +211,17 @@ async def chat_completions(
                 response_id=semantic_response.id,
                 cached=True,
                 cache_key="semantic",
-                cost_usd_override=semantic_match.cost_usd,
+                cost_usd_override=semantic_match.cached.cost_usd,
+            )
+            observe_request(
+                model=model,
+                key_id=key.id,
+                prompt_tokens=semantic_response.usage.prompt_tokens,
+                completion_tokens=semantic_response.usage.completion_tokens,
+                cost_usd=semantic_match.cached.cost_usd,
             )
             return JSONResponse(content=semantic_response.model_dump())
+        cache_semantic_misses.labels(model=model).inc()
 
     try:
         result = await provider.complete(payload)
@@ -204,6 +248,13 @@ async def chat_completions(
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
+    )
+    observe_request(
+        model=model,
+        key_id=key.id,
+        prompt_tokens=result.input_tokens,
+        completion_tokens=result.output_tokens,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
     )
     return JSONResponse(content=response.model_dump())
 
@@ -248,6 +299,13 @@ async def _sse(
                         completion_tokens=ev.output_tokens,
                         response_id=completion_id,
                     )
+                observe_request(
+                    model=model,
+                    key_id=key_id,
+                    prompt_tokens=ev.input_tokens,
+                    completion_tokens=ev.output_tokens,
+                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
+                )
     except Exception as exc:  # surface upstream errors inside the stream
         error_payload = {
             "error": {

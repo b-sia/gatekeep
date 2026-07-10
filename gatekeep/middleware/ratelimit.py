@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from gatekeep.config import Settings, get_settings
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.models import ApiKey
+from gatekeep.observability.metrics import rate_limit_remaining
 
 # Atomically refills and consumes one token from a per-key bucket stored as a
 # Redis hash ("tokens", "ts"). Doing the read-refill-consume sequence inside a
@@ -115,6 +116,7 @@ async def require_rate_limit(key: ApiKey = Depends(require_api_key)) -> ApiKey:
     refill_rate = settings.rate_limit_refill_rate
 
     allowed, tokens = await check_rate_limit(redis, key.id, capacity, refill_rate)
+    rate_limit_remaining.labels(key_id=str(key.id)).set(tokens)
     if not allowed:
         deficit = 1 - tokens
         retry_after = max(1, math.ceil(deficit / refill_rate))

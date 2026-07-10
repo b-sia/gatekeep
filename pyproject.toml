@@ -16,6 +16,7 @@ dependencies = [
     "redis>=5.0",
     "pgvector>=0.3",
     "sentence-transformers>=3.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.scripts]

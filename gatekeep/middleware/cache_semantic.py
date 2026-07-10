@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -67,6 +68,14 @@ async def store_cached_response(
     return row
 
 
+@dataclass
+class SemanticMatch:
+    """A semantic-cache hit: the matched row plus its cosine similarity score."""
+
+    cached: CachedResponse
+    similarity: float
+
+
 async def find_semantic_match(
     session: AsyncSession,
     embedding: list[float],
@@ -74,7 +83,7 @@ async def find_semantic_match(
     model: str,
     threshold: float,
     max_age_seconds: int,
-) -> CachedResponse | None:
+) -> SemanticMatch | None:
     """Find the most similar non-expired cached response above `threshold`, or None.
 
     Similarity is cosine similarity (1 - cosine_distance). Rows older than
@@ -98,7 +107,7 @@ async def find_semantic_match(
     cached, distance_value = row
     similarity = 1 - distance_value
     if similarity > threshold:
-        return cached
+        return SemanticMatch(cached=cached, similarity=similarity)
     return None
 
 

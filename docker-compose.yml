@@ -43,6 +43,35 @@ services:
       ollama:
         condition: service_started
 
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./gatekeep/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      gateway:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./gatekeep/observability/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./gatekeep/observability/provisioning/dashboards/gatekeep.yml:/etc/grafana/provisioning/dashboards/gatekeep.yml:ro
+      - ./gatekeep/observability/grafana.json:/etc/grafana/provisioning/dashboards/gatekeep.json:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   ollama-data:
   postgres-data:
+  prometheus-data:
+  grafana-data:

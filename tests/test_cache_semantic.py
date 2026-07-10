@@ -178,7 +178,8 @@ async def test_find_semantic_match_finds_similar_above_threshold(session):
         max_age_seconds=604800,
     )
     assert match is not None
-    assert match.response_text == "Paris"
+    assert match.cached.response_text == "Paris"
+    assert match.similarity > 0.95
 
 
 async def test_find_semantic_match_ignores_row_from_different_model(session):
