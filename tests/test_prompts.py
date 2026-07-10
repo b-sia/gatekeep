@@ -1,5 +1,21 @@
 import pytest
+from sqlalchemy import select
 
+from gatekeep.api.openai_schemas import (
+    ChatCompletionResponse,
+    Choice,
+    ResponseMessage,
+    Usage,
+)
+from gatekeep.embeddings import embed_text
+from gatekeep.middleware.cache_exact import (
+    get_cached_response,
+    hash_request,
+    set_cached_response,
+)
+from gatekeep.middleware.cache_semantic import store_cached_response
+from gatekeep.middleware.ratelimit import get_redis
+from gatekeep.models import CachedResponse
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -11,6 +27,32 @@ from gatekeep.prompts import (
     promote_prompt,
     rollback_prompt,
 )
+
+
+@pytest.fixture(autouse=True)
+async def _clean_cache():
+    """Flush any leftover exact-cache keys so invalidation tests start clean."""
+    redis = get_redis()
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+    yield
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+
+
+def _response(id="chatcmpl-1"):
+    """Build a minimal ChatCompletionResponse for cache round-trip tests."""
+    return ChatCompletionResponse(
+        id=id,
+        created=1234,
+        model="claude-sonnet-5",
+        choices=[
+            Choice(
+                index=0, message=ResponseMessage(content="pong"), finish_reason="stop"
+            )
+        ],
+        usage=Usage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
+    )
 
 
 async def test_create_prompt_makes_version_1_active(session):
@@ -140,3 +182,134 @@ async def test_list_prompts_returns_all_prompts(session):
     prompts = await list_prompts(session)
     names = {p.name for p in prompts}
     assert names == {"a", "b"}
+
+
+# -- promote_prompt invalidates cache entries built from the old version ----
+
+
+async def test_promote_invalidates_exact_cache_entries_tagged_with_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    redis = get_redis()
+    h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
+    await set_cached_response(
+        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
+
+    await promote_prompt("system-context", 2, session, redis=redis)
+
+    assert await get_cached_response(redis, h) is None
+
+
+async def test_promote_invalidates_semantic_cache_rows_tagged_with_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    embedding = embed_text("hello")
+    await store_cached_response(
+        session,
+        exact_hash="tagged-hash",
+        user_messages_text="hello",
+        embedding=embedding,
+        response_text="hi",
+        model="m",
+        cost_usd=0.001,
+        prompt_name="system-context",
+    )
+
+    await promote_prompt("system-context", 2, session)
+
+    rows = (
+        (
+            await session.execute(
+                select(CachedResponse).where(CachedResponse.exact_hash == "tagged-hash")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == []
+
+
+async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched(
+    session,
+):
+    await create_prompt("a", "a1", session)
+    await add_prompt_version("a", "a2 text", session)
+    await create_prompt("b", "b1", session)
+    redis = get_redis()
+
+    h_a = hash_request(
+        {"model": "m", "messages": [{"role": "user", "content": "a"}], "max_tokens": 1}
+    )
+    h_b = hash_request(
+        {"model": "m", "messages": [{"role": "user", "content": "b"}], "max_tokens": 1}
+    )
+    h_plain = hash_request(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "plain"}],
+            "max_tokens": 1,
+        }
+    )
+    await set_cached_response(
+        redis, h_a, _response("a"), ttl_seconds=60, prompt_name="a"
+    )
+    await set_cached_response(
+        redis, h_b, _response("b"), ttl_seconds=60, prompt_name="b"
+    )
+    await set_cached_response(redis, h_plain, _response("plain"), ttl_seconds=60)
+
+    embedding = embed_text("x")
+    await store_cached_response(
+        session,
+        exact_hash="b-hash",
+        user_messages_text="x",
+        embedding=embedding,
+        response_text="y",
+        model="m",
+        cost_usd=0.001,
+        prompt_name="b",
+    )
+    await store_cached_response(
+        session,
+        exact_hash="plain-hash",
+        user_messages_text="x2",
+        embedding=embedding,
+        response_text="y2",
+        model="m",
+        cost_usd=0.001,
+    )
+
+    await promote_prompt("a", 2, session, redis=redis)
+
+    assert await get_cached_response(redis, h_a) is None
+    assert await get_cached_response(redis, h_b) is not None
+    assert await get_cached_response(redis, h_plain) is not None
+
+    rows = (await session.execute(select(CachedResponse))).scalars().all()
+    hashes = {r.exact_hash for r in rows}
+    assert hashes == {"b-hash", "plain-hash"}
+
+
+async def test_promote_is_noop_when_nothing_cached_for_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    redis = get_redis()
+
+    promoted = await promote_prompt("system-context", 2, session, redis=redis)
+    assert promoted.version_num == 2
+
+
+async def test_rollback_invalidates_cache_for_the_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await promote_prompt("system-context", 2, session)
+    redis = get_redis()
+    h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
+    await set_cached_response(
+        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
+
+    await rollback_prompt("system-context", session, redis=redis)
+
+    assert await get_cached_response(redis, h) is None

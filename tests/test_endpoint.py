@@ -9,6 +9,7 @@ from sqlalchemy import select
 import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.config import get_settings
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.prompts import create_prompt
@@ -17,12 +18,16 @@ from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 @pytest.fixture(autouse=True)
 async def _clean_cache():
-    """Flush exact-cache keys so identical request bodies across tests in this file don't collide."""
+    """Flush exact-cache and rate-limit keys so tests in this file don't collide."""
     redis = get_redis()
     async for key in redis.scan_iter("cache:exact:*"):
         await redis.delete(key)
+    async for key in redis.scan_iter("ratelimit:*"):
+        await redis.delete(key)
     yield
     async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+    async for key in redis.scan_iter("ratelimit:*"):
         await redis.delete(key)
 
 
@@ -204,6 +209,40 @@ async def test_prompt_name_substitutes_active_template_as_system_message(
         app_module._providers["anthropic"].complete = original_complete
     assert r.status_code == 200
     assert captured["payload"]["system"] == "You are a pirate."
+
+
+async def test_rate_limit_exhaustion_returns_429_with_retry_after(
+    client, raw_key, monkeypatch
+):
+    """Drain a key's token bucket through the real HTTP endpoint and confirm
+    the request that exceeds it gets a real 429 with a Retry-After header
+    (not just at the require_rate_limit dependency level)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "rate_limit_tokens_per_min", 2)
+    monkeypatch.setattr(settings, "rate_limit_refill_rate", 2 / 60)
+
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "rate-limit-me"}],
+    }
+    for _ in range(2):
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        )
+        assert r.status_code == 200
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body,
+    )
+    assert r.status_code == 429
+    assert "retry-after" in r.headers
+    assert int(r.headers["retry-after"]) >= 1
+    body = r.json()
+    assert body["error"]["type"] == "rate_limit_error"
 
 
 async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
