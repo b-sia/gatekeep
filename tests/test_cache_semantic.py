@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy import select
@@ -15,8 +16,25 @@ from gatekeep.middleware.cache_semantic import (
     find_semantic_match,
     store_cached_response,
 )
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, CachedResponse, RequestLog
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+
+
+@pytest.fixture(autouse=True)
+async def _clean_cache():
+    """Flush any leftover exact-cache keys so each test starts from a clean cache.
+
+    Scoped to this file (rather than a global conftest fixture) so tests
+    that never touch caching don't pay for an eager Redis connection.
+    """
+    redis = get_redis()
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+    yield
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+
 
 # -- extract_embeddable_text ----------------------------------------------
 
