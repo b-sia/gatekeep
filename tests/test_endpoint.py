@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy import select
@@ -8,8 +9,20 @@ from sqlalchemy import select
 import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+
+
+@pytest.fixture(autouse=True)
+async def _clean_cache():
+    """Flush exact-cache keys so identical request bodies across tests in this file don't collide."""
+    redis = get_redis()
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
+    yield
+    async for key in redis.scan_iter("cache:exact:*"):
+        await redis.delete(key)
 
 
 class FakeProvider:

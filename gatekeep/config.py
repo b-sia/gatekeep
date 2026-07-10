@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     )
     rate_limit_tokens_per_min: int = 100
     rate_limit_refill_rate: float = 100 / 60
+    cache_exact_ttl_seconds: int = 604800
 
 
 @lru_cache

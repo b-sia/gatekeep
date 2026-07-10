@@ -26,7 +26,12 @@ from gatekeep.api.translation import (
 )
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
-from gatekeep.middleware.ratelimit import require_rate_limit
+from gatekeep.middleware.cache_exact import (
+    get_cached_response,
+    hash_request,
+    set_cached_response,
+)
+from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
 from gatekeep.models import ApiKey
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
@@ -87,8 +92,10 @@ async def chat_completions(
     to a provider-neutral payload, resolves which provider (Anthropic or
     Ollama) should serve the requested model, then either streams the
     response as SSE (when `stream: true`) or returns a single OpenAI-shaped
-    JSON completion. Every completed request is logged via `log_request` for
-    cost accounting.
+    JSON completion. Non-streaming requests are first checked against the
+    exact-match cache and served from it on a hit; a miss falls through to
+    the provider and the fresh response is cached afterwards. Every completed
+    request is logged via `log_request` for cost accounting.
     """
     settings = get_settings()
     try:
@@ -109,11 +116,30 @@ async def chat_completions(
             media_type="text/event-stream",
         )
 
+    redis = get_redis(settings)
+    request_hash = hash_request(payload)
+    cached = await get_cached_response(redis, request_hash)
+    if cached is not None:
+        await log_request(
+            session,
+            key_id=key.id,
+            model=model,
+            prompt_tokens=cached.usage.prompt_tokens,
+            completion_tokens=cached.usage.completion_tokens,
+            response_id=cached.id,
+            cached=True,
+            cache_key=request_hash,
+        )
+        return JSONResponse(content=cached.model_dump())
+
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error(exc)
     response = result_to_openai(result, model=model)
+    await set_cached_response(
+        redis, request_hash, response, ttl_seconds=settings.cache_exact_ttl_seconds
+    )
     await log_request(
         session,
         key_id=key.id,
