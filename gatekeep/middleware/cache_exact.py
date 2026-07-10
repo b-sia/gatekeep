@@ -14,14 +14,16 @@ _KEY_PREFIX = "cache:exact:"
 def hash_request(payload: dict[str, Any]) -> str:
     """Compute a deterministic SHA256 hash of a completion payload's cacheable fields.
 
-    Only `model`, `messages`, `system` (if set), and `stop_sequences` (if set)
-    affect the hash, since those are the only fields that change the
-    effective prompt; `max_tokens` and other bookkeeping fields are excluded
-    so requests differing only in those still share a cache entry.
+    Only `model`, `messages`, `max_tokens`, `system` (if set), and
+    `stop_sequences` (if set) affect the hash. `max_tokens` is included
+    because it bounds the response length; a truncated response cached
+    under a low `max_tokens` must not be served to a request that allows
+    a longer completion, and vice versa.
     """
     cacheable: dict[str, Any] = {
         "model": payload["model"],
         "messages": payload["messages"],
+        "max_tokens": payload["max_tokens"],
     }
     if "system" in payload:
         cacheable["system"] = payload["system"]

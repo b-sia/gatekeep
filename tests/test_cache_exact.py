@@ -91,9 +91,15 @@ def test_hash_request_differs_by_stop_sequences():
     assert hash_request(p1) != hash_request(p2)
 
 
-def test_hash_request_ignores_max_tokens():
+def test_hash_request_differs_by_max_tokens():
     p1 = _payload(max_tokens=100)
     p2 = _payload(max_tokens=200)
+    assert hash_request(p1) != hash_request(p2)
+
+
+def test_hash_request_same_max_tokens_matches():
+    p1 = _payload(max_tokens=100)
+    p2 = _payload(max_tokens=100)
     assert hash_request(p1) == hash_request(p2)
 
 
