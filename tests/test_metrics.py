@@ -220,3 +220,54 @@ async def test_metrics_endpoint_reports_cache_exact_hit_and_miss(client, raw_key
     )
     assert misses is not None and misses >= 1
     assert hits is not None and hits >= 1
+
+
+async def test_metrics_endpoint_reports_cache_semantic_hit_and_miss(client, raw_key):
+    body1 = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    }
+    body2 = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "What's the capital city of France?"}],
+    }
+    body3 = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Please write a haiku about a cat."}],
+    }
+    await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body1,
+    )
+    await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body2,
+    )
+    await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body3,
+    )
+    resp = await client.get("/metrics")
+    hits = _metric_sample(
+        resp.text,
+        "gatekeep_cache_semantic_hits_total",
+        {"model": "claude-sonnet-5"},
+    )
+    misses = _metric_sample(
+        resp.text,
+        "gatekeep_cache_semantic_misses_total",
+        {"model": "claude-sonnet-5"},
+    )
+    similarity_count = _metric_sample(
+        resp.text,
+        "gatekeep_cache_semantic_similarity_count",
+        {"model": "claude-sonnet-5"},
+    )
+    cost_saved = _metric_sample(resp.text, "gatekeep_cache_cost_saved_usd_total", {})
+    assert hits is not None and hits >= 1
+    assert misses is not None and misses >= 1
+    assert similarity_count is not None and similarity_count >= 1
+    assert cost_saved is not None and cost_saved > 0
