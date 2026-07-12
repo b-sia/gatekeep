@@ -44,12 +44,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(gatekeep_cache_exact_hits_total[5m])) / (sum(rate(gatekeep_cache_exact_hits_total[5m])) + sum(rate(gatekeep_cache_exact_misses_total[5m])))",
+          "expr": "sum(increase(gatekeep_cache_exact_hits_total[1h])) / (sum(increase(gatekeep_cache_exact_hits_total[1h])) + sum(increase(gatekeep_cache_exact_misses_total[1h])))",
           "legendFormat": "exact hit rate"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(gatekeep_cache_semantic_hits_total[5m])) / (sum(rate(gatekeep_cache_semantic_hits_total[5m])) + sum(rate(gatekeep_cache_semantic_misses_total[5m])))",
+          "expr": "sum(increase(gatekeep_cache_semantic_hits_total[1h])) / (sum(increase(gatekeep_cache_semantic_hits_total[1h])) + sum(increase(gatekeep_cache_semantic_misses_total[1h])))",
           "legendFormat": "semantic hit rate"
         }
       ]
