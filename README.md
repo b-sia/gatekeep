@@ -24,7 +24,7 @@ Your App -> Gatekeep (auth + routing) -> Provider (Claude, Ollama, ...)
    ```bash
    bash scripts/init-test-key.sh
    ```
-   This prints a raw key like `sk-...` - save it, it's only shown once.
+   This prints a raw key like `gk-...` - save it, it's only shown once.
 
 The gateway now listens on `http://localhost:8100`.
 
@@ -32,7 +32,7 @@ The gateway now listens on `http://localhost:8100`.
 
 ```bash
 curl -X POST http://localhost:8100/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-key" \
+  -H "Authorization: Bearer gk-your-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-5",
@@ -48,7 +48,7 @@ Every key is rate-limited by a per-minute token bucket (`rate_limit_tokens_per_m
 
 ```bash
 curl -i http://localhost:8100/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-key" \
+  -H "Authorization: Bearer gk-your-key" \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}]}'
 # HTTP/1.1 429 Too Many Requests
@@ -77,7 +77,7 @@ Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt crea
 `demo/` contains a small chat web app that shows Gatekeep used the way a real client would - not just a single curl call.
 
 ```bash
-export GATEKEEP_API_KEY=sk-your-key   # from init-test-key.sh above
+export GATEKEEP_API_KEY=gk-your-key   # from init-test-key.sh above
 python demo/app.py
 ```
 
@@ -101,7 +101,7 @@ Env vars the demo app reads (also loaded from `.env` if present):
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(
-    api_key="sk-your-key",              # a Gatekeep key, not an OpenAI one
+    api_key="gk-your-key",              # a Gatekeep key, not an OpenAI one
     base_url="http://localhost:8100/v1",
 )
 
@@ -123,7 +123,7 @@ async with httpx.AsyncClient() as client:
             "model": "claude-sonnet-5",
             "messages": [{"role": "user", "content": "Hello!"}],
         },
-        headers={"Authorization": "Bearer sk-your-key"},
+        headers={"Authorization": "Bearer gk-your-key"},
     )
 ```
 
