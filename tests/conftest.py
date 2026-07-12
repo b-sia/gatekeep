@@ -24,6 +24,7 @@ async def _create_schema():
     import gatekeep.models  # noqa: F401
 
     async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
@@ -34,13 +35,32 @@ async def _create_schema():
 
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_ratelimit_redis_client():
-    """Drop the cached rate-limit Redis client so each test (own event loop) gets a fresh one."""
+    """Drop the cached rate-limit Redis client so each test (own event loop) gets a fresh one.
+
+    Also flushes the `ratelimit:*` and `cache:exact:*` namespaces on teardown
+    so leftover state from a previous test can't leak into the next one.
+    This matters because `_create_schema` resets the api_keys id sequence
+    every test, so a new key can collide with a stale Redis bucket/cache
+    entry left by an earlier test's key of the same id.
+
+    The flush only runs if the test actually opened a Redis connection
+    (`ratelimit._redis is not None`) rather than unconditionally calling
+    `get_redis()` in setup: forcing a connection for every test - including
+    ones like test_config.py that monkeypatch REDIS_URL mid-test - ties
+    this fixture to fixture/monkeypatch ordering across tests and caused a
+    ConnectionError cascade in practice.
+    """
     import gatekeep.middleware.ratelimit as ratelimit
 
     ratelimit._redis = None
     yield
     if ratelimit._redis is not None:
-        await ratelimit._redis.aclose()
+        redis = ratelimit._redis
+        async for key in redis.scan_iter("ratelimit:*"):
+            await redis.delete(key)
+        async for key in redis.scan_iter("cache:exact:*"):
+            await redis.delete(key)
+        await redis.aclose()
     ratelimit._redis = None
 
 
