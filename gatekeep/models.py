@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from gatekeep.db import Base
+
+EMBEDDING_DIM = 384
 
 
 def _utcnow() -> datetime:
@@ -25,3 +28,89 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class RequestLog(Base):
+    """One logged completion request: tokens used, USD cost, and cache status."""
+
+    __tablename__ = "request_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    cached: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cache_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    response_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class Prompt(Base):
+    """A named prompt template whose active version is served at request time."""
+
+    __tablename__ = "prompts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    active_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "prompt_versions.id", use_alter=True, name="fk_prompts_active_version_id"
+        ),
+        nullable=True,
+    )
+    previous_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "prompt_versions.id",
+            use_alter=True,
+            name="fk_prompts_previous_version_id",
+        ),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class PromptVersion(Base):
+    """One immutable version of a prompt's template text."""
+
+    __tablename__ = "prompt_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prompt_id: Mapped[int] = mapped_column(ForeignKey("prompts.id"), nullable=False)
+    version_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class CachedResponse(Base):
+    """A cached completion response with its embedding, for semantic-cache lookups."""
+
+    __tablename__ = "cached_responses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    exact_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_messages_text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=False
+    )
+    response_text: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

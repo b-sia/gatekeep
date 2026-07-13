@@ -25,6 +25,10 @@ class Settings(BaseSettings):
             "gpt-3.5-turbo": "claude-haiku-4-5-20251001",
         }
     )
+    rate_limit_tokens_per_min: int = 100
+    rate_limit_refill_rate: float = 100 / 60
+    cache_exact_ttl_seconds: int = 604800
+    semantic_cache_similarity_threshold: float = 0.95
 
 
 @lru_cache

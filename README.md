@@ -24,7 +24,7 @@ Your App -> Gatekeep (auth + routing) -> Provider (Claude, Ollama, ...)
    ```bash
    bash scripts/init-test-key.sh
    ```
-   This prints a raw key like `sk-...` - save it, it's only shown once.
+   This prints a raw key like `gk-...` - save it, it's only shown once.
 
 The gateway now listens on `http://localhost:8100`.
 
@@ -32,7 +32,7 @@ The gateway now listens on `http://localhost:8100`.
 
 ```bash
 curl -X POST http://localhost:8100/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-key" \
+  -H "Authorization: Bearer gk-your-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-5",
@@ -42,12 +42,42 @@ curl -X POST http://localhost:8100/v1/chat/completions \
 
 Swap `"model"` for any model your configured provider(s) support, e.g. `llama3.2` if you're running the Ollama service from `docker-compose.yml`.
 
+## Rate limiting, caching, and cost tracking
+
+Every key is rate-limited by a per-minute token bucket (`rate_limit_tokens_per_min`, default 100). Once a key's bucket is empty, the gateway returns a 429 with a `Retry-After` header instead of forwarding the request:
+
+```bash
+curl -i http://localhost:8100/v1/chat/completions \
+  -H "Authorization: Bearer gk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}]}'
+# HTTP/1.1 429 Too Many Requests
+# Retry-After: 3
+```
+
+Non-streaming requests are checked against two caches before hitting the provider:
+
+- **Exact cache** (Redis): identical requests (same model, messages, `max_tokens`, etc.) are served straight back within the TTL set by `cache_exact_ttl_seconds` (default 7 days).
+- **Semantic cache** (Postgres + pgvector): requests whose embedding is more similar than `semantic_cache_similarity_threshold` (default 0.95 cosine similarity) to a previously-cached request are served the cached answer, even with different wording.
+
+Both kinds of cache hit skip the provider call entirely and are logged with `cached: true` in `request_logs`, so cache-hit rate and cost savings show up in cost accounting the same way normal requests do.
+
+Every request - cached or not - is logged to `request_logs` with token counts and USD cost, and exposed via:
+
+```bash
+curl http://localhost:8100/metrics | grep gatekeep_cache_exact_hits
+```
+
+`/metrics` is a Prometheus-format endpoint (unauthenticated, like `/healthz`); `docker-compose.yml` also runs Prometheus and a Grafana dashboard at `http://localhost:3000` for cost, usage, and cache-hit-rate visualization.
+
+Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt create/promote/rollback ...`) are cache-aware: promoting a new prompt version automatically invalidates any cached responses that were built using the old version, so clients never see a stale answer generated from a prompt that's no longer active.
+
 ## Run the demo app
 
 `demo/` contains a small chat web app that shows Gatekeep used the way a real client would - not just a single curl call.
 
 ```bash
-export GATEKEEP_API_KEY=sk-your-key   # from init-test-key.sh above
+export GATEKEEP_API_KEY=gk-your-key   # from init-test-key.sh above
 python demo/app.py
 ```
 
@@ -71,7 +101,7 @@ Env vars the demo app reads (also loaded from `.env` if present):
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(
-    api_key="sk-your-key",              # a Gatekeep key, not an OpenAI one
+    api_key="gk-your-key",              # a Gatekeep key, not an OpenAI one
     base_url="http://localhost:8100/v1",
 )
 
@@ -93,7 +123,7 @@ async with httpx.AsyncClient() as client:
             "model": "claude-sonnet-5",
             "messages": [{"role": "user", "content": "Hello!"}],
         },
-        headers={"Authorization": "Bearer sk-your-key"},
+        headers={"Authorization": "Bearer gk-your-key"},
     )
 ```
 

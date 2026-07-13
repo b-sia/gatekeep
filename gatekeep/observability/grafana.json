@@ -1,0 +1,114 @@
+{
+  "title": "Gatekeep",
+  "uid": "gatekeep-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cost per key (last 7 days)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD" },
+        "overrides": []
+      },
+      "options": {
+        "stacking": "normal",
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(gatekeep_request_cost_usd_sum[7d])) by (key_id)",
+          "legendFormat": "key {{key_id}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Cache hit rate: exact vs semantic",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(gatekeep_cache_exact_hits_total[1h])) / (sum(increase(gatekeep_cache_exact_hits_total[1h])) + sum(increase(gatekeep_cache_exact_misses_total[1h])))",
+          "legendFormat": "exact hit rate"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(gatekeep_cache_semantic_hits_total[1h])) / (sum(increase(gatekeep_cache_semantic_hits_total[1h])) + sum(increase(gatekeep_cache_semantic_misses_total[1h])))",
+          "legendFormat": "semantic hit rate"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Avg tokens per request",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(gatekeep_request_tokens_sum[5m])) by (model) / sum(rate(gatekeep_request_tokens_count[5m])) by (model)",
+          "legendFormat": "{{model}} avg tokens"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(gatekeep_request_tokens_bucket[5m])) by (le, model))",
+          "legendFormat": "{{model}} p95 tokens"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Rate limit exhaustions",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count_over_time((gatekeep_rate_limit_remaining{} == 0)[5m:1m])",
+          "legendFormat": "key {{key_id}} exhausted"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Cumulative cost savings from caching",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "gatekeep_cache_cost_saved_usd_total",
+          "legendFormat": "cumulative savings"
+        }
+      ]
+    }
+  ]
+}

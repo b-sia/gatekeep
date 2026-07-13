@@ -26,6 +26,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     stream: bool = False
     stop: Union[str, list[str], None] = None
+    prompt_name: Optional[str] = None
 
 
 class Usage(BaseModel):

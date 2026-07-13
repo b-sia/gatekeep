@@ -23,6 +23,16 @@ if ! command -v psql &> /dev/null; then
     exit 1
 fi
 
+# Ensure gatekeep package is installed (alembic's env.py needs it)
+echo "📦 Checking if gatekeep package is installed..."
+if ! python3 -c "import gatekeep" 2>/dev/null; then
+    echo "⚠️  gatekeep package not installed. Installing in editable mode..."
+    if ! pip install -e . >/dev/null 2>&1; then
+        echo "❌ Error: failed to install gatekeep package"
+        exit 1
+    fi
+fi
+
 # Check if api_keys table exists; if not, run migrations
 echo "🔍 Checking database schema..."
 TABLE_EXISTS=$(PGPASSWORD=gatekeep psql -U gatekeep -h localhost -d gatekeep -t -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'api_keys');" 2>/dev/null | tr -d '[:space:]' || echo "f")

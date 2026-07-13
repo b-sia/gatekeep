@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from gatekeep.api.openai_schemas import (
+    ChatCompletionResponse,
+    Choice,
+    ResponseMessage,
+    Usage,
+)
+from gatekeep.api.translation import new_completion_id
+from gatekeep.models import CachedResponse
+
+
+def extract_embeddable_text(payload: dict[str, Any]) -> str:
+    """Concatenate a payload's system text and user-message text for embedding.
+
+    Assistant messages are excluded, matching the brief's "embed only
+    user+system messages" rule.
+    """
+    parts: list[str] = []
+    if "system" in payload:
+        parts.append(payload["system"])
+    for msg in payload["messages"]:
+        if msg["role"] == "user":
+            parts.append(msg["content"])
+    return "\n\n".join(parts)
+
+
+async def store_cached_response(
+    session: AsyncSession,
+    *,
+    exact_hash: str,
+    user_messages_text: str,
+    embedding: list[float],
+    response_text: str,
+    model: str,
+    cost_usd: float,
+    prompt_name: str | None = None,
+) -> CachedResponse | None:
+    """Insert a new semantic-cache row and commit it.
+
+    If a row with the same `exact_hash` was inserted concurrently by another
+    request (unique-constraint violation), rolls back and returns None
+    instead of raising, since the cache write is best-effort and the
+    original request's response has already been served. `prompt_name`, if
+    set, tags the row so a later prompt promotion can find and delete it.
+    """
+    row = CachedResponse(
+        exact_hash=exact_hash,
+        user_messages_text=user_messages_text,
+        embedding=embedding,
+        response_text=response_text,
+        model=model,
+        cost_usd=cost_usd,
+        prompt_name=prompt_name,
+    )
+    session.add(row)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return None
+    return row
+
+
+async def delete_cached_responses_by_prompt(
+    session: AsyncSession, prompt_name: str
+) -> None:
+    """Delete every semantic-cache row tagged with `prompt_name`.
+
+    Does not commit; the caller (promote_prompt) commits this alongside its
+    own version-pointer change so both updates land in one transaction.
+    No-op if no rows are tagged with this prompt name.
+    """
+    await session.execute(
+        delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name)
+    )
+
+
+@dataclass
+class SemanticMatch:
+    """A semantic-cache hit: the matched row plus its cosine similarity score."""
+
+    cached: CachedResponse
+    similarity: float
+
+
+async def find_semantic_match(
+    session: AsyncSession,
+    embedding: list[float],
+    *,
+    model: str,
+    threshold: float,
+    max_age_seconds: int,
+) -> SemanticMatch | None:
+    """Find the most similar non-expired cached response above `threshold`, or None.
+
+    Similarity is cosine similarity (1 - cosine_distance). Rows older than
+    `max_age_seconds` are excluded, matching the exact cache's TTL so both
+    caches invalidate together. Only rows cached for the same `model` are
+    considered, so a semantically-similar prompt never returns a different
+    model's cached answer.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    distance = CachedResponse.embedding.cosine_distance(embedding)
+    stmt = (
+        select(CachedResponse, distance.label("distance"))
+        .where(CachedResponse.created_at >= cutoff)
+        .where(CachedResponse.model == model)
+        .order_by(distance)
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).first()
+    if row is None:
+        return None
+    cached, distance_value = row
+    similarity = 1 - distance_value
+    if similarity > threshold:
+        return SemanticMatch(cached=cached, similarity=similarity)
+    return None
+
+
+def build_response_from_cache(cached: CachedResponse) -> ChatCompletionResponse:
+    """Build a fresh ChatCompletionResponse from a semantic cache hit.
+
+    Uses a new completion id/timestamp for this request, since the response
+    was originally generated (and cached) for a different, merely similar,
+    request. No token usage is stored on CachedResponse, so usage is
+    reported as zero, reflecting that a semantic-cache hit consumes no
+    provider tokens.
+    """
+    return ChatCompletionResponse(
+        id=new_completion_id(),
+        created=int(time.time()),
+        model=cached.model,
+        choices=[
+            Choice(
+                index=0,
+                message=ResponseMessage(content=cached.response_text),
+                finish_reason="stop",
+            )
+        ],
+        usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+    )
