@@ -10,7 +10,14 @@ from anthropic import AsyncAnthropic
 from gatekeep.config import get_settings
 from gatekeep.curation import curate_cases, list_unreviewed, review_case
 from gatekeep.db import SessionLocal
-from gatekeep.evals import EvalGateFailure, add_case, create_suite, get_suite_for_prompt, make_eval_gate, run_suite_for_prompt
+from gatekeep.evals import (
+    EvalGateFailure,
+    add_case,
+    create_suite,
+    get_suite_for_prompt,
+    make_eval_gate,
+    run_suite_for_prompt,
+)
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
@@ -97,10 +104,14 @@ async def _sync(directory: str) -> None:
             template = path.read_text(encoding="utf-8")
             name = path.stem
             version = await sync_prompt_from_text(name, template, session)
-            print(f"{name}\tv{version.version_num}{' (active)' if version.active else ' (new, not active)'}")
+            print(
+                f"{name}\tv{version.version_num}{' (active)' if version.active else ' (new, not active)'}"
+            )
 
 
-async def _eval_create_suite(name: str, threshold: float | None, suite_name: str | None) -> None:
+async def _eval_create_suite(
+    name: str, threshold: float | None, suite_name: str | None
+) -> None:
     """Create an eval suite for a prompt, defaulting the threshold from settings."""
     settings = get_settings()
     async with SessionLocal() as session:
@@ -116,7 +127,11 @@ async def _eval_create_suite(name: str, threshold: float | None, suite_name: str
 
 
 async def _eval_add_case(
-    name: str, input_file: str, check_type: str, expected: str | None, judge_criteria: str | None
+    name: str,
+    input_file: str,
+    check_type: str,
+    expected: str | None,
+    judge_criteria: str | None,
 ) -> None:
     """Add a manual, reviewed case to a prompt's eval suite from a JSON messages file."""
     with open(input_file, encoding="utf-8") as f:
@@ -136,7 +151,9 @@ async def _eval_add_case(
     print(f"added {check_type} case {case.id} to {name!r}")
 
 
-async def _eval_run(name: str, version: int | None, model: str | None, include_unreviewed: bool) -> None:
+async def _eval_run(
+    name: str, version: int | None, model: str | None, include_unreviewed: bool
+) -> None:
     """Run a prompt's eval suite against a version/model and print the score."""
     settings = get_settings()
     provider = AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
@@ -152,14 +169,18 @@ async def _eval_run(name: str, version: int | None, model: str | None, include_u
             include_unreviewed=include_unreviewed,
         )
     status = "PASS" if run.passed else "FAIL"
-    print(f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})")
+    print(
+        f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})"
+    )
 
 
 async def _eval_curate(name: str, limit: int) -> None:
     """Mine recent request samples for a prompt into unreviewed curated cases."""
     async with SessionLocal() as session:
         cases = await curate_cases(name, session, limit=limit)
-    print(f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate")
+    print(
+        f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate"
+    )
 
 
 async def _eval_review(name: str) -> None:
@@ -228,15 +249,21 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
 
-    cs = eval_subparsers.add_parser("create-suite", help="create an eval suite for a prompt")
+    cs = eval_subparsers.add_parser(
+        "create-suite", help="create an eval suite for a prompt"
+    )
     cs.add_argument("name")
     cs.add_argument("--threshold", type=float, default=None)
     cs.add_argument("--name", dest="suite_name", default=None)
 
-    ac = eval_subparsers.add_parser("add-case", help="add a manual case from a JSON messages file")
+    ac = eval_subparsers.add_parser(
+        "add-case", help="add a manual case from a JSON messages file"
+    )
     ac.add_argument("name")
     ac.add_argument("--input-file", required=True)
-    ac.add_argument("--check-type", choices=["exact", "contains", "llm_judge"], required=True)
+    ac.add_argument(
+        "--check-type", choices=["exact", "contains", "llm_judge"], required=True
+    )
     ac.add_argument("--expected", default=None)
     ac.add_argument("--judge-criteria", default=None)
 
@@ -246,11 +273,15 @@ def build_parser() -> argparse.ArgumentParser:
     er.add_argument("--model", default=None)
     er.add_argument("--include-unreviewed", action="store_true")
 
-    cu = eval_subparsers.add_parser("curate", help="mine request samples into unreviewed cases")
+    cu = eval_subparsers.add_parser(
+        "curate", help="mine request samples into unreviewed cases"
+    )
     cu.add_argument("name")
     cu.add_argument("--limit", type=int, default=10)
 
-    rv = eval_subparsers.add_parser("review", help="approve/reject unreviewed curated cases")
+    rv = eval_subparsers.add_parser(
+        "review", help="approve/reject unreviewed curated cases"
+    )
     rv.add_argument("name")
 
     return parser
@@ -307,7 +338,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         for item in run.report:
             status = "PASS" if item["passed"] else "FAIL"
-            print(f"  [{status}] case {item['case_id']}: {item['reason']}", file=sys.stderr)
+            print(
+                f"  [{status}] case {item['case_id']}: {item['reason']}",
+                file=sys.stderr,
+            )
         return 2
     except (PromptNotFoundError, PromptVersionNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

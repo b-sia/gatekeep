@@ -28,12 +28,20 @@ async def test_record_and_read_recent_samples_newest_first(session):
 async def test_recent_samples_filters_by_prompt_name(session):
     key = await _key(session)
     await record_request_sample(
-        session, key_id=key.id, prompt_name="a", model="m",
-        input_messages=[{"role": "user", "content": "x"}], output_text="ox",
+        session,
+        key_id=key.id,
+        prompt_name="a",
+        model="m",
+        input_messages=[{"role": "user", "content": "x"}],
+        output_text="ox",
     )
     await record_request_sample(
-        session, key_id=key.id, prompt_name="b", model="m",
-        input_messages=[{"role": "user", "content": "y"}], output_text="oy",
+        session,
+        key_id=key.id,
+        prompt_name="b",
+        model="m",
+        input_messages=[{"role": "user", "content": "y"}],
+        output_text="oy",
     )
     got = await recent_samples("a", session, limit=10)
     assert [s.output_text for s in got] == ["ox"]

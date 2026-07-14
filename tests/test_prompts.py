@@ -50,7 +50,9 @@ def _gate_from(provider):
     from gatekeep.evals import make_eval_gate
 
     return make_eval_gate(
-        provider=provider, generate_model="m", judge_model="claude-sonnet-5",
+        provider=provider,
+        generate_model="m",
+        judge_model="claude-sonnet-5",
         max_tokens=64,
     )
 
@@ -331,9 +333,11 @@ async def test_promote_blocked_when_eval_gate_fails(session):
     await add_prompt_version("system-context", "v2 text", session)
     suite = await create_suite("system-context", session, pass_threshold=1.0)
     await add_case(
-        suite.id, session,
+        suite.id,
+        session,
         input_messages=[{"role": "user", "content": "ping"}],
-        check_type="exact", expected="pong",
+        check_type="exact",
+        expected="pong",
     )
 
     with pytest.raises(EvalGateFailure):
@@ -351,9 +355,11 @@ async def test_promote_allowed_when_eval_gate_passes(session):
     await add_prompt_version("system-context", "v2 text", session)
     suite = await create_suite("system-context", session, pass_threshold=1.0)
     await add_case(
-        suite.id, session,
+        suite.id,
+        session,
         input_messages=[{"role": "user", "content": "ping"}],
-        check_type="contains", expected="pong",
+        check_type="contains",
+        expected="pong",
     )
 
     promoted = await promote_prompt(

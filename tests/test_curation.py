@@ -18,8 +18,12 @@ async def _seed_samples(session, prompt_name, n):
     await session.flush()
     for i in range(n):
         await record_request_sample(
-            session, key_id=key.id, prompt_name=prompt_name, model="m",
-            input_messages=[{"role": "user", "content": f"q{i}"}], output_text=f"a{i}",
+            session,
+            key_id=key.id,
+            prompt_name=prompt_name,
+            model="m",
+            input_messages=[{"role": "user", "content": f"q{i}"}],
+            output_text=f"a{i}",
         )
 
 

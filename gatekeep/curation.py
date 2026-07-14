@@ -39,9 +39,7 @@ async def curate_cases(
     return cases
 
 
-async def list_unreviewed(
-    prompt_name: str, session: AsyncSession
-) -> list[EvalCase]:
+async def list_unreviewed(prompt_name: str, session: AsyncSession) -> list[EvalCase]:
     """List unreviewed curated cases for a prompt, oldest first."""
     suite = await get_suite_for_prompt(prompt_name, session)
     if suite is None:
@@ -54,9 +52,7 @@ async def list_unreviewed(
     return list(result.scalars().all())
 
 
-async def review_case(
-    case_id: int, session: AsyncSession, *, approve: bool
-) -> None:
+async def review_case(case_id: int, session: AsyncSession, *, approve: bool) -> None:
     """Approve (flip reviewed=True) or reject (delete) one curated case.
 
     Raises ValueError if the case id does not exist.
