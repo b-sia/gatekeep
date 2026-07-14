@@ -18,6 +18,7 @@ from gatekeep.evals import (
     make_eval_gate,
     run_suite_for_prompt,
 )
+from gatekeep.fixtures import load_fixtures_dir
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
@@ -174,6 +175,16 @@ async def _eval_run(
     )
 
 
+async def _eval_load_fixtures(directory: str) -> None:
+    """Load every prompts/*.cases.json fixture into the DB (idempotent)."""
+    async with SessionLocal() as session:
+        suites = await load_fixtures_dir(directory, session)
+    for suite in suites:
+        print(
+            f"loaded fixture cases for {suite.prompt_name!r} (threshold {suite.pass_threshold})"
+        )
+
+
 async def _eval_curate(name: str, limit: int) -> None:
     """Mine recent request samples for a prompt into unreviewed curated cases."""
     async with SessionLocal() as session:
@@ -273,6 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
     er.add_argument("--model", default=None)
     er.add_argument("--include-unreviewed", action="store_true")
 
+    lf = eval_subparsers.add_parser(
+        "load-fixtures", help="load prompts/*.cases.json fixtures into the DB"
+    )
+    lf.add_argument("directory")
+
     cu = eval_subparsers.add_parser(
         "curate", help="mine request samples into unreviewed cases"
     )
@@ -329,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
                         args.name, args.version, args.model, args.include_unreviewed
                     )
                 )
+            elif args.eval_command == "load-fixtures":
+                asyncio.run(_eval_load_fixtures(args.directory))
             elif args.eval_command == "curate":
                 asyncio.run(_eval_curate(args.name, args.limit))
             elif args.eval_command == "review":

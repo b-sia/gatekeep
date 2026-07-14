@@ -1,0 +1,10 @@
+{
+  "pass_threshold": 1.0,
+  "cases": [
+    {
+      "input_messages": [{"role": "user", "content": "What is 2+2? Answer with just the number."}],
+      "check_type": "contains",
+      "expected": "4"
+    }
+  ]
+}

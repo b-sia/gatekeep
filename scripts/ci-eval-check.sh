@@ -11,6 +11,9 @@ alembic upgrade head
 echo "Syncing prompt files..."
 gatekeep prompt sync prompts/
 
+echo "Loading eval-case fixtures..."
+gatekeep eval load-fixtures prompts/
+
 status=0
 for file in prompts/*.txt; do
   [ -e "$file" ] || continue
