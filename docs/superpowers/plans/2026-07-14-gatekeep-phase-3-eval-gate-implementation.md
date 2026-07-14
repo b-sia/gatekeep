@@ -2239,6 +2239,343 @@ git commit -m "docs(evals): document eval gate, curation, and cost routing"
 
 ---
 
+## Task 11: In-repo eval-case fixtures for CI (closes CI no-op gap)
+
+**Why this task exists:** The final whole-branch review of Tasks 1-10 found that `.github/workflows/eval-gate.yml` spins up a fresh, empty ephemeral Postgres for every run, and nothing seeds `EvalSuite`/`EvalCase` rows into it. `gatekeep eval run <name>` therefore always raises "no eval suite registered", which `ci-eval-check.sh` treats as a skip — so the CI gate can never fail on a real regression, contradicting the Definition of Done ("GitHub Actions workflow ... fails the check on eval regression"). This was a gap in the plan itself (Task 5/8 never specified how CI's DB gets suites/cases), not a defect in what was built. Resolution (decided): in-repo case fixtures, one JSON file per prompt, committed alongside `prompts/*.txt`, loaded into CI's ephemeral DB before the eval run — consistent with the project's Q1 decision that prompt review happens in-repo via PR diff.
+
+**Files:**
+- Create: `gatekeep/fixtures.py` — fixture-file loading (`load_fixture_file`, `load_fixtures_dir`)
+- Modify: `gatekeep/cli.py` — add `gatekeep eval load-fixtures <dir>`
+- Modify: `scripts/ci-eval-check.sh` — call `gatekeep eval load-fixtures prompts/` before the eval-run loop
+- Create: `prompts/system-context.cases.json` — seed fixture so the CI gate has something real to run against
+- Test: `tests/test_fixtures.py`
+
+**Fixture file format** (`prompts/<name>.cases.json`, sibling of `prompts/<name>.txt`):
+
+```json
+{
+  "pass_threshold": 1.0,
+  "cases": [
+    {
+      "input_messages": [{"role": "user", "content": "What is 2+2? Answer with just the number."}],
+      "check_type": "contains",
+      "expected": "4"
+    }
+  ]
+}
+```
+
+- `pass_threshold`: float, required.
+- `cases`: list of objects, each with `input_messages` (list of `{role, content}` dicts, required), `check_type` (`"exact"` | `"contains"` | `"llm_judge"`, required), and `expected` (required for exact/contains) or `judge_criteria` (required for llm_judge) — same validation `add_case` already performs.
+
+**Behavior:**
+- Fixtures are idempotent and safe to load repeatedly (CI's DB is fresh every run, but the same loader must also not corrupt a persistent dev DB if run there): loading a fixture for `<name>` gets-or-creates the `EvalSuite` for that prompt (creating it if absent, otherwise **updating its `pass_threshold`** to match the fixture — the fixture is the source of truth for CI-gating cases), then **deletes only the suite's existing `source="fixture"` cases** before inserting the fixture's cases fresh with `source="fixture"`, `reviewed=True`. It never touches `source="manual"` or `source="curated"` cases, so fixture loading cannot destroy hand-added or curated-and-approved cases in a suite that also has fixture cases.
+- `EvalCase.source` gains a third value, `"fixture"`, alongside the existing `"manual"`/`"curated"` — this is just a string column (no CHECK constraint in migration `0007`), so no new migration is needed.
+
+**Interfaces:**
+- Consumes: `gatekeep.evals.get_suite_for_prompt`, `create_suite`, `add_case`; `gatekeep.models.EvalCase`.
+- Produces:
+  - `async def load_fixture_file(path: pathlib.Path, session: AsyncSession) -> EvalSuite`
+  - `async def load_fixtures_dir(directory: str, session: AsyncSession) -> list[EvalSuite]`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_fixtures.py`:
+
+```python
+import json
+
+import pytest
+from sqlalchemy import select
+
+from gatekeep.evals import create_suite, get_suite_for_prompt
+from gatekeep.fixtures import load_fixture_file, load_fixtures_dir
+from gatekeep.models import EvalCase
+
+
+def _write_fixture(tmp_path, name, pass_threshold, cases):
+    path = tmp_path / f"{name}.cases.json"
+    path.write_text(json.dumps({"pass_threshold": pass_threshold, "cases": cases}))
+    return path
+
+
+async def test_load_fixture_file_creates_suite_and_cases(tmp_path, session):
+    path = _write_fixture(
+        tmp_path,
+        "system-context",
+        1.0,
+        [
+            {
+                "input_messages": [{"role": "user", "content": "2+2?"}],
+                "check_type": "contains",
+                "expected": "4",
+            }
+        ],
+    )
+
+    suite = await load_fixture_file(path, session)
+    assert suite.prompt_name == "system-context"
+    assert suite.pass_threshold == 1.0
+
+    cases = (
+        (await session.execute(select(EvalCase).where(EvalCase.suite_id == suite.id)))
+        .scalars()
+        .all()
+    )
+    assert len(cases) == 1
+    assert cases[0].source == "fixture"
+    assert cases[0].reviewed is True
+    assert cases[0].check_type == "contains"
+
+
+async def test_load_fixture_file_updates_threshold_and_replaces_fixture_cases(
+    tmp_path, session
+):
+    await create_suite("system-context", session, pass_threshold=0.5)
+    path = _write_fixture(
+        tmp_path,
+        "system-context",
+        0.9,
+        [
+            {
+                "input_messages": [{"role": "user", "content": "hi"}],
+                "check_type": "contains",
+                "expected": "hello",
+            }
+        ],
+    )
+
+    await load_fixture_file(path, session)
+    # loading again with different content must not duplicate rows
+    path2 = _write_fixture(
+        tmp_path,
+        "system-context",
+        0.9,
+        [
+            {
+                "input_messages": [{"role": "user", "content": "bye"}],
+                "check_type": "contains",
+                "expected": "goodbye",
+            }
+        ],
+    )
+    suite = await load_fixture_file(path2, session)
+
+    assert suite.pass_threshold == 0.9
+    cases = (
+        (await session.execute(select(EvalCase).where(EvalCase.suite_id == suite.id)))
+        .scalars()
+        .all()
+    )
+    assert len(cases) == 1
+    assert cases[0].expected == "goodbye"
+
+
+async def test_load_fixture_file_never_touches_manual_or_curated_cases(
+    tmp_path, session
+):
+    from gatekeep.evals import add_case
+
+    suite = await create_suite("system-context", session, pass_threshold=0.9)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "manual"}],
+        check_type="contains",
+        expected="m",
+        source="manual",
+    )
+    path = _write_fixture(
+        tmp_path,
+        "system-context",
+        0.9,
+        [
+            {
+                "input_messages": [{"role": "user", "content": "fixture"}],
+                "check_type": "contains",
+                "expected": "f",
+            }
+        ],
+    )
+
+    await load_fixture_file(path, session)
+
+    cases = (
+        (await session.execute(select(EvalCase).where(EvalCase.suite_id == suite.id)))
+        .scalars()
+        .all()
+    )
+    sources = {c.source for c in cases}
+    assert sources == {"manual", "fixture"}
+    assert len(cases) == 2
+
+
+async def test_load_fixtures_dir_loads_every_cases_json(tmp_path, session):
+    _write_fixture(tmp_path, "a", 1.0, [])
+    _write_fixture(tmp_path, "b", 1.0, [])
+
+    suites = await load_fixtures_dir(str(tmp_path), session)
+    names = {s.prompt_name for s in suites}
+    assert names == {"a", "b"}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_fixtures.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'gatekeep.fixtures'`.
+
+- [ ] **Step 3: Implement gatekeep/fixtures.py**
+
+```python
+from __future__ import annotations
+
+import json
+import pathlib
+
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
+from gatekeep.models import EvalCase, EvalSuite
+
+
+async def load_fixture_file(path: pathlib.Path, session: AsyncSession) -> EvalSuite:
+    """Load one `<name>.cases.json` fixture into the DB, idempotently.
+
+    Gets-or-creates the EvalSuite for the fixture's prompt name (the
+    filename stem), updating pass_threshold to match the fixture. Deletes
+    only this suite's existing source="fixture" cases before inserting the
+    fixture's cases fresh with source="fixture", reviewed=True - manual and
+    curated cases on the same suite are never touched, so re-running this
+    (e.g. in CI, or against a persistent dev DB) is safe and repeatable.
+    """
+    name = path.stem.removesuffix(".cases")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    pass_threshold = data["pass_threshold"]
+    cases = data.get("cases", [])
+
+    suite = await get_suite_for_prompt(name, session)
+    if suite is None:
+        suite = await create_suite(name, session, pass_threshold=pass_threshold)
+    else:
+        suite.pass_threshold = pass_threshold
+        await session.commit()
+        await session.refresh(suite)
+
+    await session.execute(
+        delete(EvalCase).where(
+            EvalCase.suite_id == suite.id, EvalCase.source == "fixture"
+        )
+    )
+    await session.commit()
+
+    for case in cases:
+        await add_case(
+            suite.id,
+            session,
+            input_messages=case["input_messages"],
+            check_type=case["check_type"],
+            expected=case.get("expected"),
+            judge_criteria=case.get("judge_criteria"),
+            reviewed=True,
+            source="fixture",
+        )
+
+    return suite
+
+
+async def load_fixtures_dir(directory: str, session: AsyncSession) -> list[EvalSuite]:
+    """Load every `*.cases.json` fixture file in `directory`."""
+    suites = []
+    for path in sorted(pathlib.Path(directory).glob("*.cases.json")):
+        suites.append(await load_fixture_file(path, session))
+    return suites
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest tests/test_fixtures.py -v`
+Expected: PASS (4 passed).
+
+- [ ] **Step 5: Add the `gatekeep eval load-fixtures` CLI command**
+
+In `gatekeep/cli.py`, add `load_fixtures_dir` to the top-level `from gatekeep.fixtures import load_fixtures_dir` import (new top-level import line, not local), add a handler:
+
+```python
+async def _eval_load_fixtures(directory: str) -> None:
+    """Load every prompts/*.cases.json fixture into the DB (idempotent)."""
+    async with SessionLocal() as session:
+        suites = await load_fixtures_dir(directory, session)
+    for suite in suites:
+        print(f"loaded fixture cases for {suite.prompt_name!r} (threshold {suite.pass_threshold})")
+```
+
+Add a subparser under `eval_subparsers`:
+
+```python
+    lf = eval_subparsers.add_parser(
+        "load-fixtures", help="load prompts/*.cases.json fixtures into the DB"
+    )
+    lf.add_argument("directory")
+```
+
+Route it in the `eval` dispatch block in `main()`.
+
+- [ ] **Step 6: Wire the loader into the CI script**
+
+In `scripts/ci-eval-check.sh`, add a step between "Syncing prompt files..." and the eval-run loop:
+
+```bash
+echo "Loading eval-case fixtures..."
+gatekeep eval load-fixtures prompts/
+```
+
+- [ ] **Step 7: Add the seed fixture**
+
+Create `prompts/system-context.cases.json`:
+
+```json
+{
+  "pass_threshold": 1.0,
+  "cases": [
+    {
+      "input_messages": [{"role": "user", "content": "What is 2+2? Answer with just the number."}],
+      "check_type": "contains",
+      "expected": "4"
+    }
+  ]
+}
+```
+
+- [ ] **Step 8: Update prompts/README.md**
+
+Add a short paragraph documenting the new fixture file convention: `<name>.cases.json` sits alongside `<name>.txt`, holds the CI gate's eval suite/cases for that prompt, and is loaded via `gatekeep eval load-fixtures prompts/` (which CI already runs). Note it only manages `source="fixture"` cases and never touches manually-added or curated-and-approved ones.
+
+- [ ] **Step 9: Verify end to end**
+
+Run:
+```bash
+alembic upgrade head
+gatekeep prompt sync prompts/
+gatekeep eval load-fixtures prompts/
+gatekeep eval run system-context
+```
+Expected: `gatekeep eval run system-context` prints `[PASS]` (requires a real `ANTHROPIC_API_KEY` in `.env` to actually call the provider - if unavailable, at minimum confirm `gatekeep eval load-fixtures prompts/` prints `loaded fixture cases for 'system-context' (threshold 1.0)` and that a suite/case now exists in the DB, proving the CI no-op gap is closed).
+
+- [ ] **Step 10: Full suite + lint**
+
+Run: `pytest -q && ruff check gatekeep tests && ruff format --check gatekeep tests`
+Expected: all green, no lint/format issues on the new/modified files.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add gatekeep/fixtures.py gatekeep/cli.py scripts/ci-eval-check.sh prompts/system-context.cases.json prompts/README.md tests/test_fixtures.py
+git commit -m "feat(evals): in-repo eval-case fixtures loaded into CI's ephemeral DB, closing the no-op gate gap"
+```
+
+---
+
 ## Final verification
 
 - [ ] **Run the full test suite**
@@ -2263,6 +2600,6 @@ Expected: no errors.
 - [ ] `pytest -v` fully green including new eval tests
 - [ ] `gatekeep prompt promote` blocks on a failing eval suite and prints a report; ungated when no suite is registered
 - [ ] `gatekeep eval curate` pulls real traffic (`request_samples`) into unreviewed `EvalCase` rows; `gatekeep eval review` lets a human approve/reject
-- [ ] GitHub Actions workflow runs on prompt-template PRs and fails on eval regression
+- [ ] GitHub Actions workflow runs on prompt-template PRs and fails on eval regression (requires Task 11's in-repo case fixtures — CI's ephemeral DB has no suites/cases without them)
 - [ ] Cost-based routing implemented behind an opt-in flag, never silently overriding an explicit model request
 - [ ] README updated with eval gate + curation workflow examples
