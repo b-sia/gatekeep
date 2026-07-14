@@ -1,0 +1,41 @@
+name: eval-gate
+
+on:
+  pull_request:
+    paths:
+      - "prompts/**"
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: gatekeep
+          POSTGRES_PASSWORD: gatekeep
+          POSTGRES_DB: gatekeep
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U gatekeep"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - "6379:6379"
+    env:
+      DATABASE_URL: postgresql+asyncpg://gatekeep:gatekeep@localhost:5432/gatekeep
+      REDIS_URL: redis://localhost:6379/0
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run eval gate
+        run: bash scripts/ci-eval-check.sh
