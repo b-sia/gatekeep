@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 
 from anthropic import AsyncAnthropic
 
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal
-from gatekeep.evals import EvalGateFailure, make_eval_gate
+from gatekeep.evals import EvalGateFailure, add_case, create_suite, make_eval_gate, run_suite_for_prompt
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
@@ -84,6 +85,63 @@ async def _rollback(name: str) -> None:
     print(f"rolled back {name!r} to version {rolled_back.version_num}")
 
 
+async def _eval_create_suite(name: str, threshold: float | None, suite_name: str | None) -> None:
+    """Create an eval suite for a prompt, defaulting the threshold from settings."""
+    settings = get_settings()
+    async with SessionLocal() as session:
+        suite = await create_suite(
+            name,
+            session,
+            pass_threshold=threshold
+            if threshold is not None
+            else settings.eval_pass_threshold_default,
+            name=suite_name,
+        )
+    print(f"created eval suite for {name!r} (threshold {suite.pass_threshold})")
+
+
+async def _eval_add_case(
+    name: str, input_file: str, check_type: str, expected: str | None, judge_criteria: str | None
+) -> None:
+    """Add a manual, reviewed case to a prompt's eval suite from a JSON messages file."""
+    with open(input_file, encoding="utf-8") as f:
+        input_messages = json.load(f)
+    async with SessionLocal() as session:
+        from gatekeep.evals import get_suite_for_prompt
+
+        suite = await get_suite_for_prompt(name, session)
+        if suite is None:
+            raise ValueError(f"no eval suite registered for prompt {name!r}")
+        case = await add_case(
+            suite.id,
+            session,
+            input_messages=input_messages,
+            check_type=check_type,
+            expected=expected,
+            judge_criteria=judge_criteria,
+        )
+    print(f"added {check_type} case {case.id} to {name!r}")
+
+
+async def _eval_run(name: str, version: int | None, model: str | None, include_unreviewed: bool) -> None:
+    """Run a prompt's eval suite against a version/model and print the score."""
+    settings = get_settings()
+    provider = AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
+    async with SessionLocal() as session:
+        run = await run_suite_for_prompt(
+            name,
+            session,
+            provider=provider,
+            generate_model=model or settings.default_model,
+            judge_model=settings.eval_judge_model,
+            max_tokens=settings.default_max_tokens,
+            version_num=version,
+            include_unreviewed=include_unreviewed,
+        )
+    status = "PASS" if run.passed else "FAIL"
+    print(f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the `gatekeep` CLI's argument parser and its `prompt` subcommands."""
     parser = argparse.ArgumentParser(prog="gatekeep")
@@ -125,6 +183,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("name")
 
+    eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+
+    cs = eval_subparsers.add_parser("create-suite", help="create an eval suite for a prompt")
+    cs.add_argument("name")
+    cs.add_argument("--threshold", type=float, default=None)
+    cs.add_argument("--name", dest="suite_name", default=None)
+
+    ac = eval_subparsers.add_parser("add-case", help="add a manual case from a JSON messages file")
+    ac.add_argument("name")
+    ac.add_argument("--input-file", required=True)
+    ac.add_argument("--check-type", choices=["exact", "contains", "llm_judge"], required=True)
+    ac.add_argument("--expected", default=None)
+    ac.add_argument("--judge-criteria", default=None)
+
+    er = eval_subparsers.add_parser("run", help="run a prompt's eval suite")
+    er.add_argument("name")
+    er.add_argument("--version", type=int, default=None)
+    er.add_argument("--model", default=None)
+    er.add_argument("--include-unreviewed", action="store_true")
+
     return parser
 
 
@@ -147,6 +226,27 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_promote(args.name, args.version))
             elif args.prompt_command == "rollback":
                 asyncio.run(_rollback(args.name))
+        elif args.command == "eval":
+            if args.eval_command == "create-suite":
+                asyncio.run(
+                    _eval_create_suite(args.name, args.threshold, args.suite_name)
+                )
+            elif args.eval_command == "add-case":
+                asyncio.run(
+                    _eval_add_case(
+                        args.name,
+                        args.input_file,
+                        args.check_type,
+                        args.expected,
+                        args.judge_criteria,
+                    )
+                )
+            elif args.eval_command == "run":
+                asyncio.run(
+                    _eval_run(
+                        args.name, args.version, args.model, args.include_unreviewed
+                    )
+                )
     except EvalGateFailure as exc:
         run = exc.eval_run
         print(f"error: {exc}", file=sys.stderr)

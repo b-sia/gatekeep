@@ -6,6 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.models import EvalCase, EvalRun, EvalSuite, PromptVersion
+from gatekeep.prompts import (
+    PromptNotFoundError,
+    get_active_prompt_version,
+    _get_prompt_row,
+)
 
 _JUDGE_TEMPLATE = (
     "Given criteria: {criteria}\n\n"
@@ -234,3 +239,56 @@ def make_eval_gate(
             raise EvalGateFailure(run)
 
     return gate
+
+
+async def run_suite_for_prompt(
+    prompt_name: str,
+    session: AsyncSession,
+    *,
+    provider,
+    generate_model: str,
+    judge_model: str,
+    max_tokens: int,
+    version_num: int | None = None,
+    include_unreviewed: bool = False,
+) -> EvalRun:
+    """Resolve the suite and target version for `prompt_name`, then run the suite.
+
+    Uses the active version unless `version_num` is given. Raises ValueError
+    if no suite is registered, PromptNotFoundError if the prompt is unknown,
+    and PromptVersionNotFoundError if `version_num` does not exist.
+    """
+    suite = await get_suite_for_prompt(prompt_name, session)
+    if suite is None:
+        raise ValueError(f"no eval suite registered for prompt {prompt_name!r}")
+
+    if version_num is None:
+        version = await get_active_prompt_version(prompt_name, session)
+    else:
+        prompt = await _get_prompt_row(prompt_name, session)
+        from gatekeep.models import PromptVersion
+        from gatekeep.prompts import PromptVersionNotFoundError
+
+        version = (
+            await session.execute(
+                select(PromptVersion).where(
+                    PromptVersion.prompt_id == prompt.id,
+                    PromptVersion.version_num == version_num,
+                )
+            )
+        ).scalar_one_or_none()
+        if version is None:
+            raise PromptVersionNotFoundError(
+                f"prompt {prompt_name!r} has no version {version_num}"
+            )
+
+    return await run_eval_suite(
+        suite,
+        version,
+        session,
+        provider=provider,
+        generate_model=generate_model,
+        judge_model=judge_model,
+        max_tokens=max_tokens,
+        include_unreviewed=include_unreviewed,
+    )

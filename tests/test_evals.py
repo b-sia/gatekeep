@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 
 from gatekeep.evals import (
     EvalGateFailure,
@@ -7,8 +8,10 @@ from gatekeep.evals import (
     get_suite_for_prompt,
     make_eval_gate,
     run_eval_suite,
+    run_suite_for_prompt,
 )
 from gatekeep.models import Prompt, PromptVersion
+from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
 from gatekeep.providers.base import CompletionResult
 
 
@@ -148,3 +151,46 @@ async def test_unreviewed_cases_excluded_by_default(session):
     # empty suite of reviewed cases scores 1.0 (vacuously passes) and calls nothing
     assert run.report == []
     assert provider.payloads == []
+
+
+async def test_run_suite_for_prompt_uses_active_version_by_default(session):
+    await create_prompt("system-context", "v1 template", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    await add_case(
+        suite.id, session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="contains", expected="ok",
+    )
+    provider = FakeProvider(["ok!"])
+
+    run = await run_suite_for_prompt(
+        "system-context", session,
+        provider=provider, generate_model="m", judge_model="claude-sonnet-5",
+        max_tokens=64,
+    )
+    assert run.passed is True
+
+
+async def test_run_suite_for_prompt_can_target_a_specific_version(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    await add_case(
+        suite.id, session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="contains", expected="ok",
+    )
+    provider = FakeProvider(["ok"])
+
+    run = await run_suite_for_prompt(
+        "system-context", session, version_num=2,
+        provider=provider, generate_model="m", judge_model="claude-sonnet-5",
+        max_tokens=64,
+    )
+    # the v2 version row was evaluated
+    v2 = (
+        await session.execute(
+            select(PromptVersion).where(PromptVersion.version_num == 2)
+        )
+    ).scalar_one()
+    assert run.prompt_version_id == v2.id
