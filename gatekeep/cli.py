@@ -154,8 +154,12 @@ async def _eval_add_case(
 
 async def _eval_run(
     name: str, version: int | None, model: str | None, include_unreviewed: bool
-) -> None:
-    """Run a prompt's eval suite against a version/model and print the score."""
+) -> bool:
+    """Run a prompt's eval suite against a version/model, print the score, and return whether it passed.
+
+    Returns:
+        True if the eval suite passed, False otherwise.
+    """
     settings = get_settings()
     provider = AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
     async with SessionLocal() as session:
@@ -173,6 +177,7 @@ async def _eval_run(
     print(
         f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})"
     )
+    return run.passed
 
 
 async def _eval_load_fixtures(directory: str) -> None:
@@ -340,11 +345,13 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             elif args.eval_command == "run":
-                asyncio.run(
+                passed = asyncio.run(
                     _eval_run(
                         args.name, args.version, args.model, args.include_unreviewed
                     )
                 )
+                if not passed:
+                    return 2
             elif args.eval_command == "load-fixtures":
                 asyncio.run(_eval_load_fixtures(args.directory))
             elif args.eval_command == "curate":
