@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.models import EvalCase, EvalRun, EvalSuite, PromptVersion
 from gatekeep.prompts import (
-    PromptNotFoundError,
+    PromptVersionNotFoundError,
     get_active_prompt_version,
     _get_prompt_row,
 )
@@ -266,9 +266,6 @@ async def run_suite_for_prompt(
         version = await get_active_prompt_version(prompt_name, session)
     else:
         prompt = await _get_prompt_row(prompt_name, session)
-        from gatekeep.models import PromptVersion
-        from gatekeep.prompts import PromptVersionNotFoundError
-
         version = (
             await session.execute(
                 select(PromptVersion).where(

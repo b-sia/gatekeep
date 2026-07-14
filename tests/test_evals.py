@@ -11,7 +11,7 @@ from gatekeep.evals import (
     run_suite_for_prompt,
 )
 from gatekeep.models import Prompt, PromptVersion
-from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
+from gatekeep.prompts import add_prompt_version, create_prompt
 from gatekeep.providers.base import CompletionResult
 
 

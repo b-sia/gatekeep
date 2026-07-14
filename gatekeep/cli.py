@@ -9,7 +9,7 @@ from anthropic import AsyncAnthropic
 
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal
-from gatekeep.evals import EvalGateFailure, add_case, create_suite, make_eval_gate, run_suite_for_prompt
+from gatekeep.evals import EvalGateFailure, add_case, create_suite, get_suite_for_prompt, make_eval_gate, run_suite_for_prompt
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
@@ -107,8 +107,6 @@ async def _eval_add_case(
     with open(input_file, encoding="utf-8") as f:
         input_messages = json.load(f)
     async with SessionLocal() as session:
-        from gatekeep.evals import get_suite_for_prompt
-
         suite = await get_suite_for_prompt(name, session)
         if suite is None:
             raise ValueError(f"no eval suite registered for prompt {name!r}")
