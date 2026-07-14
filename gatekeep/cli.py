@@ -21,6 +21,7 @@ from gatekeep.prompts import (
     list_prompts,
     promote_prompt,
     rollback_prompt,
+    sync_prompt_from_text,
 )
 from gatekeep.providers.anthropic import AnthropicProvider
 
@@ -84,6 +85,19 @@ async def _rollback(name: str) -> None:
     async with SessionLocal() as session:
         rolled_back = await rollback_prompt(name, session, redis=redis)
     print(f"rolled back {name!r} to version {rolled_back.version_num}")
+
+
+async def _sync(directory: str) -> None:
+    """Sync every prompts/*.txt file into the DB, adding versions where text changed."""
+    import pathlib
+
+    paths = sorted(pathlib.Path(directory).glob("*.txt"))
+    async with SessionLocal() as session:
+        for path in paths:
+            template = path.read_text(encoding="utf-8")
+            name = path.stem
+            version = await sync_prompt_from_text(name, template, session)
+            print(f"{name}\tv{version.version_num}{' (active)' if version.active else ' (new, not active)'}")
 
 
 async def _eval_create_suite(name: str, threshold: float | None, suite_name: str | None) -> None:
@@ -206,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("name")
 
+    sync_parser = prompt_subparsers.add_parser(
+        "sync", help="sync all *.txt files from a directory into the DB"
+    )
+    sync_parser.add_argument("directory")
+
     eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
 
@@ -256,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_promote(args.name, args.version))
             elif args.prompt_command == "rollback":
                 asyncio.run(_rollback(args.name))
+            elif args.prompt_command == "sync":
+                asyncio.run(_sync(args.directory))
         elif args.command == "eval":
             if args.eval_command == "create-suite":
                 asyncio.run(
