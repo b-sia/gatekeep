@@ -136,7 +136,9 @@ Send `"route_by_cost": true` (optionally with `"quality_floor": 0.9`) alongside
 `"prompt_name"` to let the gateway substitute the cheapest model that has a
 passing eval run at or above the floor for that prompt. It never overrides an
 explicit model choice unless you opt in, and never routes up to a costlier
-model. The substitution is recorded in `request_logs.routed_from`.
+model. For non-streaming requests, the substitution is recorded in
+`request_logs.routed_from`; streaming requests are routed the same way but do
+not currently record `routed_from` (a known Phase 3 limitation).
 
 ## Integrate Gatekeep into your own app
 
