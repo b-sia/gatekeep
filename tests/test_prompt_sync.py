@@ -1,5 +1,4 @@
 from gatekeep.prompts import (
-    add_prompt_version,
     create_prompt,
     get_active_prompt_version,
     sync_prompt_from_text,
