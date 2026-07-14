@@ -8,6 +8,7 @@ import sys
 from anthropic import AsyncAnthropic
 
 from gatekeep.config import get_settings
+from gatekeep.curation import curate_cases, list_unreviewed, review_case
 from gatekeep.db import SessionLocal
 from gatekeep.evals import EvalGateFailure, add_case, create_suite, get_suite_for_prompt, make_eval_gate, run_suite_for_prompt
 from gatekeep.middleware.ratelimit import get_redis
@@ -140,6 +141,30 @@ async def _eval_run(name: str, version: int | None, model: str | None, include_u
     print(f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})")
 
 
+async def _eval_curate(name: str, limit: int) -> None:
+    """Mine recent request samples for a prompt into unreviewed curated cases."""
+    async with SessionLocal() as session:
+        cases = await curate_cases(name, session, limit=limit)
+    print(f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate")
+
+
+async def _eval_review(name: str) -> None:
+    """Interactively approve/reject each unreviewed curated case for a prompt."""
+    async with SessionLocal() as session:
+        pending = await list_unreviewed(name, session)
+        if not pending:
+            print(f"no unreviewed cases for {name!r}")
+            return
+        for case in pending:
+            print(f"\ncase {case.id}: input={case.input_messages}")
+            print(f"  judge_criteria: {case.judge_criteria}")
+            answer = input("  approve? [y/N/q] ").strip().lower()
+            if answer == "q":
+                break
+            await review_case(case.id, session, approve=(answer == "y"))
+            print("  approved" if answer == "y" else "  rejected (deleted)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the `gatekeep` CLI's argument parser and its `prompt` subcommands."""
     parser = argparse.ArgumentParser(prog="gatekeep")
@@ -202,6 +227,13 @@ def build_parser() -> argparse.ArgumentParser:
     er.add_argument("--model", default=None)
     er.add_argument("--include-unreviewed", action="store_true")
 
+    cu = eval_subparsers.add_parser("curate", help="mine request samples into unreviewed cases")
+    cu.add_argument("name")
+    cu.add_argument("--limit", type=int, default=10)
+
+    rv = eval_subparsers.add_parser("review", help="approve/reject unreviewed curated cases")
+    rv.add_argument("name")
+
     return parser
 
 
@@ -245,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
                         args.name, args.version, args.model, args.include_unreviewed
                     )
                 )
+            elif args.eval_command == "curate":
+                asyncio.run(_eval_curate(args.name, args.limit))
+            elif args.eval_command == "review":
+                asyncio.run(_eval_review(args.name))
     except EvalGateFailure as exc:
         run = exc.eval_run
         print(f"error: {exc}", file=sys.stderr)
