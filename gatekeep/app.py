@@ -57,6 +57,7 @@ from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
+from gatekeep.routing import select_model
 from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,19 @@ async def chat_completions(
     `req.messages` as a system message, ahead of any system/developer
     messages the client also sent (openai_to_payload lifts and concatenates
     all of them into one `system` string, in message order).
+
+    If `route_by_cost` is set on the request (and `prompt_name` is also set),
+    the requested model may be substituted for a strictly cheaper one via
+    `select_model`, but only when that cheaper model has a recent passing
+    `EvalRun` at or above `quality_floor` (default 0.0) for the prompt's eval
+    suite. Routing never activates unless explicitly opted into, and never
+    substitutes a more expensive model. The substitution happens before the
+    streaming/non-streaming branch, so a chosen model flows into both the
+    provider call and (when `stream: true`) the SSE dispatch. What is scoped
+    out of Phase 3 is `routed_from` accounting on the streaming path: `_sse`
+    still calls `log_request` without `routed_from`, since routing decisions
+    are informed by eval history that only the non-streaming path records
+    samples for.
     """
     settings = get_settings()
     if req.prompt_name is not None:
@@ -157,6 +171,16 @@ async def chat_completions(
 
     provider = get_provider(provider_name)
     model = payload["model"]
+
+    routed_from = None
+    if req.route_by_cost and req.prompt_name is not None:
+        floor = req.quality_floor if req.quality_floor is not None else 0.0
+        chosen = await select_model(model, req.prompt_name, floor, session)
+        if chosen != model:
+            routed_from = model
+            model = chosen
+            payload["model"] = chosen
+
     requests_total.labels(model=model, key_id=str(key.id)).inc()
 
     if req.stream:
@@ -283,6 +307,7 @@ async def chat_completions(
         completion_tokens=result.output_tokens,
         response_id=response.id,
         prompt_name=req.prompt_name,
+        routed_from=routed_from,
     )
     observe_request(
         model=model,
