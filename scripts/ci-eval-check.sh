@@ -16,8 +16,11 @@ for file in prompts/*.txt; do
   [ -e "$file" ] || continue
   name="$(basename "$file" .txt)"
   echo "== eval: $name =="
-  output="$(gatekeep eval run "$name" 2>&1)"
-  code=$?
+  if output="$(gatekeep eval run "$name" 2>&1)"; then
+    code=0
+  else
+    code=$?
+  fi
   echo "$output"
   if [ "$code" -ne 0 ]; then
     # Distinguish "no suite" (skip) from a real gate failure, without
