@@ -57,6 +57,7 @@ from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.ollama import OllamaProvider
+from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,15 @@ async def chat_completions(
             cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
             prompt_name=req.prompt_name,
         )
+    if req.prompt_name is not None:
+        await record_request_sample(
+            session,
+            key_id=key.id,
+            prompt_name=req.prompt_name,
+            model=model,
+            input_messages=payload["messages"],
+            output_text=response.choices[0].message.content or "",
+        )
     await log_request(
         session,
         key_id=key.id,
@@ -272,6 +282,7 @@ async def chat_completions(
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
+        prompt_name=req.prompt_name,
     )
     observe_request(
         model=model,
