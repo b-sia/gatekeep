@@ -4,8 +4,11 @@ import argparse
 import asyncio
 import sys
 
+from anthropic import AsyncAnthropic
+
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal
+from gatekeep.evals import EvalGateFailure, make_eval_gate
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import (
     PromptNotFoundError,
@@ -17,6 +20,7 @@ from gatekeep.prompts import (
     promote_prompt,
     rollback_prompt,
 )
+from gatekeep.providers.anthropic import AnthropicProvider
 
 
 async def _create(name: str, template_file: str) -> None:
@@ -55,10 +59,20 @@ async def _show(name: str) -> None:
 
 
 async def _promote(name: str, version_num: int) -> None:
-    """Promote an existing prompt version to active, invalidating its cached responses."""
-    redis = get_redis(get_settings())
+    """Promote a prompt version to active, running its eval gate first if one exists."""
+    settings = get_settings()
+    redis = get_redis(settings)
+    provider = AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
+    gate = make_eval_gate(
+        provider=provider,
+        generate_model=settings.default_model,
+        judge_model=settings.eval_judge_model,
+        max_tokens=settings.default_max_tokens,
+    )
     async with SessionLocal() as session:
-        promoted = await promote_prompt(name, version_num, session, redis=redis)
+        promoted = await promote_prompt(
+            name, version_num, session, redis=redis, gate=gate
+        )
     print(f"promoted {name!r} to version {promoted.version_num}")
 
 
@@ -133,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_promote(args.name, args.version))
             elif args.prompt_command == "rollback":
                 asyncio.run(_rollback(args.name))
+    except EvalGateFailure as exc:
+        run = exc.eval_run
+        print(f"error: {exc}", file=sys.stderr)
+        for item in run.report:
+            status = "PASS" if item["passed"] else "FAIL"
+            print(f"  [{status}] case {item['case_id']}: {item['reason']}", file=sys.stderr)
+        return 2
     except (PromptNotFoundError, PromptVersionNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

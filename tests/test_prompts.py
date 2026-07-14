@@ -8,6 +8,7 @@ from gatekeep.api.openai_schemas import (
     Usage,
 )
 from gatekeep.embeddings import embed_text
+from gatekeep.evals import EvalGateFailure, add_case, create_suite
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
@@ -16,6 +17,7 @@ from gatekeep.middleware.cache_exact import (
 from gatekeep.middleware.cache_semantic import store_cached_response
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import CachedResponse
+from gatekeep.models import Prompt as _Prompt  # noqa: F401  (ensure import path)
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -27,6 +29,30 @@ from gatekeep.prompts import (
     promote_prompt,
     rollback_prompt,
 )
+from gatekeep.providers.base import CompletionResult
+
+
+class _FakeProvider:
+    """Fake provider that returns queued text responses in order, ignoring the payload."""
+
+    def __init__(self, texts):
+        self._texts = list(texts)
+
+    async def complete(self, payload):
+        """Pop and return the next queued text as a CompletionResult."""
+        return CompletionResult(
+            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
+        )
+
+
+def _gate_from(provider):
+    """Build an eval gate using `provider` for both generation and judging."""
+    from gatekeep.evals import make_eval_gate
+
+    return make_eval_gate(
+        provider=provider, generate_model="m", judge_model="claude-sonnet-5",
+        max_tokens=64,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -297,6 +323,52 @@ async def test_promote_is_noop_when_nothing_cached_for_prompt(session):
     redis = get_redis()
 
     promoted = await promote_prompt("system-context", 2, session, redis=redis)
+    assert promoted.version_num == 2
+
+
+async def test_promote_blocked_when_eval_gate_fails(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    await add_case(
+        suite.id, session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="exact", expected="pong",
+    )
+
+    with pytest.raises(EvalGateFailure):
+        await promote_prompt(
+            "system-context", 2, session, gate=_gate_from(_FakeProvider(["wrong"]))
+        )
+
+    # active version unchanged (still v1)
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 1
+
+
+async def test_promote_allowed_when_eval_gate_passes(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    await add_case(
+        suite.id, session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="contains", expected="pong",
+    )
+
+    promoted = await promote_prompt(
+        "system-context", 2, session, gate=_gate_from(_FakeProvider(["...pong..."]))
+    )
+    assert promoted.version_num == 2
+
+
+async def test_promote_allowed_when_no_suite_registered(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+
+    promoted = await promote_prompt(
+        "system-context", 2, session, gate=_gate_from(_FakeProvider([]))
+    )
     assert promoted.version_num == 2
 
 

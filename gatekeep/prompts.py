@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.middleware.cache_exact import invalidate_prompt_cache
 from gatekeep.middleware.cache_semantic import delete_cached_responses_by_prompt
 from gatekeep.models import Prompt, PromptVersion
+
+if TYPE_CHECKING:
+    from gatekeep.evals import Gate
 
 
 class PromptNotFoundError(ValueError):
@@ -105,7 +110,12 @@ async def add_prompt_version(
 
 
 async def promote_prompt(
-    name: str, version_num: int, session: AsyncSession, *, redis: Redis | None = None
+    name: str,
+    version_num: int,
+    session: AsyncSession,
+    *,
+    redis: Redis | None = None,
+    gate: "Gate | None" = None,
 ) -> PromptVersion:
     """Atomically repoint a prompt's active version to an existing version_num.
 
@@ -117,6 +127,16 @@ async def promote_prompt(
     version_num - 1). Raises PromptNotFoundError if the prompt doesn't
     exist, or PromptVersionNotFoundError if version_num doesn't exist for
     it.
+
+    If `gate` is given, it is awaited with `(name, target, session)` after
+    `target` is resolved but before any mutation happens. This is the eval
+    gate: it runs the target version's eval suite (if one is registered)
+    and raises EvalGateFailure to block promotion on a failing run, leaving
+    `active_version_id` and all caches untouched. `gate` is optional and
+    defaults to None (ungated), so existing callers are unaffected.
+    rollback_prompt calls this function without a gate, so rollbacks are
+    never eval-gated - reverting to an already-proven version doesn't need
+    re-evaluation.
 
     Every promotion invalidates the cache entries this prompt previously
     produced, since they were built from substituted text that may no
@@ -139,6 +159,9 @@ async def promote_prompt(
         raise PromptVersionNotFoundError(
             f"prompt {name!r} has no version {version_num}"
         )
+
+    if gate is not None:
+        await gate(name, target, session)
 
     if prompt.active_version_id is not None and prompt.active_version_id != target.id:
         previous = await session.get(PromptVersion, prompt.active_version_id)
