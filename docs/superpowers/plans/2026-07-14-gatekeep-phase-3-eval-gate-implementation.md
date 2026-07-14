@@ -1885,9 +1885,13 @@ for file in prompts/*.txt; do
   [ -e "$file" ] || continue
   name="$(basename "$file" .txt)"
   echo "== eval: $name =="
-  if ! gatekeep eval run "$name"; then
-    # Distinguish "no suite" (skip) from a real gate failure.
-    if gatekeep eval run "$name" 2>&1 | grep -q "no eval suite registered"; then
+  output="$(gatekeep eval run "$name" 2>&1)"
+  code=$?
+  echo "$output"
+  if [ "$code" -ne 0 ]; then
+    # Distinguish "no suite" (skip) from a real gate failure, without
+    # re-running the command (its provider calls are not free/idempotent-cheap).
+    if echo "$output" | grep -q "no eval suite registered"; then
       echo "  (no suite; skipping)"
     else
       echo "  FAILED"
