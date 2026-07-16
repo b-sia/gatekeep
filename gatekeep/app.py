@@ -185,7 +185,7 @@ async def chat_completions(
 
     if req.stream:
         return StreamingResponse(
-            _sse(provider, payload, model, key_id=key.id),
+            _sse(provider, payload, model, key_id=key.id, prompt_name=req.prompt_name, routed_from=routed_from),
             media_type="text/event-stream",
         )
 
@@ -325,6 +325,8 @@ async def _sse(
     model: str,
     *,
     key_id: int,
+    prompt_name: str | None = None,
+    routed_from: str | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
@@ -358,6 +360,8 @@ async def _sse(
                         prompt_tokens=ev.input_tokens,
                         completion_tokens=ev.output_tokens,
                         response_id=completion_id,
+                        prompt_name=prompt_name,
+                        routed_from=routed_from,
                     )
                 observe_request(
                     model=model,
