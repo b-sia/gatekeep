@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     rate_limit_refill_rate: float = 100 / 60
     cache_exact_ttl_seconds: int = 604800
     semantic_cache_similarity_threshold: float = 0.95
+    eval_judge_model: str = "claude-sonnet-5"
+    eval_pass_threshold_default: float = 0.9
 
 
 @lru_cache

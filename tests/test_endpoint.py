@@ -10,9 +10,10 @@ import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
+from gatekeep.evals import create_suite
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, RequestLog
-from gatekeep.prompts import create_prompt
+from gatekeep.models import ApiKey, EvalRun, RequestLog
+from gatekeep.prompts import create_prompt, get_active_prompt_version
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
@@ -258,3 +259,131 @@ async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
     assert r.status_code == 400
     body = r.json()
     assert body["error"]["type"] == "invalid_request_error"
+
+
+async def _seed_passing_eval_for_cheaper_model(session, prompt_name, cheap_model):
+    """Create `prompt_name` with an active version, register its eval suite, and
+    record a passing EvalRun for `cheap_model` so `select_model` will route to it.
+
+    Returns nothing; the caller only needs the side effects committed to `session`.
+    """
+    await create_prompt(prompt_name, "You are a pirate.", session)
+    version = await get_active_prompt_version(prompt_name, session)
+    suite = await create_suite(prompt_name, session, pass_threshold=0.9)
+    session.add(
+        EvalRun(
+            suite_id=suite.id,
+            prompt_version_id=version.id,
+            model=cheap_model,
+            score=0.95,
+            passed=True,
+            report=[],
+        )
+    )
+    await session.commit()
+
+
+async def test_route_by_cost_with_prompt_name_substitutes_cheaper_qualifying_model(
+    client, raw_key, session
+):
+    """route_by_cost=true + prompt_name set + a cheaper model with a passing
+    EvalRun at/above the quality floor must actually substitute the model:
+    the provider is called with the cheaper model and `routed_from` records
+    the originally-requested model on the resulting RequestLog row."""
+    cheap_model = "claude-haiku-4-5-20251001"
+    await _seed_passing_eval_for_cheaper_model(session, "system-context", cheap_model)
+
+    captured = {}
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        captured["payload"] = payload
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "gpt-4o",
+                "prompt_name": "system-context",
+                "route_by_cost": True,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == cheap_model
+    assert captured["payload"]["model"] == cheap_model
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == body["id"])
+        )
+    ).scalar_one()
+    assert log.model == cheap_model
+    assert log.routed_from == "claude-sonnet-5"
+
+
+async def test_route_by_cost_without_prompt_name_is_a_noop(client, raw_key, session):
+    """route_by_cost=true without prompt_name must never substitute, even
+    though a cheaper qualifying model exists elsewhere: routing requires
+    both fields to be set."""
+    cheap_model = "claude-haiku-4-5-20251001"
+    await _seed_passing_eval_for_cheaper_model(session, "system-context", cheap_model)
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "route_by_cost": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "claude-sonnet-5"
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == body["id"])
+        )
+    ).scalar_one()
+    assert log.model == "claude-sonnet-5"
+    assert log.routed_from is None
+
+
+async def test_route_by_cost_defaults_to_false_and_never_substitutes(
+    client, raw_key, session
+):
+    """route_by_cost omitted (defaulting to False) must never substitute the
+    model, even when prompt_name is set and a cheaper qualifying model
+    exists - this is the 'never silently override' invariant."""
+    cheap_model = "claude-haiku-4-5-20251001"
+    await _seed_passing_eval_for_cheaper_model(session, "system-context", cheap_model)
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "prompt_name": "system-context",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "claude-sonnet-5"
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == body["id"])
+        )
+    ).scalar_one()
+    assert log.model == "claude-sonnet-5"
+    assert log.routed_from is None

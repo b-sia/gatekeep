@@ -27,6 +27,8 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     stop: Union[str, list[str], None] = None
     prompt_name: Optional[str] = None
+    route_by_cost: bool = False
+    quality_floor: Optional[float] = None
 
 
 class Usage(BaseModel):

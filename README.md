@@ -93,6 +93,53 @@ Env vars the demo app reads (also loaded from `.env` if present):
 
 `demo/example_client.py` has runnable, standalone versions of the integration patterns below (basic request, streaming, retries, multi-turn, provider switching) if you want to see them outside the web UI.
 
+## Eval gate and prompt quality control
+
+Prompt templates live in-repo under `prompts/` (one `*.txt` per prompt, named by
+filename). A change is a PR: the diff gets reviewed and the `eval-gate` workflow
+runs the prompt's eval suite against the change.
+
+Register a suite and cases, then curate more from real traffic:
+
+```bash
+# One suite per prompt; threshold defaults to EVAL_PASS_THRESHOLD_DEFAULT.
+gatekeep eval create-suite system-context --threshold 0.9
+
+# Add a deterministic case from a JSON messages file.
+echo '[{"role":"user","content":"ping"}]' > /tmp/case.json
+gatekeep eval add-case system-context --input-file /tmp/case.json \
+  --check-type contains --expected pong
+
+# Grow the suite from recent real traffic (writes unreviewed cases).
+gatekeep eval curate system-context --limit 20
+gatekeep eval review system-context   # approve/reject each, interactively
+
+# Run the suite manually (defaults to the active version + DEFAULT_MODEL).
+gatekeep eval run system-context
+```
+
+Promotion is gated: `gatekeep prompt promote <name> <version>` runs the suite
+first and refuses to activate a version that scores below the suite threshold,
+printing a per-case report. Prompts with no suite promote exactly as before
+(the gate is opt-in). `rollback` is never gated.
+
+The `llm_judge` check grades output with a fixed, stronger judge model
+(`EVAL_JUDGE_MODEL`, default `claude-sonnet-5`) rather than the model under
+test, to avoid a model rubber-stamping its own failure mode.
+
+CI requires an `ANTHROPIC_API_KEY` repository secret so the gate's generation
+and judge calls can reach the provider.
+
+### Cost-based routing (opt-in)
+
+Send `"route_by_cost": true` (optionally with `"quality_floor": 0.9`) alongside
+`"prompt_name"` to let the gateway substitute the cheapest model that has a
+passing eval run at or above the floor for that prompt. It never overrides an
+explicit model choice unless you opt in, and never routes up to a costlier
+model. For non-streaming requests, the substitution is recorded in
+`request_logs.routed_from`; streaming requests are routed the same way but do
+not currently record `routed_from` (a known Phase 3 limitation).
+
 ## Integrate Gatekeep into your own app
 
 **Using the OpenAI client library** (recommended if you already use it):
