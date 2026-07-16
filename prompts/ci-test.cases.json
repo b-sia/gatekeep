@@ -1,0 +1,12 @@
+{
+  "pass_threshold": 0.5,
+  "cases": [
+    {
+      "input_messages": [
+        {"role": "user", "content": "Hello"}
+      ],
+      "check_type": "contains",
+      "expected": "Hello"
+    }
+  ]
+}
