@@ -86,11 +86,11 @@ async def add_case(
     Raises ValueError if the check_type/argument combination is invalid:
     `exact`/`contains` require `expected`; `llm_judge` requires `judge_criteria`.
     """
-    if check_type in ("exact", "contains") and expected is None:
+    if check_type in ("exact", "contains", "icontains") and expected is None:
         raise ValueError(f"check_type {check_type!r} requires `expected`")
     if check_type == "llm_judge" and judge_criteria is None:
         raise ValueError("check_type 'llm_judge' requires `judge_criteria`")
-    if check_type not in ("exact", "contains", "llm_judge"):
+    if check_type not in ("exact", "contains", "icontains", "llm_judge"):
         raise ValueError(f"unknown check_type {check_type!r}")
     case = EvalCase(
         suite_id=suite_id,
@@ -132,6 +132,13 @@ async def _score_case(
     elif case.check_type == "contains":
         passed = case.expected in actual
         reason = "substring found" if passed else "expected substring absent"
+    elif case.check_type == "icontains":
+        passed = case.expected.lower() in actual.lower()
+        reason = (
+            "substring found (case-insensitive)"
+            if passed
+            else "expected substring absent (case-insensitive)"
+        )
     else:  # llm_judge, uses the fixed stronger judge model (decided Q2)
         judge_payload = {
             "model": judge_model,
@@ -146,7 +153,9 @@ async def _score_case(
             "max_tokens": 128,
         }
         verdict = (await provider.complete(judge_payload)).text
-        passed = verdict.strip().upper().startswith("PASS")
+        # Strip markdown formatting (e.g., "**PASS**" -> "PASS") before checking
+        verdict_normalized = verdict.strip().replace("**", "").replace("*", "").replace("_", "")
+        passed = verdict_normalized.upper().startswith("PASS")
         reason = verdict.strip()
 
     return {

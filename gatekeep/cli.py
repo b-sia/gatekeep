@@ -278,7 +278,9 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("name")
     ac.add_argument("--input-file", required=True)
     ac.add_argument(
-        "--check-type", choices=["exact", "contains", "llm_judge"], required=True
+        "--check-type",
+        choices=["exact", "contains", "icontains", "llm_judge"],
+        required=True,
     )
     ac.add_argument("--expected", default=None)
     ac.add_argument("--judge-criteria", default=None)
