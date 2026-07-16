@@ -20,3 +20,11 @@ runs) gets-or-creates the suite for each prompt and replaces only that suite's
 `source="fixture"` cases - it never touches manually-added (`source="manual"`)
 or curated-and-approved (`source="curated"`) cases, so it's safe to re-run
 against a persistent dev DB as well as CI's fresh ephemeral one.
+
+## Local setup
+
+To add or edit a prompt, run the CLI against a local Gatekeep install rather
+than editing the DB directly - see "Develop on Gatekeep" in the root
+`README.md` for installing the package and running Postgres/Redis locally.
+`gatekeep prompt --help` and `gatekeep eval --help` list every subcommand
+referenced above.

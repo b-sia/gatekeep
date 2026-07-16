@@ -28,6 +28,55 @@ Your App -> Gatekeep (auth + routing) -> Provider (Claude, Ollama, ...)
 
 The gateway now listens on `http://localhost:8100`.
 
+## Develop on Gatekeep
+
+The gateway itself runs in Docker (see Setup above), but for local development you'll
+usually want the `gatekeep` package installed directly so you can run tests and the
+CLI against your editor's Python.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Tests need a live Postgres (with the `pgvector` extension) and Redis - the same
+services `docker-compose up -d` already gives you - and read `DATABASE_URL` /
+`REDIS_URL` from `.env`. Each test drops and recreates the schema, so point
+`DATABASE_URL` at a throwaway database, not one with data you care about.
+
+```bash
+docker-compose up -d postgres redis   # dependencies only, no need to build the gateway image
+pytest
+```
+
+Database schema changes go through Alembic:
+
+```bash
+alembic upgrade head                              # apply migrations
+alembic revision --autogenerate -m "add a column"  # generate a new one after editing gatekeep/models.py
+```
+
+Project layout, in more detail than the summary at the bottom of this file:
+
+| Path | What's there |
+|---|---|
+| `gatekeep/app.py` | FastAPI app: `/v1/chat/completions`, `/healthz`, `/metrics` |
+| `gatekeep/providers/` | Per-provider adapters (Anthropic, Ollama) behind a common interface |
+| `gatekeep/middleware/` | Rate limiting, exact/semantic caching |
+| `gatekeep/prompts.py`, `evals.py`, `curation.py`, `fixtures.py` | Prompt versioning, eval suites, real-traffic curation, CI fixtures - see the "Eval gate" section below |
+| `gatekeep/cli.py` | The `gatekeep prompt ...` / `gatekeep eval ...` commands, run via `python -m gatekeep.cli` or the installed `gatekeep` console script |
+| `gatekeep/observability/` | Prometheus/Grafana config used by `docker-compose.yml` |
+| `demo/` | Standalone chat app exercising the gateway as a real client would |
+| `tests/` | Pytest suite, one file per module; `conftest.py` resets the DB schema per test |
+
+Run `gatekeep --help`, `gatekeep prompt --help`, and `gatekeep eval --help` for the
+full CLI reference - `prompt` covers template versioning/promotion/rollback, `eval`
+covers suite/case management and running suites manually.
+
+Prompt template changes are a special case: they live under `prompts/` and go
+through the `eval-gate` CI workflow (`.github/workflows/eval-gate.yml`) rather than
+regular pytest. See `prompts/README.md` and the "Eval gate" section below.
+
 ## Test it with curl
 
 ```bash
