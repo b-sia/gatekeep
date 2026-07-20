@@ -5,6 +5,7 @@ import pytest
 from gatekeep.api.openai_schemas import ChatCompletionRequest
 from gatekeep.api.translation import (
     TranslationError,
+    extract_text,
     final_chunk,
     openai_to_payload,
     resolve_route,
@@ -45,6 +46,35 @@ def test_resolve_route_claude_prefix_routes_anthropic():
 def test_resolve_route_unrecognized_routes_ollama_unchanged():
     assert resolve_route("llama3.2", aliases=ALIASES) == ("ollama", "llama3.2")
     assert resolve_route("mystery", aliases=ALIASES) == ("ollama", "mystery")
+
+
+def test_resolve_route_openai_prefix_routes_openai_and_strips_prefix():
+    assert resolve_route("openai/gpt-4o", aliases=ALIASES) == ("openai", "gpt-4o")
+
+
+def test_resolve_route_google_prefix_routes_google_and_strips_prefix():
+    assert resolve_route("google/gemini-2.5-flash", aliases=ALIASES) == (
+        "google",
+        "gemini-2.5-flash",
+    )
+
+
+def test_resolve_route_prefix_bypasses_alias_table():
+    # "gpt-4o" alone is aliased to Claude; the openai/ prefix must skip that.
+    assert resolve_route("openai/gpt-4o", aliases=ALIASES) == ("openai", "gpt-4o")
+    assert resolve_route("gpt-4o", aliases=ALIASES) == ("anthropic", "claude-sonnet-5")
+
+
+def test_extract_text_flattens_multimodal_parts():
+    assert extract_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "ab"
+
+
+def test_extract_text_passes_through_string():
+    assert extract_text("hi") == "hi"
+
+
+def test_extract_text_none_is_empty_string():
+    assert extract_text(None) == ""
 
 
 def test_system_message_lifted_and_sampling_dropped():

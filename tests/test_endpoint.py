@@ -58,6 +58,8 @@ async def client(monkeypatch):
     fake = FakeProvider()
     monkeypatch.setitem(app_module._providers, "anthropic", fake)
     monkeypatch.setitem(app_module._providers, "ollama", fake)
+    monkeypatch.setitem(app_module._providers, "openai", fake)
+    monkeypatch.setitem(app_module._providers, "google", fake)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -113,6 +115,23 @@ async def test_non_streaming_completion(client, raw_key):
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["message"]["content"] == "pong"
     assert body["usage"]["total_tokens"] == 4
+
+
+async def test_openai_prefixed_model_routes_to_openai_provider_response(
+    client, raw_key
+):
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "gpt-4o"
+    assert body["choices"][0]["message"]["content"] == "pong"
 
 
 async def test_streaming_completion(client, raw_key):
