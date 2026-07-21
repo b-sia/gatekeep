@@ -100,7 +100,7 @@ instead, prefix the model with `openai/` or `google/`:
 
 ```json
 {"model": "openai/gpt-4o", "messages": [...]}
-{"model": "google/gemini-2.5-flash", "messages": [...]}
+{"model": "google/gemini-flash-latest", "messages": [...]}
 ```
 
 Requires `OPENAI_API_KEY` / `GOOGLE_API_KEY` to be set; requests to a

@@ -53,9 +53,9 @@ def test_resolve_route_openai_prefix_routes_openai_and_strips_prefix():
 
 
 def test_resolve_route_google_prefix_routes_google_and_strips_prefix():
-    assert resolve_route("google/gemini-2.5-flash", aliases=ALIASES) == (
+    assert resolve_route("google/gemini-flash-latest", aliases=ALIASES) == (
         "google",
-        "gemini-2.5-flash",
+        "gemini-flash-latest",
     )
 
 

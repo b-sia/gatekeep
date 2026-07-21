@@ -53,7 +53,7 @@ async def test_complete_returns_normalized_result():
     provider = GoogleProvider(client)
     result = await provider.complete(
         {
-            "model": "gemini-2.5-flash",
+            "model": "gemini-flash-latest",
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 10,
         }
@@ -69,7 +69,7 @@ async def test_complete_maps_max_tokens_stop_reason():
     client = FakeGoogleClient(FakeModels(response=_response(finish_reason="MAX_TOKENS")))
     provider = GoogleProvider(client)
     result = await provider.complete(
-        {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        {"model": "gemini-flash-latest", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
     )
     assert result.stop_reason == "length"
 
@@ -80,7 +80,7 @@ async def test_complete_maps_prohibited_content_stop_reason():
     )
     provider = GoogleProvider(client)
     result = await provider.complete(
-        {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        {"model": "gemini-flash-latest", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
     )
     assert result.stop_reason == "content_filter"
 
@@ -91,7 +91,7 @@ async def test_complete_maps_assistant_role_to_model():
     provider = GoogleProvider(client)
     await provider.complete(
         {
-            "model": "gemini-2.5-flash",
+            "model": "gemini-flash-latest",
             "system": "be terse",
             "messages": [
                 {"role": "user", "content": "hi"},
