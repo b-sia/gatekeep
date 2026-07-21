@@ -73,18 +73,19 @@ class GoogleProvider:
     ) -> AsyncIterator[TextDelta | StreamEnd]:
         """Stream a completion, yielding text deltas followed by a final StreamEnd.
 
-        Only the terminal chunk carries `usage_metadata` and a populated
-        `candidates[0].finish_reason`; every earlier chunk carries a text
-        delta (or nothing, which is skipped).
+        Every chunk carries `usage_metadata` (cumulative token counts), but
+        only the terminal chunk carries a populated
+        `candidates[0].finish_reason` - that's the actual end-of-stream
+        signal; earlier chunks carry a text delta (or nothing, which is
+        skipped).
         """
         kwargs = _to_google_kwargs(payload)
-        async for chunk in self._client.aio.models.generate_content_stream(**kwargs):
+        response_stream = await self._client.aio.models.generate_content_stream(**kwargs)
+        async for chunk in response_stream:
             if chunk.text:
                 yield TextDelta(text=chunk.text)
-            if chunk.usage_metadata is not None:
-                finish_reason = (
-                    chunk.candidates[0].finish_reason if chunk.candidates else None
-                )
+            finish_reason = chunk.candidates[0].finish_reason if chunk.candidates else None
+            if finish_reason is not None:
                 yield StreamEnd(
                     stop_reason=_FINISH_REASON_MAP.get(_reason_name(finish_reason), "stop"),
                     input_tokens=chunk.usage_metadata.prompt_token_count or 0,
