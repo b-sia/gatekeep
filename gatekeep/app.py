@@ -32,7 +32,13 @@ from gatekeep.api.anthropic_translation import (
     result_to_messages,
     reverse_finish_reason,
 )
-from gatekeep.api.errors import map_provider_error, openai_error
+from gatekeep.api.errors import (
+    anthropic_error,
+    map_provider_error,
+    map_provider_error_anthropic,
+    openai_error,
+    openai_error_to_anthropic,
+)
 from gatekeep.api.openai_schemas import ChatCompletionRequest, ChatMessage
 from gatekeep.api.translation import (
     TranslationError,
@@ -107,18 +113,27 @@ def get_provider(name: str) -> _GatewayProvider:
 async def _http_exception_handler(
     request: Request, exc: FastAPIHTTPException
 ) -> JSONResponse:
-    """Serialize HTTPException bodies as flat, top-level OpenAI-shaped errors.
+    """Serialize HTTPException bodies as flat, top-level errors, OpenAI- or
+    Anthropic-shaped depending on which endpoint raised them.
 
     FastAPI's default handler nests HTTPException.detail under a "detail"
     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
     require_api_key and require_rate_limit raise), this returns it verbatim
-    at the top level. Preserves any headers set on the exception (e.g.
-    Retry-After from a 429), which would otherwise be silently dropped.
+    at the top level for every endpoint except /v1/messages, whose real
+    Anthropic SDK clients expect the {"type": "error", "error": {...}}
+    envelope instead - so that shape is reconstructed via
+    `openai_error_to_anthropic` for that path. Preserves any headers set on
+    the exception (e.g. Retry-After from a 429), which would otherwise be
+    silently dropped.
     """
+    is_messages = request.url.path == "/v1/messages"
     if isinstance(exc.detail, dict) and "error" in exc.detail:
+        content = openai_error_to_anthropic(exc.detail) if is_messages else exc.detail
         return JSONResponse(
-            status_code=exc.status_code, content=exc.detail, headers=exc.headers
+            status_code=exc.status_code, content=content, headers=exc.headers
         )
+    if is_messages:
+        return anthropic_error(exc.status_code, str(exc.detail), "invalid_request_error")
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
 
 
@@ -126,7 +141,10 @@ async def _http_exception_handler(
 async def _validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Return pydantic request-validation failures as an OpenAI-shaped 400."""
+    """Return pydantic request-validation failures as a 400, Anthropic-shaped
+    for /v1/messages and OpenAI-shaped for every other endpoint."""
+    if request.url.path == "/v1/messages":
+        return anthropic_error(400, str(exc), "invalid_request_error")
     return openai_error(400, str(exc), "invalid_request_error")
 
 
@@ -370,7 +388,7 @@ async def messages(
         try:
             template = await get_prompt(req.prompt_name, session)
         except PromptNotFoundError as exc:
-            return openai_error(400, str(exc), "invalid_request_error")
+            return anthropic_error(400, str(exc), "invalid_request_error")
         existing_system = extract_text(req.system) if req.system is not None else ""
         req.system = f"{template}\n\n{existing_system}" if existing_system else template
 
@@ -480,7 +498,7 @@ async def messages(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
-        return map_provider_error(exc)
+        return map_provider_error_anthropic(exc)
     openai_shaped = result_to_openai(result, model=model)
     messages_response = result_to_messages(result, model=model)
     try:
@@ -594,7 +612,8 @@ async def _messages_sse(
                 )
     except Exception as exc:  # surface upstream errors inside the stream
         yield _anthropic_event(
-            "error", {"error": {"type": "api_error", "message": str(exc)}}
+            "error",
+            {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
         )
     yield _anthropic_event("message_stop", message_stop_event())
 

@@ -49,8 +49,11 @@ def test_openai_api_key_defaults_to_none(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    get_settings.cache_clear()
-    s = get_settings()
+    # Deleting the env var isn't enough to test "unset": Settings also reads
+    # a local .env file, and a real OPENAI_API_KEY there would still leak in
+    # as a fallback. Bypass that source entirely rather than relying on
+    # get_settings(), which always loads it.
+    s = Settings(_env_file=None)
     assert s.openai_api_key is None
 
 

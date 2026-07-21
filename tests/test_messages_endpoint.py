@@ -98,7 +98,31 @@ async def test_streaming_message(client, raw_key):
     assert "event: message_stop" in body
 
 
-async def test_missing_auth_returns_openai_shaped_401(client):
+async def test_streaming_error_emits_anthropic_shaped_error_event(client, raw_key, monkeypatch):
+    class FailingProvider:
+        async def stream(self, payload):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setitem(app_module._providers, "anthropic", FailingProvider())
+    async with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 50,
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = b"".join([chunk async for chunk in r.aiter_bytes()]).decode()
+    assert "event: error" in body
+    assert '"type": "error", "error": {"type": "api_error", "message": "boom"}' in body
+
+
+async def test_missing_auth_returns_anthropic_shaped_401(client):
     r = await client.post(
         "/v1/messages",
         json={
@@ -108,7 +132,9 @@ async def test_missing_auth_returns_openai_shaped_401(client):
         },
     )
     assert r.status_code == 401
-    assert "error" in r.json()
+    body = r.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "authentication_error"
 
 
 async def test_cache_hit_shared_with_chat_completions_endpoint(client, raw_key):
@@ -168,7 +194,7 @@ async def test_prompt_name_prepends_template_as_system(client, raw_key, session)
     assert calls[0]["system"] == "Always say hi first.\n\nalso be polite"
 
 
-async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
+async def test_unknown_prompt_name_returns_anthropic_shaped_400(client, raw_key):
     r = await client.post(
         "/v1/messages",
         headers={"Authorization": f"Bearer {raw_key}"},
@@ -180,4 +206,6 @@ async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
         },
     )
     assert r.status_code == 400
-    assert "error" in r.json()
+    body = r.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"

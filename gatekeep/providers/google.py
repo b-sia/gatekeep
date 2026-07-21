@@ -10,6 +10,11 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "MAX_TOKENS": "length",
     "SAFETY": "content_filter",
     "RECITATION": "content_filter",
+    "PROHIBITED_CONTENT": "content_filter",
+    "SPII": "content_filter",
+    "BLOCKLIST": "content_filter",
+    "LANGUAGE": "content_filter",
+    "OTHER": "content_filter",
 }
 
 
