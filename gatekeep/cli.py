@@ -6,6 +6,7 @@ import json
 import sys
 
 from anthropic import AsyncAnthropic
+from sqlalchemy import select
 
 from gatekeep.config import get_settings
 from gatekeep.curation import curate_cases, list_unreviewed, review_case
@@ -20,6 +21,7 @@ from gatekeep.evals import (
 )
 from gatekeep.fixtures import load_fixtures_dir
 from gatekeep.middleware.ratelimit import get_redis
+from gatekeep.models import ApiKey
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -216,6 +218,35 @@ async def _eval_review(name: str) -> None:
             print("  approved" if answer == "y" else "  rejected (deleted)")
 
 
+async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
+    """Set or clear an API key's monthly USD spend cap, looked up by name.
+
+    Args:
+        name: The api_keys.name of the key to update.
+        amount: The new monthly_budget_usd value, or None if `unlimited` is set.
+        unlimited: If True, clears the cap (monthly_budget_usd = None),
+            ignoring `amount`.
+
+    Raises:
+        ValueError: if neither `amount` nor `unlimited` was given, or if no
+            key with that name exists.
+    """
+    if not unlimited and amount is None:
+        raise ValueError("must provide an amount, or pass --unlimited to clear it")
+    async with SessionLocal() as session:
+        key = (
+            await session.execute(select(ApiKey).where(ApiKey.name == name))
+        ).scalar_one_or_none()
+        if key is None:
+            raise ValueError(f"no API key named {name!r}")
+        key.monthly_budget_usd = None if unlimited else amount
+        await session.commit()
+    if unlimited:
+        print(f"cleared budget cap for {name!r} (unlimited)")
+    else:
+        print(f"set budget cap for {name!r} to ${amount:.2f}/month")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the `gatekeep` CLI's argument parser and its `prompt` subcommands."""
     parser = argparse.ArgumentParser(prog="gatekeep")
@@ -261,6 +292,20 @@ def build_parser() -> argparse.ArgumentParser:
         "sync", help="sync all *.txt files from a directory into the DB"
     )
     sync_parser.add_argument("directory")
+
+    key_parser = subparsers.add_parser("key", help="manage API keys")
+    key_subparsers = key_parser.add_subparsers(dest="key_command", required=True)
+
+    set_budget_parser = key_subparsers.add_parser(
+        "set-budget", help="set or clear a key's monthly USD spend cap"
+    )
+    set_budget_parser.add_argument("name")
+    set_budget_parser.add_argument(
+        "amount", type=float, nargs="?", default=None, help="new monthly cap in USD"
+    )
+    set_budget_parser.add_argument(
+        "--unlimited", action="store_true", help="clear the cap (unlimited spend)"
+    )
 
     eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
@@ -331,6 +376,9 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_rollback(args.name))
             elif args.prompt_command == "sync":
                 asyncio.run(_sync(args.directory))
+        elif args.command == "key":
+            if args.key_command == "set-budget":
+                asyncio.run(_set_budget(args.name, args.amount, args.unlimited))
         elif args.command == "eval":
             if args.eval_command == "create-suite":
                 asyncio.run(
