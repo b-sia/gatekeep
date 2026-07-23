@@ -53,6 +53,7 @@ from gatekeep.api.translation import (
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
 from gatekeep.embeddings import embed_text
+from gatekeep.middleware.budget import require_budget
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
@@ -64,7 +65,7 @@ from gatekeep.middleware.cache_semantic import (
     find_semantic_match,
     store_cached_response,
 )
-from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import (
     cache_cost_saved_usd,
@@ -118,7 +119,7 @@ async def _http_exception_handler(
 
     FastAPI's default handler nests HTTPException.detail under a "detail"
     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
-    require_api_key and require_rate_limit raise), this returns it verbatim
+    require_api_key, require_rate_limit, and require_budget raise), this returns it verbatim
     at the top level for every endpoint except /v1/messages, whose real
     Anthropic SDK clients expect the {"type": "error", "error": {...}}
     envelope instead - so that shape is reconstructed via
@@ -163,12 +164,12 @@ async def metrics() -> Response:
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
-    key: ApiKey = Depends(require_rate_limit),
+    key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
 ):
     """OpenAI-compatible chat completions endpoint, routed per-request by model.
 
-    Requires a valid, rate-limit-unexhausted API key. Translates the request
+    Requires a valid, rate-limit-unexhausted, budget-unexceeded API key. Translates the request
     to a provider-neutral payload, resolves which provider (Anthropic or
     Ollama) should serve the requested model, then either streams the
     response as SSE (when `stream: true`) or returns a single OpenAI-shaped
@@ -367,11 +368,11 @@ async def chat_completions(
 @app.post("/v1/messages")
 async def messages(
     req: MessagesRequest,
-    key: ApiKey = Depends(require_rate_limit),
+    key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
 ):
     """Anthropic-native /v1/messages endpoint, sharing every middleware with
-    /v1/chat/completions (auth, rate limiting, tiered cache, cost-aware
+    /v1/chat/completions (auth, rate limiting, budget cap, tiered cache, cost-aware
     routing, accounting) but speaking the real Messages API request/response
     shape instead of OpenAI's. See `messages_to_payload` for why this needs
     far less translation than the OpenAI-compat path: gatekeep's internal

@@ -144,6 +144,7 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(
 
 # --- key set-budget: does it set/clear monthly_budget_usd? -----------------------
 
+
 async def test_set_budget_sets_amount_on_existing_key(session):
     raw = generate_key()
     session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
@@ -193,6 +194,7 @@ async def test_set_budget_raises_for_non_positive_amount(session):
         await _set_budget("budget-key", -5.0, unlimited=False)
     with pytest.raises(ValueError, match="amount must be positive"):
         await _set_budget("budget-key", 0.0, unlimited=False)
+
 
 
 def test_main_key_set_budget_dispatches(monkeypatch):

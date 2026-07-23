@@ -29,6 +29,10 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Hard cap on USD spend per calendar month; None means unlimited. Enforced
+    # by gatekeep.middleware.budget.require_budget, tracked against cumulative
+    # request_logs.cost_usd for the key in the current UTC calendar month.
+    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class RequestLog(Base):
