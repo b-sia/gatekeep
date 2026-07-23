@@ -5,6 +5,7 @@ from gatekeep.evals import (
     EvalGateFailure,
     add_case,
     create_suite,
+    generate_judge_criteria,
     get_suite_for_prompt,
     make_eval_gate,
     run_eval_suite,
@@ -239,3 +240,35 @@ async def test_run_suite_for_prompt_can_target_a_specific_version(session):
         )
     ).scalar_one()
     assert run.prompt_version_id == v2.id
+
+
+async def test_generate_judge_criteria_sends_input_and_output_to_the_model():
+    provider = FakeProvider(["answers must be on-topic and cite a source"])
+
+    criteria = await generate_judge_criteria(
+        [{"role": "user", "content": "what is the capital of France?"}],
+        "Paris is the capital of France.",
+        provider=provider,
+        model="claude-sonnet-5",
+    )
+
+    assert criteria == "answers must be on-topic and cite a source"
+    assert len(provider.payloads) == 1
+    sent = provider.payloads[0]
+    assert sent["model"] == "claude-sonnet-5"
+    prompt_text = sent["messages"][0]["content"]
+    assert "what is the capital of France?" in prompt_text
+    assert "Paris is the capital of France." in prompt_text
+
+
+async def test_generate_judge_criteria_strips_whitespace():
+    provider = FakeProvider(["  a rubric with padding  \n"])
+
+    criteria = await generate_judge_criteria(
+        [{"role": "user", "content": "hi"}],
+        "hello!",
+        provider=provider,
+        model="claude-sonnet-5",
+    )
+
+    assert criteria == "a rubric with padding"

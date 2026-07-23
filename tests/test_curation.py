@@ -9,7 +9,25 @@ from gatekeep.curation import (
 )
 from gatekeep.evals import create_suite
 from gatekeep.models import ApiKey, EvalCase
+from gatekeep.providers.base import CompletionResult
 from gatekeep.samples import record_request_sample
+
+
+class FakeProvider:
+    """Provider stub returning queued texts in order, one per complete() call."""
+
+    def __init__(self, texts):
+        self._texts = list(texts)
+        self.payloads = []
+
+    async def complete(self, payload):
+        self.payloads.append(payload)
+        text = self._texts.pop(0)
+        if isinstance(text, Exception):
+            raise text
+        return CompletionResult(
+            text=text, input_tokens=1, output_tokens=1, stop_reason="stop"
+        )
 
 
 async def _seed_samples(session, prompt_name, n):
@@ -27,29 +45,50 @@ async def _seed_samples(session, prompt_name, n):
         )
 
 
-async def test_curate_writes_unreviewed_llm_judge_cases(session):
+async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
+    session,
+):
     await create_suite("p", session, pass_threshold=0.9)
     await _seed_samples(session, "p", 3)
+    provider = FakeProvider(["criteria for q0", "criteria for q1"])
 
-    cases = await curate_cases("p", session, limit=2)
+    cases = await curate_cases(
+        "p", session, limit=2, provider=provider, generate_model="m"
+    )
     assert len(cases) == 2
-    for c in cases:
+    for c, expected_criteria in zip(cases, ["criteria for q0", "criteria for q1"]):
         assert c.reviewed is False
         assert c.source == "curated"
         assert c.check_type == "llm_judge"
-        assert c.judge_criteria == CURATED_JUDGE_CRITERIA
+        assert c.judge_criteria == expected_criteria
+
+
+async def test_curate_falls_back_to_generic_criteria_on_generation_failure(session):
+    await create_suite("p", session, pass_threshold=0.9)
+    await _seed_samples(session, "p", 1)
+    provider = FakeProvider([RuntimeError("upstream is down")])
+
+    cases = await curate_cases(
+        "p", session, limit=1, provider=provider, generate_model="m"
+    )
+    assert len(cases) == 1
+    assert cases[0].judge_criteria == CURATED_JUDGE_CRITERIA
 
 
 async def test_curate_requires_a_suite(session):
     await _seed_samples(session, "p", 1)
+    provider = FakeProvider([])
     with pytest.raises(ValueError):
-        await curate_cases("p", session, limit=1)
+        await curate_cases("p", session, limit=1, provider=provider, generate_model="m")
 
 
 async def test_review_approve_marks_reviewed_and_reject_deletes(session):
     await create_suite("p", session, pass_threshold=0.9)
     await _seed_samples(session, "p", 2)
-    cases = await curate_cases("p", session, limit=2)
+    provider = FakeProvider(["criteria 0", "criteria 1"])
+    cases = await curate_cases(
+        "p", session, limit=2, provider=provider, generate_model="m"
+    )
 
     await review_case(cases[0].id, session, approve=True)
     await review_case(cases[1].id, session, approve=False)

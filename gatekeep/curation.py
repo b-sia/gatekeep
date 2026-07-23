@@ -1,22 +1,40 @@
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.evals import add_case, get_suite_for_prompt
+from gatekeep.evals import add_case, generate_judge_criteria, get_suite_for_prompt
 from gatekeep.models import EvalCase
 from gatekeep.samples import recent_samples
+
+logger = logging.getLogger(__name__)
 
 CURATED_JUDGE_CRITERIA = "output is a coherent, on-topic response to the input"
 
 
 async def curate_cases(
-    prompt_name: str, session: AsyncSession, *, limit: int
+    prompt_name: str,
+    session: AsyncSession,
+    *,
+    limit: int,
+    provider,
+    generate_model: str,
 ) -> list[EvalCase]:
     """Mine the most recent request samples for a prompt into unreviewed eval cases.
 
     Each sample becomes an unreviewed `source="curated"`, `check_type="llm_judge"`
-    case with a generic judge criteria as a starting point for human tightening.
+    case. `judge_criteria` is generated per sample via
+    `evals.generate_judge_criteria` (one extra LLM call over that sample's
+    captured input/output) so a human has a concrete, tailored rubric to
+    approve or edit in `review_case` rather than writing one from scratch.
+    Generation is done eagerly here (rather than as a separate opt-in step)
+    so the review flow always has something to show; if generation fails for
+    a given sample (e.g. a transient upstream error), that case falls back
+    to the generic `CURATED_JUDGE_CRITERIA` rubric rather than aborting the
+    whole curation run.
+
     Raises ValueError if no eval suite is registered for the prompt.
     """
     suite = await get_suite_for_prompt(prompt_name, session)
@@ -26,12 +44,27 @@ async def curate_cases(
     samples = await recent_samples(prompt_name, session, limit=limit)
     cases: list[EvalCase] = []
     for sample in samples:
+        try:
+            judge_criteria = await generate_judge_criteria(
+                sample.input_messages,
+                sample.output_text,
+                provider=provider,
+                model=generate_model,
+            )
+        except Exception:
+            logger.warning(
+                "judge criteria generation failed for sample %s; falling back "
+                "to generic criteria",
+                sample.id,
+                exc_info=True,
+            )
+            judge_criteria = CURATED_JUDGE_CRITERIA
         case = await add_case(
             suite.id,
             session,
             input_messages=sample.input_messages,
             check_type="llm_judge",
-            judge_criteria=CURATED_JUDGE_CRITERIA,
+            judge_criteria=judge_criteria,
             reviewed=False,
             source="curated",
         )

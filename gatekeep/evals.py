@@ -18,6 +18,22 @@ _JUDGE_TEMPLATE = (
     "Does the output satisfy the criteria? Answer PASS or FAIL and one sentence why."
 )
 
+_CRITERIA_GENERATION_TEMPLATE = (
+    "You are drafting a grading rubric for an AI system's responses, to be "
+    "used later by a separate LLM judge deciding PASS/FAIL on *future* "
+    "responses to similar inputs.\n\n"
+    "Conversation sent to the model:\n{input}\n\n"
+    "One real response that was sampled from production traffic for this "
+    "conversation:\n{output}\n\n"
+    "Write a short (1-3 sentence) rubric stating what makes a response to "
+    "this kind of input acceptable. Describe the qualities a good answer "
+    "must have in general terms (what it must address, its tone, format, or "
+    "any constraints) rather than restating the sampled response verbatim - "
+    "future responses will use different wording and phrasing, and should "
+    "still pass if they meet the same standard. Do not mention 'PASS' or "
+    "'FAIL'. Respond with only the rubric text, no preamble or labels."
+)
+
 Gate = Callable[[str, PromptVersion, AsyncSession], Awaitable[None]]
 
 
@@ -107,6 +123,70 @@ async def add_case(
     return case
 
 
+def _render_messages(input_messages: list[dict]) -> str:
+    """Render a message list as `role: content` lines for embedding in a meta-prompt.
+
+    Purely a formatting helper for `generate_judge_criteria`; not a full
+    chat-template renderer.
+    """
+    return "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in input_messages
+    )
+
+
+async def generate_judge_criteria(
+    input_messages: list[dict],
+    output_text: str,
+    *,
+    provider,
+    model: str,
+) -> str:
+    """Generate an `llm_judge` rubric for a curated case via an LLM meta-prompt.
+
+    Curated eval cases are mined from real production traffic
+    (`curation.curate_cases`), so nobody has hand-written `judge_criteria`
+    for them. This asks `model` to draft a rubric from the conversation that
+    was sent (`input_messages`) and one real, captured response to it
+    (`output_text`) - generalizing slightly beyond the one sampled example
+    (describing what a *class* of acceptable responses looks like) rather
+    than just restating the captured output, so the rubric stays meaningful
+    when scoring differently-worded future generations rather than only
+    matching the one response it was generated from.
+
+    Args:
+        input_messages: the conversation sent to the model, in gatekeep's
+            internal message-list shape (each a dict with "role"/"content").
+        output_text: one real captured response to `input_messages`.
+        provider: an object implementing `complete(payload) -> CompletionResult`
+            (see `providers/base.py`) - the same interface `_score_case` uses,
+            reused here rather than inventing a new provider abstraction.
+        model: the model id to use for generating the rubric.
+
+    Returns:
+        The generated rubric text, stripped of surrounding whitespace.
+
+    Raises:
+        Whatever `provider.complete` raises (e.g. upstream API errors); not
+        caught here so callers can decide how to handle generation failure
+        (see `curation.curate_cases`, which falls back to a generic rubric).
+    """
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": _CRITERIA_GENERATION_TEMPLATE.format(
+                    input=_render_messages(input_messages), output=output_text
+                ),
+            }
+        ],
+        "max_tokens": 256,
+    }
+    result = await provider.complete(payload)
+    return result.text.strip()
+
+
 async def _score_case(
     case: EvalCase,
     template: str,
@@ -154,7 +234,9 @@ async def _score_case(
         }
         verdict = (await provider.complete(judge_payload)).text
         # Strip markdown formatting (e.g., "**PASS**" -> "PASS") before checking
-        verdict_normalized = verdict.strip().replace("**", "").replace("*", "").replace("_", "")
+        verdict_normalized = (
+            verdict.strip().replace("**", "").replace("*", "").replace("_", "")
+        )
         passed = verdict_normalized.upper().startswith("PASS")
         reason = verdict.strip()
 

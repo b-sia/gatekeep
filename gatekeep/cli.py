@@ -191,16 +191,35 @@ async def _eval_load_fixtures(directory: str) -> None:
 
 
 async def _eval_curate(name: str, limit: int) -> None:
-    """Mine recent request samples for a prompt into unreviewed curated cases."""
+    """Mine recent request samples for a prompt into unreviewed curated cases.
+
+    Each case's judge_criteria is auto-generated from its sampled input/output
+    (see `evals.generate_judge_criteria`) using the gateway's default provider
+    and model, so `gatekeep eval review` has a proposed rubric to show.
+    """
+    settings = get_settings()
+    provider = AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
     async with SessionLocal() as session:
-        cases = await curate_cases(name, session, limit=limit)
+        cases = await curate_cases(
+            name,
+            session,
+            limit=limit,
+            provider=provider,
+            generate_model=settings.default_model,
+        )
     print(
         f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate"
     )
 
 
 async def _eval_review(name: str) -> None:
-    """Interactively approve/reject each unreviewed curated case for a prompt."""
+    """Interactively approve/reject each unreviewed curated case for a prompt.
+
+    Curated cases arrive with an auto-generated `judge_criteria` proposal
+    (see `curation.curate_cases`); `e` lets the reviewer edit it in place
+    before approving, so the human's job is tightening a draft rather than
+    writing a rubric from scratch.
+    """
     async with SessionLocal() as session:
         pending = await list_unreviewed(name, session)
         if not pending:
@@ -209,9 +228,15 @@ async def _eval_review(name: str) -> None:
         for case in pending:
             print(f"\ncase {case.id}: input={case.input_messages}")
             print(f"  judge_criteria: {case.judge_criteria}")
-            answer = input("  approve? [y/N/q] ").strip().lower()
+            answer = input("  approve? [y/N/e=edit/q] ").strip().lower()
             if answer == "q":
                 break
+            if answer == "e":
+                new_criteria = input("  new judge_criteria: ").strip()
+                if new_criteria:
+                    case.judge_criteria = new_criteria
+                    await session.commit()
+                answer = input("  approve? [y/N] ").strip().lower()
             await review_case(case.id, session, approve=(answer == "y"))
             print("  approved" if answer == "y" else "  rejected (deleted)")
 
