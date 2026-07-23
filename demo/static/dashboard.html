@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gatekeep Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <div class="container dashboard">
+      <header class="header">
+        <h1>📊 Gatekeep Dashboard</h1>
+        <p class="subtitle">Cost, usage, and eval history</p>
+      </header>
+
+      <div class="config-panel">
+        <div class="config-row">
+          <label for="range">Range:</label>
+          <select id="range">
+            <option value="1">Last 24 hours</option>
+            <option value="7" selected>Last 7 days</option>
+            <option value="30">Last 30 days</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label for="interval">Bucket:</label>
+          <select id="interval">
+            <option value="hour">Hourly</option>
+            <option value="day" selected>Daily</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label for="model-filter">Model:</label>
+          <select id="model-filter">
+            <option value="">All models</option>
+          </select>
+        </div>
+        <button id="refresh-btn" class="send-button">Refresh</button>
+      </div>
+
+      <div id="error-banner" class="error-banner" hidden></div>
+
+      <section class="stat-row" id="stat-row">
+        <div class="stat-card">
+          <div class="stat-label">Requests</div>
+          <div class="stat-value" id="stat-requests">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total cost</div>
+          <div class="stat-value" id="stat-cost">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total tokens</div>
+          <div class="stat-value" id="stat-tokens">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Cache hit rate</div>
+          <div class="stat-value" id="stat-cache-rate">-</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Request volume &amp; cost over time</h2>
+        <div id="timeseries-chart" class="chart"></div>
+      </section>
+
+      <section class="panel-grid">
+        <div class="panel">
+          <h2>Cost by model</h2>
+          <div class="table-scroll">
+            <table class="data-table" id="table-by-model">
+              <thead>
+                <tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Cache hits</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Cost by API key</h2>
+          <div class="table-scroll">
+            <table class="data-table" id="table-by-key">
+              <thead>
+                <tr><th>Key ID</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Cache hits</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Cost by prompt</h2>
+          <div class="table-scroll">
+            <table class="data-table" id="table-by-prompt">
+              <thead>
+                <tr><th>Prompt</th><th>Requests</th><th>Tokens</th><th>Cost</th><th>Cache hits</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Prompts</h2>
+        <div class="config-row">
+          <label for="prompt-picker">Prompt:</label>
+          <select id="prompt-picker">
+            <option value="">All prompts</option>
+          </select>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-prompt-versions">
+            <thead>
+              <tr><th>Version</th><th>Active</th><th>Created</th><th>Created by</th><th>Notes</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Eval run history</h2>
+        <div class="table-scroll">
+          <table class="data-table" id="table-evals">
+            <thead>
+              <tr><th>When</th><th>Prompt</th><th>Version</th><th>Model</th><th>Score</th><th>Result</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>

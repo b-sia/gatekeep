@@ -19,6 +19,7 @@ from starlette.requests import Request
 
 from gatekeep.accounting import calculate_cost, log_request
 from gatekeep.api.anthropic_schemas import MessagesRequest
+from gatekeep.api.dashboard import router as dashboard_router
 from gatekeep.api.anthropic_translation import (
     content_block_delta_event,
     content_block_start_event,
@@ -88,6 +89,7 @@ from gatekeep.samples import record_request_sample
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
+app.include_router(dashboard_router)
 
 _settings = get_settings()
 _GatewayProvider = AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider
