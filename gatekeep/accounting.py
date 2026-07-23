@@ -9,9 +9,17 @@ from gatekeep.models import RequestLog
 # claude-haiku-4-5-20251001 pricing is an approximate estimate consistent with
 # Haiku's usual cost tier relative to Sonnet; reconcile with current published
 # Anthropic pricing before relying on it for exact billing.
+# OpenAI/Google prices below are approximate published per-1M-token rates as
+# of this writing; reconcile with current provider pricing before relying on
+# them for exact billing. Costs use the resolved (prefix-stripped) model id
+# returned by resolve_route, e.g. "gpt-4o" not "openai/gpt-4o".
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (2.0, 10.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gemini-2.5-pro": (1.25, 10.0),
+    "gemini-flash-latest": (1.5, 9.0),  # gemini-3.5-flash pricing as of 2026-07-21
 }
 
 

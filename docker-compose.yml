@@ -31,6 +31,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://gatekeep:gatekeep@postgres:5432/gatekeep
       REDIS_URL: redis://redis:6379/0
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       OLLAMA_HOST: http://ollama:11434
       DEFAULT_MODEL: ${DEFAULT_MODEL:-llama3.2}
     ports:

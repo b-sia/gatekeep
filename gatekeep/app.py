@@ -7,6 +7,8 @@ import time
 import ollama
 from redis.exceptions import RedisError
 from anthropic import AsyncAnthropic
+from google import genai
+from openai import AsyncOpenAI
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
@@ -16,10 +18,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from gatekeep.accounting import calculate_cost, log_request
-from gatekeep.api.errors import map_provider_error, openai_error
+from gatekeep.api.anthropic_schemas import MessagesRequest
+from gatekeep.api.anthropic_translation import (
+    content_block_delta_event,
+    content_block_start_event,
+    content_block_stop_event,
+    message_delta_event,
+    message_start_event,
+    message_stop_event,
+    messages_to_payload,
+    new_message_id,
+    openai_response_to_messages,
+    result_to_messages,
+    reverse_finish_reason,
+)
+from gatekeep.api.errors import (
+    anthropic_error,
+    map_provider_error,
+    map_provider_error_anthropic,
+    openai_error,
+    openai_error_to_anthropic,
+)
 from gatekeep.api.openai_schemas import ChatCompletionRequest, ChatMessage
 from gatekeep.api.translation import (
     TranslationError,
+    extract_text,
     final_chunk,
     new_completion_id,
     openai_to_payload,
@@ -56,7 +79,9 @@ from gatekeep.observability.metrics import (
 from gatekeep.prompts import PromptNotFoundError, get_prompt
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
+from gatekeep.providers.google import GoogleProvider
 from gatekeep.providers.ollama import OllamaProvider
+from gatekeep.providers.openai import OpenAIProvider
 from gatekeep.routing import select_model
 from gatekeep.samples import record_request_sample
 
@@ -65,13 +90,21 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="gatekeep")
 
 _settings = get_settings()
-_providers: dict[str, AnthropicProvider | OllamaProvider] = {
+_GatewayProvider = AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider
+
+_providers: dict[str, _GatewayProvider] = {
     "anthropic": AnthropicProvider(AsyncAnthropic(api_key=_settings.anthropic_api_key)),
     "ollama": OllamaProvider(ollama.AsyncClient(host=_settings.ollama_host)),
+    # api_key falls back to a placeholder string (never None) so the SDK
+    # client doesn't raise at import time when the key is unset - failures
+    # surface as an upstream error on the first actual request instead, via
+    # map_provider_error. See Settings.openai_api_key/google_api_key.
+    "openai": OpenAIProvider(AsyncOpenAI(api_key=_settings.openai_api_key or "unset")),
+    "google": GoogleProvider(genai.Client(api_key=_settings.google_api_key or "unset")),
 }
 
 
-def get_provider(name: str) -> AnthropicProvider | OllamaProvider:
+def get_provider(name: str) -> _GatewayProvider:
     """Look up the pre-built provider instance for a resolved provider name."""
     return _providers[name]
 
@@ -80,18 +113,27 @@ def get_provider(name: str) -> AnthropicProvider | OllamaProvider:
 async def _http_exception_handler(
     request: Request, exc: FastAPIHTTPException
 ) -> JSONResponse:
-    """Serialize HTTPException bodies as flat, top-level OpenAI-shaped errors.
+    """Serialize HTTPException bodies as flat, top-level errors, OpenAI- or
+    Anthropic-shaped depending on which endpoint raised them.
 
     FastAPI's default handler nests HTTPException.detail under a "detail"
     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
     require_api_key and require_rate_limit raise), this returns it verbatim
-    at the top level. Preserves any headers set on the exception (e.g.
-    Retry-After from a 429), which would otherwise be silently dropped.
+    at the top level for every endpoint except /v1/messages, whose real
+    Anthropic SDK clients expect the {"type": "error", "error": {...}}
+    envelope instead - so that shape is reconstructed via
+    `openai_error_to_anthropic` for that path. Preserves any headers set on
+    the exception (e.g. Retry-After from a 429), which would otherwise be
+    silently dropped.
     """
+    is_messages = request.url.path == "/v1/messages"
     if isinstance(exc.detail, dict) and "error" in exc.detail:
+        content = openai_error_to_anthropic(exc.detail) if is_messages else exc.detail
         return JSONResponse(
-            status_code=exc.status_code, content=exc.detail, headers=exc.headers
+            status_code=exc.status_code, content=content, headers=exc.headers
         )
+    if is_messages:
+        return anthropic_error(exc.status_code, str(exc.detail), "invalid_request_error")
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
 
 
@@ -99,7 +141,10 @@ async def _http_exception_handler(
 async def _validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Return pydantic request-validation failures as an OpenAI-shaped 400."""
+    """Return pydantic request-validation failures as a 400, Anthropic-shaped
+    for /v1/messages and OpenAI-shaped for every other endpoint."""
+    if request.url.path == "/v1/messages":
+        return anthropic_error(400, str(exc), "invalid_request_error")
     return openai_error(400, str(exc), "invalid_request_error")
 
 
@@ -319,8 +364,267 @@ async def chat_completions(
     return JSONResponse(content=response.model_dump())
 
 
+@app.post("/v1/messages")
+async def messages(
+    req: MessagesRequest,
+    key: ApiKey = Depends(require_rate_limit),
+    session: AsyncSession = Depends(get_session),
+):
+    """Anthropic-native /v1/messages endpoint, sharing every middleware with
+    /v1/chat/completions (auth, rate limiting, tiered cache, cost-aware
+    routing, accounting) but speaking the real Messages API request/response
+    shape instead of OpenAI's. See `messages_to_payload` for why this needs
+    far less translation than the OpenAI-compat path: gatekeep's internal
+    payload is already Anthropic-shaped.
+
+    `prompt_name` and `route_by_cost` behave identically to their
+    `/v1/chat/completions` counterparts. The exact/semantic cache is shared
+    across both endpoints (same request-hash derivation over the same
+    provider-neutral payload); a hit is converted from the cache's stored
+    OpenAI shape via `openai_response_to_messages`.
+    """
+    settings = get_settings()
+    if req.prompt_name is not None:
+        try:
+            template = await get_prompt(req.prompt_name, session)
+        except PromptNotFoundError as exc:
+            return anthropic_error(400, str(exc), "invalid_request_error")
+        existing_system = extract_text(req.system) if req.system is not None else ""
+        req.system = f"{template}\n\n{existing_system}" if existing_system else template
+
+    provider_name, payload = messages_to_payload(req, model_aliases=settings.model_aliases)
+    provider = get_provider(provider_name)
+    model = payload["model"]
+
+    routed_from = None
+    if req.route_by_cost and req.prompt_name is not None:
+        floor = req.quality_floor if req.quality_floor is not None else 0.0
+        chosen = await select_model(model, req.prompt_name, floor, session)
+        if chosen != model:
+            routed_from = model
+            model = chosen
+            payload["model"] = chosen
+
+    requests_total.labels(model=model, key_id=str(key.id)).inc()
+
+    if req.stream:
+        return StreamingResponse(
+            _messages_sse(
+                provider,
+                payload,
+                model,
+                key_id=key.id,
+                prompt_name=req.prompt_name,
+                routed_from=routed_from,
+            ),
+            media_type="text/event-stream",
+        )
+
+    redis = get_redis(settings)
+    request_hash = hash_request(payload)
+    try:
+        cached = await get_cached_response(redis, request_hash)
+    except RedisError:
+        logger.warning(
+            "Exact cache lookup failed (Redis unavailable); treating as a cache miss."
+        )
+        cached = None
+    if cached is not None:
+        cache_exact_hits.labels(model=model).inc()
+        cost_usd = calculate_cost(
+            model, cached.usage.prompt_tokens, cached.usage.completion_tokens
+        )
+        cache_cost_saved_usd.inc(cost_usd)
+        await log_request(
+            session,
+            key_id=key.id,
+            model=model,
+            prompt_tokens=cached.usage.prompt_tokens,
+            completion_tokens=cached.usage.completion_tokens,
+            response_id=cached.id,
+            cached=True,
+            cache_key=request_hash,
+        )
+        observe_request(
+            model=model,
+            key_id=key.id,
+            prompt_tokens=cached.usage.prompt_tokens,
+            completion_tokens=cached.usage.completion_tokens,
+            cost_usd=cost_usd,
+        )
+        return JSONResponse(content=openai_response_to_messages(cached).model_dump())
+    cache_exact_misses.labels(model=model).inc()
+
+    embeddable_text = extract_embeddable_text(payload)
+    embedding = embed_text(embeddable_text)
+    if embedding is not None:
+        semantic_match = await find_semantic_match(
+            session,
+            embedding,
+            model=model,
+            threshold=settings.semantic_cache_similarity_threshold,
+            max_age_seconds=settings.cache_exact_ttl_seconds,
+        )
+        if semantic_match is not None:
+            cache_semantic_hits.labels(model=model).inc()
+            cache_semantic_similarity.labels(model=model).observe(
+                semantic_match.similarity
+            )
+            cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
+            semantic_response = build_response_from_cache(semantic_match.cached)
+            await log_request(
+                session,
+                key_id=key.id,
+                model=model,
+                prompt_tokens=semantic_response.usage.prompt_tokens,
+                completion_tokens=semantic_response.usage.completion_tokens,
+                response_id=semantic_response.id,
+                cached=True,
+                cache_key="semantic",
+                cost_usd_override=semantic_match.cached.cost_usd,
+            )
+            observe_request(
+                model=model,
+                key_id=key.id,
+                prompt_tokens=semantic_response.usage.prompt_tokens,
+                completion_tokens=semantic_response.usage.completion_tokens,
+                cost_usd=semantic_match.cached.cost_usd,
+            )
+            return JSONResponse(
+                content=openai_response_to_messages(semantic_response).model_dump()
+            )
+        cache_semantic_misses.labels(model=model).inc()
+
+    try:
+        result = await provider.complete(payload)
+    except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+        return map_provider_error_anthropic(exc)
+    openai_shaped = result_to_openai(result, model=model)
+    messages_response = result_to_messages(result, model=model)
+    try:
+        await set_cached_response(
+            redis,
+            request_hash,
+            openai_shaped,
+            ttl_seconds=settings.cache_exact_ttl_seconds,
+            prompt_name=req.prompt_name,
+        )
+    except RedisError:
+        logger.warning(
+            "Exact cache write failed (Redis unavailable); serving response uncached."
+        )
+    if embedding is not None:
+        await store_cached_response(
+            session,
+            exact_hash=request_hash,
+            user_messages_text=embeddable_text,
+            embedding=embedding,
+            response_text=messages_response.content[0].text,
+            model=model,
+            cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+            prompt_name=req.prompt_name,
+        )
+    if req.prompt_name is not None:
+        await record_request_sample(
+            session,
+            key_id=key.id,
+            prompt_name=req.prompt_name,
+            model=model,
+            input_messages=payload["messages"],
+            output_text=messages_response.content[0].text,
+        )
+    await log_request(
+        session,
+        key_id=key.id,
+        model=model,
+        prompt_tokens=result.input_tokens,
+        completion_tokens=result.output_tokens,
+        response_id=messages_response.id,
+        prompt_name=req.prompt_name,
+        routed_from=routed_from,
+    )
+    observe_request(
+        model=model,
+        key_id=key.id,
+        prompt_tokens=result.input_tokens,
+        completion_tokens=result.output_tokens,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+    )
+    return JSONResponse(content=messages_response.model_dump())
+
+
+async def _messages_sse(
+    provider: _GatewayProvider,
+    payload: dict,
+    model: str,
+    *,
+    key_id: int,
+    prompt_name: str | None = None,
+    routed_from: str | None = None,
+):
+    """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
+
+    Emits message_start, content_block_start, a content_block_delta per text
+    delta, content_block_stop, message_delta (carrying the authoritative
+    final usage and stop_reason), then message_stop. Logs the request via
+    `log_request` once the stream ends, using its own DB session for the
+    same reason `_sse` does (the request-scoped session dependency is
+    already closed by the time this generator keeps running).
+    """
+    message_id = new_message_id()
+    yield _anthropic_event(
+        "message_start", message_start_event(id=message_id, model=model)
+    )
+    yield _anthropic_event("content_block_start", content_block_start_event())
+    try:
+        async for ev in provider.stream(payload):
+            if isinstance(ev, TextDelta):
+                yield _anthropic_event(
+                    "content_block_delta", content_block_delta_event(ev.text)
+                )
+            elif isinstance(ev, StreamEnd):
+                yield _anthropic_event("content_block_stop", content_block_stop_event())
+                yield _anthropic_event(
+                    "message_delta",
+                    message_delta_event(
+                        stop_reason=reverse_finish_reason(ev.stop_reason),
+                        input_tokens=ev.input_tokens,
+                        output_tokens=ev.output_tokens,
+                    ),
+                )
+                async with SessionLocal() as session:
+                    await log_request(
+                        session,
+                        key_id=key_id,
+                        model=model,
+                        prompt_tokens=ev.input_tokens,
+                        completion_tokens=ev.output_tokens,
+                        response_id=message_id,
+                        prompt_name=prompt_name,
+                        routed_from=routed_from,
+                    )
+                observe_request(
+                    model=model,
+                    key_id=key_id,
+                    prompt_tokens=ev.input_tokens,
+                    completion_tokens=ev.output_tokens,
+                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
+                )
+    except Exception as exc:  # surface upstream errors inside the stream
+        yield _anthropic_event(
+            "error",
+            {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
+        )
+    yield _anthropic_event("message_stop", message_stop_event())
+
+
+def _anthropic_event(event_type: str, data: dict) -> str:
+    """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
 async def _sse(
-    provider: AnthropicProvider | OllamaProvider,
+    provider: _GatewayProvider,
     payload: dict,
     model: str,
     *,

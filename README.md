@@ -91,6 +91,36 @@ curl -X POST http://localhost:8100/v1/chat/completions \
 
 Swap `"model"` for any model your configured provider(s) support, e.g. `llama3.2` if you're running the Ollama service from `docker-compose.yml`.
 
+### Routing to OpenAI or Google directly
+
+Bare model names (`gpt-4`, `llama3.2`, ...) route through the alias table to
+Claude, or fall through to Ollama - this keeps the zero-config demo working
+without extra API keys. To send a request to the real OpenAI or Google API
+instead, prefix the model with `openai/` or `google/`:
+
+```json
+{"model": "openai/gpt-4o", "messages": [...]}
+{"model": "google/gemini-flash-latest", "messages": [...]}
+```
+
+Requires `OPENAI_API_KEY` / `GOOGLE_API_KEY` to be set; requests to a
+prefixed provider with no key configured fail with an upstream auth error.
+
+### Native Anthropic SDK support: `/v1/messages`
+
+Clients using the `anthropic` SDK directly (rather than an OpenAI-compatible
+client) can point `base_url` at gatekeep and use `POST /v1/messages` with the
+real Anthropic Messages API request/response shape - no OpenAI translation
+involved. It shares auth, rate limiting, the tiered cache, `prompt_name`/
+`route_by_cost` prompt-registry and cost-routing extensions, and cost
+accounting with `/v1/chat/completions`; a cached response from either
+endpoint can be served by the other.
+
+Known limitation: gatekeep's internal `CompletionResult` only carries
+OpenAI-canonical stop reasons, so an Anthropic `stop_sequence` hit and a
+plain `end_turn` are indistinguishable at this layer - both are reported as
+`end_turn` on `/v1/messages` responses.
+
 ## Rate limiting, caching, and cost tracking
 
 Every key is rate-limited by a per-minute token bucket (`rate_limit_tokens_per_min`, default 100). Once a key's bucket is empty, the gateway returns a 429 with a `Retry-After` header instead of forwarding the request:

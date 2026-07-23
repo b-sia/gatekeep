@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     redis_url: str
     anthropic_api_key: str
     ollama_host: str = "http://localhost:11434"
+    openai_api_key: str | None = None
+    google_api_key: str | None = None
     default_model: str = "claude-sonnet-5"
     default_max_tokens: int = 4096
     model_aliases: dict[str, str] = Field(

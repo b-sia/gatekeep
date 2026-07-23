@@ -33,6 +33,20 @@ def test_calculate_cost_unknown_model_is_free():
     assert cost == 0.0
 
 
+def test_calculate_cost_openai_gpt4o_is_priced():
+    cost = calculate_cost(
+        "gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost > 0.0
+
+
+def test_calculate_cost_google_gemini_flash_is_priced():
+    cost = calculate_cost(
+        "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 10.5
+
+
 async def test_log_request_persists_row(session):
     raw = generate_key()
     key = ApiKey(name="c", key_hash=hash_key(raw))

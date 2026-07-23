@@ -20,7 +20,7 @@ class TranslationError(ValueError):
     """Raised when an OpenAI request cannot be mapped to Anthropic."""
 
 
-def _extract_text(content: Any) -> str:
+def extract_text(content: Any) -> str:
     """Flatten an OpenAI message's content (string or multimodal parts) to plain text."""
     if content is None:
         return ""
@@ -35,13 +35,21 @@ def _extract_text(content: Any) -> str:
 
 def resolve_route(
     requested: str, *, aliases: dict[str, str]
-) -> tuple[Literal["anthropic", "ollama"], str]:
+) -> tuple[Literal["anthropic", "ollama", "openai", "google"], str]:
     """Determine which provider should serve `requested` and its resolved model id.
 
-    Checks the alias table first, passes through anything already prefixed
+    A `openai/` or `google/` prefix routes directly to that upstream with the
+    prefix stripped (e.g. "openai/gpt-4o" -> ("openai", "gpt-4o")), bypassing
+    the alias table entirely - this is how a client opts into the real
+    upstream instead of the alias table's Claude substitution. Otherwise
+    checks the alias table, passes through anything already prefixed
     `claude-` as Anthropic, and otherwise routes to Ollama with the model
     name unchanged (assumed to be a local Ollama tag).
     """
+    if requested.startswith("openai/"):
+        return "openai", requested.removeprefix("openai/")
+    if requested.startswith("google/"):
+        return "google", requested.removeprefix("google/")
     if requested in aliases:
         return "anthropic", aliases[requested]
     if requested.startswith("claude-"):
@@ -54,7 +62,7 @@ def openai_to_payload(
     *,
     default_max_tokens: int,
     model_aliases: dict[str, str],
-) -> tuple[Literal["anthropic", "ollama"], dict[str, Any]]:
+) -> tuple[Literal["anthropic", "ollama", "openai", "google"], dict[str, Any]]:
     """Build a provider-neutral completion payload from an OpenAI chat completion request.
 
     Lifts `system`/`developer` messages into a single `system` string,
@@ -68,7 +76,7 @@ def openai_to_payload(
     system_parts: list[str] = []
     messages: list[dict[str, str]] = []
     for msg in req.messages:
-        text = _extract_text(msg.content)
+        text = extract_text(msg.content)
         if msg.role in ("system", "developer"):
             if text:
                 system_parts.append(text)
