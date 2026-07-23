@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from gatekeep.cli import _eval_run, main
+from gatekeep.cli import _clear_candidate, _eval_run, _set_candidate, build_parser, main
 from gatekeep.evals import add_case, create_suite
-from gatekeep.prompts import create_prompt
+from gatekeep.prompts import add_prompt_version, create_prompt
 from gatekeep.providers.base import CompletionResult
 
 
@@ -115,5 +115,59 @@ def test_main_eval_run_returns_1_when_no_suite_registered(monkeypatch):
     monkeypatch.setattr("gatekeep.cli._eval_run", _fake_eval_run)
 
     code = main(["eval", "run", "some-nonexistent-prompt-name"])
+
+    assert code == 1
+
+
+# --- prompt set-candidate / clear-candidate ----------------------------------
+
+
+async def test_set_candidate_configures_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+
+    await _set_candidate("system-context", 2, 25.0)
+
+    from gatekeep.prompts import get_active_prompt_version
+
+    # active version is unaffected by setting a candidate
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 1
+
+
+async def test_clear_candidate_removes_configured_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 25.0)
+
+    await _clear_candidate("system-context")
+
+
+def test_build_parser_accepts_set_candidate_and_clear_candidate():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["prompt", "set-candidate", "system-context", "2", "--pct", "25"]
+    )
+    assert args.prompt_command == "set-candidate"
+    assert args.name == "system-context"
+    assert args.version == 2
+    assert args.pct == 25.0
+
+    args = parser.parse_args(["prompt", "clear-candidate", "system-context"])
+    assert args.prompt_command == "clear-candidate"
+    assert args.name == "system-context"
+
+
+def test_main_set_candidate_rejects_out_of_range_pct(monkeypatch):
+    """main() must surface set_candidate_version's ValueError as exit code 1,
+    same as the other prompt-management ValueErrors."""
+
+    async def _fake_set_candidate(name, version, pct):
+        raise ValueError("traffic_pct must be between 0 and 100, got 150.0")
+
+    monkeypatch.setattr("gatekeep.cli._set_candidate", _fake_set_candidate)
+
+    code = main(["prompt", "set-candidate", "system-context", "2", "--pct", "150"])
 
     assert code == 1

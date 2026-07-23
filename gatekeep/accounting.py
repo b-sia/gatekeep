@@ -48,14 +48,18 @@ async def log_request(
     cost_usd_override: float | None = None,
     prompt_name: str | None = None,
     routed_from: str | None = None,
+    prompt_version_num: int | None = None,
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
     Cost is derived via calculate_cost, unless `cost_usd_override` is given,
     in which case that value is used directly (e.g. a semantic-cache hit
     logging the original generation's cost instead of $0). `cached`/
-    `cache_key` default to a non-cache-hit request. `prompt_name` and
-    `routed_from` are optional request-level metadata, defaulting to None.
+    `cache_key` default to a non-cache-hit request. `prompt_name`,
+    `routed_from`, and `prompt_version_num` are optional request-level
+    metadata, defaulting to None. `prompt_version_num` records which
+    PromptVersion (active or A/B candidate) actually served the request, so
+    cost/eval/quality can later be compared active-vs-candidate by version.
     """
     cost_usd = (
         cost_usd_override
@@ -74,6 +78,7 @@ async def log_request(
         response_id=response_id,
         prompt_name=prompt_name,
         routed_from=routed_from,
+        prompt_version_num=prompt_version_num,
     )
     session.add(log)
     await session.commit()

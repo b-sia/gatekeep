@@ -44,6 +44,7 @@ async def store_cached_response(
     model: str,
     cost_usd: float,
     prompt_name: str | None = None,
+    prompt_version_num: int | None = None,
 ) -> CachedResponse | None:
     """Insert a new semantic-cache row and commit it.
 
@@ -52,6 +53,10 @@ async def store_cached_response(
     instead of raising, since the cache write is best-effort and the
     original request's response has already been served. `prompt_name`, if
     set, tags the row so a later prompt promotion can find and delete it.
+    `prompt_version_num`, if set, additionally tags the row with which
+    PromptVersion actually generated it (active or A/B candidate), so
+    `find_semantic_match` can scope matches to the version resolved for the
+    current request - see that function's docstring for why this matters.
     """
     row = CachedResponse(
         exact_hash=exact_hash,
@@ -61,6 +66,7 @@ async def store_cached_response(
         model=model,
         cost_usd=cost_usd,
         prompt_name=prompt_name,
+        prompt_version_num=prompt_version_num,
     )
     session.add(row)
     try:
@@ -100,6 +106,7 @@ async def find_semantic_match(
     model: str,
     threshold: float,
     max_age_seconds: int,
+    prompt_version_num: int | None = None,
 ) -> SemanticMatch | None:
     """Find the most similar non-expired cached response above `threshold`, or None.
 
@@ -108,6 +115,21 @@ async def find_semantic_match(
     caches invalidate together. Only rows cached for the same `model` are
     considered, so a semantically-similar prompt never returns a different
     model's cached answer.
+
+    If `prompt_version_num` is given (the caller resolved a `prompt_name` to
+    a specific PromptVersion for this request), only rows tagged with that
+    exact `prompt_version_num` are considered. This closes a version-mixing
+    gap that A/B testing candidates introduce: without it, two rows tagged
+    with the same `prompt_name` but generated from two different templates
+    (the active version and an in-flight candidate) would be indistinguishable
+    to a plain embedding-similarity match whenever the two templates are only
+    a small wording tweak apart - exactly the case a real A/B test is likely
+    to produce. Rows written before this column existed (`prompt_version_num`
+    is NULL) never match here, by ordinary SQL NULL-comparison semantics -
+    the conservative default of a few extra cache misses right after
+    upgrading, rather than ever risking a version-mismatched hit. When
+    `prompt_version_num` is None (no `prompt_name` on this request), behavior
+    is unchanged from before this parameter existed.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     distance = CachedResponse.embedding.cosine_distance(embedding)
@@ -115,9 +137,10 @@ async def find_semantic_match(
         select(CachedResponse, distance.label("distance"))
         .where(CachedResponse.created_at >= cutoff)
         .where(CachedResponse.model == model)
-        .order_by(distance)
-        .limit(1)
     )
+    if prompt_version_num is not None:
+        stmt = stmt.where(CachedResponse.prompt_version_num == prompt_version_num)
+    stmt = stmt.order_by(distance).limit(1)
     row = (await session.execute(stmt)).first()
     if row is None:
         return None

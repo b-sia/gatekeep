@@ -22,12 +22,15 @@ from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
     add_prompt_version,
+    clear_candidate_version,
     create_prompt,
     get_active_prompt_version,
     get_prompt,
     list_prompts,
     promote_prompt,
+    resolve_prompt_version_for_request,
     rollback_prompt,
+    set_candidate_version,
 )
 from gatekeep.providers.base import CompletionResult
 
@@ -391,3 +394,198 @@ async def test_rollback_invalidates_cache_for_the_prompt(session):
     await rollback_prompt("system-context", session, redis=redis)
 
     assert await get_cached_response(redis, h) is None
+
+
+# -- A/B candidate: set_candidate_version / clear_candidate_version --------
+
+
+async def test_set_candidate_version_configures_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    v2 = await add_prompt_version("system-context", "v2 text", session)
+
+    prompt = await set_candidate_version("system-context", 2, 10.0, session)
+
+    assert prompt.candidate_version_id == v2.id
+    assert prompt.candidate_traffic_pct == 10.0
+    # setting a candidate must not touch which version is active
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 1
+
+
+async def test_set_candidate_version_rejects_out_of_range_pct(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+
+    with pytest.raises(ValueError):
+        await set_candidate_version("system-context", 2, 101.0, session)
+    with pytest.raises(ValueError):
+        await set_candidate_version("system-context", 2, -1.0, session)
+
+
+async def test_set_candidate_version_raises_for_unknown_prompt(session):
+    with pytest.raises(PromptNotFoundError):
+        await set_candidate_version("does-not-exist", 1, 10.0, session)
+
+
+async def test_set_candidate_version_raises_for_unknown_version(session):
+    await create_prompt("system-context", "v1", session)
+    with pytest.raises(PromptVersionNotFoundError):
+        await set_candidate_version("system-context", 99, 10.0, session)
+
+
+async def test_set_candidate_version_replaces_previous_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    v3 = await add_prompt_version("system-context", "v3 text", session)
+
+    await set_candidate_version("system-context", 2, 10.0, session)
+    prompt = await set_candidate_version("system-context", 3, 50.0, session)
+
+    assert prompt.candidate_version_id == v3.id
+    assert prompt.candidate_traffic_pct == 50.0
+
+
+async def test_clear_candidate_version_resets_fields(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await set_candidate_version("system-context", 2, 10.0, session)
+
+    prompt = await clear_candidate_version("system-context", session)
+
+    assert prompt.candidate_version_id is None
+    assert prompt.candidate_traffic_pct is None
+
+
+async def test_clear_candidate_version_is_noop_when_none_configured(session):
+    await create_prompt("system-context", "v1", session)
+
+    prompt = await clear_candidate_version("system-context", session)
+
+    assert prompt.candidate_version_id is None
+
+
+async def test_clear_candidate_version_raises_for_unknown_prompt(session):
+    with pytest.raises(PromptNotFoundError):
+        await clear_candidate_version("does-not-exist", session)
+
+
+# -- A/B candidate: resolve_prompt_version_for_request ----------------------
+
+
+async def test_resolve_returns_active_version_when_no_candidate_configured(session):
+    await create_prompt("system-context", "v1", session)
+
+    version = await resolve_prompt_version_for_request("system-context", session)
+
+    assert version.version_num == 1
+
+
+async def test_resolve_matches_get_active_prompt_version_when_unset(session):
+    """Unset candidate must behave exactly like today's plain active-version
+    resolution - this is the "no split = today's behavior" invariant."""
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await promote_prompt("system-context", 2, session)
+
+    resolved = await resolve_prompt_version_for_request("system-context", session)
+    active = await get_active_prompt_version("system-context", session)
+
+    assert resolved.version_num == active.version_num == 2
+
+
+async def test_resolve_raises_for_unknown_prompt(session):
+    with pytest.raises(PromptNotFoundError):
+        await resolve_prompt_version_for_request("does-not-exist", session)
+
+
+async def test_resolve_with_zero_pct_always_returns_active(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await set_candidate_version("system-context", 2, 0.0, session)
+
+    for _ in range(50):
+        version = await resolve_prompt_version_for_request("system-context", session)
+        assert version.version_num == 1
+
+
+async def test_resolve_with_hundred_pct_always_returns_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await set_candidate_version("system-context", 2, 100.0, session)
+
+    for _ in range(50):
+        version = await resolve_prompt_version_for_request("system-context", session)
+        assert version.version_num == 2
+
+
+async def test_resolve_distributes_traffic_near_configured_percentage(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await set_candidate_version("system-context", 2, 30.0, session)
+
+    n = 2000
+    candidate_hits = 0
+    for _ in range(n):
+        version = await resolve_prompt_version_for_request("system-context", session)
+        if version.version_num == 2:
+            candidate_hits += 1
+
+    ratio = candidate_hits / n
+    # generous tolerance to keep this non-flaky while still proving the
+    # split is roughly honored, not e.g. inverted or ignored
+    assert 0.20 < ratio < 0.40
+
+
+# -- A/B candidate must not disturb promote_prompt / rollback_prompt -------
+
+
+async def test_promote_unaffected_by_inflight_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    v3 = await add_prompt_version("system-context", "v3 text", session)
+    await set_candidate_version("system-context", 3, 20.0, session)
+
+    promoted = await promote_prompt("system-context", 2, session)
+
+    assert promoted.version_num == 2
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 2
+    # the candidate configuration itself is untouched by promotion
+    prompt_row = next(
+        p for p in await list_prompts(session) if p.name == "system-context"
+    )
+    assert prompt_row.candidate_version_id == v3.id
+    assert prompt_row.candidate_traffic_pct == 20.0
+
+
+async def test_rollback_unaffected_by_inflight_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await promote_prompt("system-context", 2, session)
+    await add_prompt_version("system-context", "v3 text", session)
+    await set_candidate_version("system-context", 3, 20.0, session)
+
+    rolled_back = await rollback_prompt("system-context", session)
+
+    assert rolled_back.version_num == 1
+    template = await get_prompt("system-context", session)
+    assert template == "v1"
+
+
+async def test_setting_candidate_does_not_invalidate_cache(session):
+    """Setting/clearing a candidate is a lighter-weight operation than
+    promote_prompt: it must not invalidate cached responses, since the
+    active version (what most traffic still gets) hasn't changed."""
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    redis = get_redis()
+    h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
+    await set_cached_response(
+        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
+
+    await set_candidate_version("system-context", 2, 10.0, session)
+    assert await get_cached_response(redis, h) is not None
+
+    await clear_candidate_version("system-context", session)
+    assert await get_cached_response(redis, h) is not None
