@@ -69,6 +69,14 @@ async def log_request(
     without aggregating `request_logs` on every request. A Redis outage here
     only degrades that accelerator (the next budget check falls back to a
     DB aggregate) - it never fails this call or drops the RequestLog row.
+
+    A cache hit contributes $0 to that budget counter even though `cost_usd`
+    itself (and therefore `request_logs.cost_usd`) still records the full
+    notional cost of the response: `request_logs.cost_usd` intentionally
+    represents value delivered (used for cost/chargeback dashboards and
+    paired with `cache_cost_saved_usd` as the discount), while the budget
+    cap is a "spend" control meant to track what gatekeep actually pays
+    upstream - a served-from-cache response has no such spend.
     """
     cost_usd = (
         cost_usd_override
@@ -91,7 +99,9 @@ async def log_request(
     session.add(log)
     await session.commit()
     try:
-        await record_spend(get_redis(), key_id=key_id, cost_usd=cost_usd)
+        await record_spend(
+            get_redis(), key_id=key_id, cost_usd=0.0 if cached else cost_usd
+        )
     except RedisError:
         # Best-effort accelerator: a missed increment here just means the
         # next budget check falls back to a DB aggregate (get_period_spend),

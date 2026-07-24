@@ -95,6 +95,52 @@ async def test_get_period_spend_ignores_other_periods_and_keys(session):
     assert spent == pytest.approx(2.0)
 
 
+async def test_log_request_does_not_record_spend_for_cached_hits(session):
+    key = await _make_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        response_id="r-cached",
+        cached=True,
+    )
+    redis = get_redis()
+    # log_request treats a cache hit as $0 spend, so record_spend should
+    # never have created a Redis counter for this key; get_period_spend
+    # falls back to the DB, which should also report $0 (cached rows are
+    # excluded from the aggregate).
+    spent = await get_period_spend(session, redis, key_id=key.id)
+    assert spent == pytest.approx(0.0)
+
+
+async def test_get_period_spend_excludes_cached_requests_on_db_fallback(session):
+    key = await _make_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        response_id="r1",
+        cached=True,
+    )
+    await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=500_000,
+        completion_tokens=0,
+        response_id="r2",
+    )
+    redis = get_redis()
+    # Redis has no cached total for this key (see test above), so this
+    # exercises the DB fallback: only the non-cached row's cost should count.
+    spent = await get_period_spend(session, redis, key_id=key.id)
+    assert spent == pytest.approx(1.0)
+
+
 async def test_get_period_spend_falls_back_to_db_on_redis_error(session, monkeypatch):
     key = await _make_key(session)
     await log_request(
