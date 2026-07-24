@@ -80,15 +80,22 @@ async def record_spend(
 async def _aggregate_spend_from_db(
     session: AsyncSession, key_id: int, period_start: dt.datetime
 ) -> float:
-    """Sum `request_logs.cost_usd` for a key from `period_start` onward.
+    """Sum non-cached `request_logs.cost_usd` for a key from `period_start` onward.
 
     The safety-net path when the Redis spend counter is missing or
     unreachable: slower (a table scan/index scan per call) but always
     correct, since request_logs is the durable source of truth for cost.
+
+    Excludes cached rows to match `record_spend`'s accounting: a served-from-
+    cache response has no upstream provider spend, even though its
+    `cost_usd` still records the full notional cost for chargeback/dashboard
+    purposes elsewhere.
     """
     result = await session.execute(
         select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0)).where(
-            RequestLog.key_id == key_id, RequestLog.created_at >= period_start
+            RequestLog.key_id == key_id,
+            RequestLog.created_at >= period_start,
+            RequestLog.cached.is_(False),
         )
     )
     return float(result.scalar_one())
