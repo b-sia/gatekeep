@@ -228,11 +228,13 @@ async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
             ignoring `amount`.
 
     Raises:
-        ValueError: if neither `amount` nor `unlimited` was given, or if no
-            key with that name exists.
+        ValueError: if neither `amount` nor `unlimited` was given, if
+            `amount` is not positive, or if no key with that name exists.
     """
     if not unlimited and amount is None:
         raise ValueError("must provide an amount, or pass --unlimited to clear it")
+    if not unlimited and amount <= 0:
+        raise ValueError("amount must be positive")
     async with SessionLocal() as session:
         key = (
             await session.execute(select(ApiKey).where(ApiKey.name == name))

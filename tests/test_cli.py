@@ -166,6 +166,17 @@ async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session
         await _set_budget("budget-key", None, unlimited=False)
 
 
+async def test_set_budget_raises_for_non_positive_amount(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", -5.0, unlimited=False)
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", 0.0, unlimited=False)
+
+
 def test_main_key_set_budget_dispatches(monkeypatch):
     """`main(["key", "set-budget", ...])` must parse and dispatch to _set_budget."""
     calls = []

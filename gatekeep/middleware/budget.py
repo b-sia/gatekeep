@@ -303,11 +303,8 @@ async def require_budget(
     outage is far smaller than the risk of blocking all traffic for every
     budgeted key because of it.
     """
-    settings = get_settings()
-    redis = get_redis(settings)
-    allowed, spent = await check_budget(
-        session, redis, key, settings.budget_alert_threshold
-    )
+    redis = get_redis(get_settings())
+    allowed, spent = await check_budget(session, redis, key)
     if not allowed:
         raise _budget_exceeded(key.monthly_budget_usd, spent)
     return key
