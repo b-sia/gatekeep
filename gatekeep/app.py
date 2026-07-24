@@ -169,16 +169,16 @@ async def chat_completions(
 ):
     """OpenAI-compatible chat completions endpoint, routed per-request by model.
 
-    Requires a valid, rate-limit-unexhausted, budget-unexceeded API key. Translates the request
-    to a provider-neutral payload, resolves which provider (Anthropic or
-    Ollama) should serve the requested model, then either streams the
-    response as SSE (when `stream: true`) or returns a single OpenAI-shaped
-    JSON completion. Non-streaming requests are first checked against the
-    exact-match cache; on a miss, the semantic cache is checked next (an
-    embedding-similarity match above threshold); a miss on both falls
-    through to the provider, and the fresh response is written to both
-    caches afterwards. Every completed request is logged via `log_request`
-    for cost accounting.
+    Requires a valid, rate-limit-unexhausted, budget-unexceeded API key.
+    Translates the request to a provider-neutral payload, resolves which
+    provider (Anthropic or Ollama) should serve the requested model, then
+    either streams the response as SSE (when `stream: true`) or returns a
+    single OpenAI-shaped JSON completion. Non-streaming requests are first
+    checked against the exact-match cache; on a miss, the semantic cache is
+    checked next (an embedding-similarity match above threshold); a miss on
+    both falls through to the provider, and the fresh response is written to
+    both caches afterwards. Every completed request is logged via
+    `log_request` for cost accounting.
 
     If `prompt_name` is set on the request, the active template registered
     under that name is resolved via `get_prompt` and prepended to

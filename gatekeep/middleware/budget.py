@@ -130,7 +130,8 @@ async def get_period_spend(
     if cached is not None:
         return float(cached)
 
-    assert session is not None, "session is required on a Redis cache miss"
+    if session is None:
+        raise ValueError("session is required on a Redis cache miss")
     spent = await _aggregate_spend_from_db(session, key_id, _period_start(period))
     if redis is not None:
         try:
@@ -220,10 +221,20 @@ async def check_budget(
     matter.
 
     The hard cap check is `spent < budget`: since a request's cost is only
-    known after it completes, this only ever blocks the request *after* the
-    one that pushed spend to/over the cap - not that request itself. This
-    matches the token-bucket rate limiter's per-request granularity and is
-    an accepted tradeoff rather than a bug.
+    known after it completes, this only ever blocks a request *after* an
+    earlier one pushed spend to/over the cap - not that earlier request
+    itself. This matches the token-bucket rate limiter's per-request
+    granularity and is an accepted tradeoff rather than a bug.
+
+    Note this tradeoff compounds under concurrency: unlike the rate limiter
+    (which atomically reserves a token before a request runs), spend is only
+    recorded after a request completes (`accounting.log_request` ->
+    `record_spend`), so N concurrent requests for the same key can all read
+    the same pre-request spend total and all be allowed through. The
+    resulting overshoot is bounded by however many requests for the key are
+    in flight at once, not by one request - acceptable here because a budget
+    cap is a business control, not a correctness-of-service guarantee, but
+    worth knowing if this is ever relied on as a hard ceiling.
     """
     if key.monthly_budget_usd is None:
         return True, None
