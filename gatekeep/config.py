@@ -33,11 +33,6 @@ class Settings(BaseSettings):
     semantic_cache_similarity_threshold: float = 0.95
     eval_judge_model: str = "claude-sonnet-5"
     eval_pass_threshold_default: float = 0.9
-    # Fraction of a key's monthly_budget_usd at which a "warning" alert fires
-    # (in addition to the "exceeded" alert fired at/above 100%). Purely
-    # observational - does not affect enforcement, which always blocks at
-    # spend >= monthly_budget_usd regardless of this setting.
-    budget_alert_threshold: float = 0.8
 
 
 @lru_cache

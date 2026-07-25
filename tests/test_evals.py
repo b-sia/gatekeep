@@ -5,6 +5,7 @@ from gatekeep.evals import (
     EvalGateFailure,
     add_case,
     create_suite,
+    generate_judge_criteria,
     get_suite_for_prompt,
     make_eval_gate,
     run_eval_suite,
@@ -12,21 +13,7 @@ from gatekeep.evals import (
 )
 from gatekeep.models import Prompt, PromptVersion
 from gatekeep.prompts import add_prompt_version, create_prompt
-from gatekeep.providers.base import CompletionResult
-
-
-class FakeProvider:
-    """Provider stub returning queued texts in order, one per complete() call."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-        self.payloads = []
-
-    async def complete(self, payload):
-        self.payloads.append(payload)
-        return CompletionResult(
-            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+from tests.helpers import FakeProvider
 
 
 async def _prompt_version(session, template="answer helpfully"):
@@ -99,6 +86,13 @@ async def test_llm_judge_uses_fixed_judge_model_and_parses_verdict(session):
     assert (
         provider.payloads[1]["model"] == "claude-sonnet-5"
     )  # fixed judge, not generate_model
+    # least-privilege: the judge call must never grant tool access, so a
+    # prompt-injected criteria/output can't escalate beyond bad grading text
+    assert "tools" not in provider.payloads[1]
+    # criteria/output are wrapped as untrusted data, not left bare in the prompt
+    judge_prompt = provider.payloads[1]["messages"][0]["content"]
+    assert "<criteria>\non-topic and coherent\n</criteria>" in judge_prompt
+    assert "untrusted data" in judge_prompt
 
 
 async def test_failed_run_scores_below_threshold(session):
@@ -239,3 +233,42 @@ async def test_run_suite_for_prompt_can_target_a_specific_version(session):
         )
     ).scalar_one()
     assert run.prompt_version_id == v2.id
+
+
+async def test_generate_judge_criteria_sends_input_and_output_to_the_model():
+    provider = FakeProvider(["answers must be on-topic and cite a source"])
+
+    criteria = await generate_judge_criteria(
+        [{"role": "user", "content": "what is the capital of France?"}],
+        "Paris is the capital of France.",
+        provider=provider,
+        model="claude-sonnet-5",
+    )
+
+    assert criteria == "answers must be on-topic and cite a source"
+    assert len(provider.payloads) == 1
+    sent = provider.payloads[0]
+    assert sent["model"] == "claude-sonnet-5"
+    # least-privilege: generating a rubric from untrusted production traffic
+    # must never grant tool access to that call
+    assert "tools" not in sent
+    prompt_text = sent["messages"][0]["content"]
+    assert "what is the capital of France?" in prompt_text
+    assert "Paris is the capital of France." in prompt_text
+    # sampled conversation/response are delimited and flagged as untrusted
+    assert "<conversation>" in prompt_text and "</conversation>" in prompt_text
+    assert "<response>" in prompt_text and "</response>" in prompt_text
+    assert "untrusted data" in prompt_text
+
+
+async def test_generate_judge_criteria_strips_whitespace():
+    provider = FakeProvider(["  a rubric with padding  \n"])
+
+    criteria = await generate_judge_criteria(
+        [{"role": "user", "content": "hi"}],
+        "hello!",
+        provider=provider,
+        model="claude-sonnet-5",
+    )
+
+    assert criteria == "a rubric with padding"

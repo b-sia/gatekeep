@@ -61,18 +61,6 @@ cache_cost_saved_usd = Counter(
     "Cumulative USD cost saved by serving cache hits instead of calling the provider.",
 )
 
-budget_spend_usd = Gauge(
-    "gatekeep_budget_spend_usd",
-    "Cumulative USD spend for a key in the current budget period, as of the last check.",
-    ["key_id"],
-)
-
-budget_alerts_total = Counter(
-    "gatekeep_budget_alerts_total",
-    "Budget threshold alerts fired, by threshold level ('warning' or 'exceeded').",
-    ["key_id", "threshold"],
-)
-
 
 def observe_request(
     model: str, key_id: int, prompt_tokens: int, completion_tokens: int, cost_usd: float
