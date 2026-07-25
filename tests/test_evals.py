@@ -13,21 +13,7 @@ from gatekeep.evals import (
 )
 from gatekeep.models import Prompt, PromptVersion
 from gatekeep.prompts import add_prompt_version, create_prompt
-from gatekeep.providers.base import CompletionResult
-
-
-class FakeProvider:
-    """Provider stub returning queued texts in order, one per complete() call."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-        self.payloads = []
-
-    async def complete(self, payload):
-        self.payloads.append(payload)
-        return CompletionResult(
-            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+from tests.helpers import FakeProvider
 
 
 async def _prompt_version(session, template="answer helpfully"):

@@ -9,25 +9,8 @@ from gatekeep.curation import (
 )
 from gatekeep.evals import create_suite
 from gatekeep.models import ApiKey, EvalCase
-from gatekeep.providers.base import CompletionResult
 from gatekeep.samples import record_request_sample
-
-
-class FakeProvider:
-    """Provider stub returning queued texts in order, one per complete() call."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-        self.payloads = []
-
-    async def complete(self, payload):
-        self.payloads.append(payload)
-        text = self._texts.pop(0)
-        if isinstance(text, Exception):
-            raise text
-        return CompletionResult(
-            text=text, input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+from tests.helpers import FakeProvider
 
 
 async def _seed_samples(session, prompt_name, n):

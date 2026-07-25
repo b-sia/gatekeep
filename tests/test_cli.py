@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-from gatekeep.cli import _eval_run, main
+from gatekeep.cli import _eval_review, _eval_run, main
 from gatekeep.evals import add_case, create_suite
 from gatekeep.prompts import create_prompt
-from gatekeep.providers.base import CompletionResult
-
-
-class _FakeProvider:
-    """Fake provider that returns queued text responses in order, ignoring the payload."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-
-    async def complete(self, payload):
-        """Pop and return the next queued text as a CompletionResult."""
-        return CompletionResult(
-            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+from tests.helpers import FakeProvider as _FakeProvider
 
 
 def _patch_provider(monkeypatch, texts):
@@ -117,3 +104,36 @@ def test_main_eval_run_returns_1_when_no_suite_registered(monkeypatch):
     code = main(["eval", "run", "some-nonexistent-prompt-name"])
 
     assert code == 1
+
+
+# --- _eval_review: does the edit path handle quit correctly? ----------------------
+
+
+async def test_eval_review_edit_then_quit_does_not_delete_the_case(
+    session, monkeypatch
+):
+    """Regression test: typing `q` at the post-edit "approve?" prompt used to fall
+    through to `approve=(answer == "y")` (False), which deletes the case instead of
+    quitting the review loop. Editing then quitting must leave the case in place,
+    still unreviewed, with the edited criteria kept.
+    """
+    await create_prompt("system-context", "answer helpfully", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    case = await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="llm_judge",
+        judge_criteria="original criteria",
+        reviewed=False,
+        source="curated",
+    )
+
+    answers = iter(["e", "edited criteria", "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    await _eval_review("system-context")
+
+    await session.refresh(case)
+    assert case.judge_criteria == "edited criteria"
+    assert case.reviewed is False

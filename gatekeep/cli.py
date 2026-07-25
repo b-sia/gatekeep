@@ -236,7 +236,9 @@ async def _eval_review(name: str) -> None:
                 if new_criteria:
                     case.judge_criteria = new_criteria
                     await session.commit()
-                answer = input("  approve? [y/N] ").strip().lower()
+                answer = input("  approve? [y/N/q] ").strip().lower()
+                if answer == "q":
+                    break
             await review_case(case.id, session, approve=(answer == "y"))
             print("  approved" if answer == "y" else "  rejected (deleted)")
 

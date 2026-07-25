@@ -51,7 +51,7 @@ async def curate_cases(
                 provider=provider,
                 model=generate_model,
             )
-        except Exception:
+        except Exception:  # provider SDK error, e.g. anthropic.APIError
             logger.warning(
                 "judge criteria generation failed for sample %s; falling back "
                 "to generic criteria",
