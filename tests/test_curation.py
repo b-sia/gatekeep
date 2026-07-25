@@ -1,4 +1,6 @@
+import httpx
 import pytest
+from anthropic import APIError
 from sqlalchemy import select
 
 from gatekeep.curation import (
@@ -49,7 +51,10 @@ async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
 async def test_curate_falls_back_to_generic_criteria_on_generation_failure(session):
     await create_suite("p", session, pass_threshold=0.9)
     await _seed_samples(session, "p", 1)
-    provider = FakeProvider([RuntimeError("upstream is down")])
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    provider = FakeProvider(
+        [APIError("upstream is down", request=request, body=None)]
+    )
 
     cases = await curate_cases(
         "p", session, limit=1, provider=provider, generate_model="m"

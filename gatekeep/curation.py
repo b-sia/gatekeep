@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from anthropic import APIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,7 +52,7 @@ async def curate_cases(
                 provider=provider,
                 model=generate_model,
             )
-        except Exception:  # provider SDK error, e.g. anthropic.APIError
+        except APIError:
             logger.warning(
                 "judge criteria generation failed for sample %s; falling back "
                 "to generic criteria",
