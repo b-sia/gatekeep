@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import TYPE_CHECKING
 
 from redis.asyncio import Redis
@@ -211,6 +212,19 @@ async def get_active_prompt_version(name: str, session: AsyncSession) -> PromptV
     return version
 
 
+async def get_prompt_row(name: str, session: AsyncSession) -> Prompt:
+    """Fetch the Prompt row for `name`, exposing its candidate config.
+
+    Unlike `get_active_prompt_version` (which returns the active
+    PromptVersion's template), this returns the parent Prompt row itself -
+    for callers that need to report or reason about
+    `candidate_version_id`/`candidate_traffic_pct`, e.g. CLI display.
+
+    Raises PromptNotFoundError if the prompt doesn't exist.
+    """
+    return await _get_prompt_row(name, session)
+
+
 async def get_prompt(name: str, session: AsyncSession) -> str:
     """Fetch the active template text for `name`.
 
@@ -218,6 +232,125 @@ async def get_prompt(name: str, session: AsyncSession) -> str:
     """
     version = await get_active_prompt_version(name, session)
     return version.template
+
+
+async def set_candidate_version(
+    name: str,
+    version_num: int,
+    traffic_pct: float,
+    session: AsyncSession,
+) -> Prompt:
+    """Configure an A/B testing candidate for a prompt (partial traffic split).
+
+    Points `Prompt.candidate_version_id` at `version_num` and
+    `Prompt.candidate_traffic_pct` at `traffic_pct`, so
+    `resolve_prompt_version_for_request` starts sending that percentage of
+    requests to the candidate version instead of the active one. This is
+    deliberately a lighter-weight sibling of `promote_prompt`, not a variant
+    of it: a candidate is not "active", so setting one must never run the
+    eval gate or invalidate any cache - those only make sense for the
+    version actually serving 100% of default traffic. Calling this again
+    replaces any previously configured candidate/percentage (e.g. to widen
+    a rollout from 10% to 50%).
+
+    Raises PromptNotFoundError if the prompt doesn't exist,
+    PromptVersionNotFoundError if version_num doesn't exist for it, and
+    ValueError if traffic_pct is outside the inclusive [0, 100] range.
+    """
+    if not 0 <= traffic_pct <= 100:
+        raise ValueError(f"traffic_pct must be between 0 and 100, got {traffic_pct!r}")
+    prompt = await _get_prompt_row(name, session)
+    target = (
+        await session.execute(
+            select(PromptVersion).where(
+                PromptVersion.prompt_id == prompt.id,
+                PromptVersion.version_num == version_num,
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise PromptVersionNotFoundError(
+            f"prompt {name!r} has no version {version_num}"
+        )
+
+    prompt.candidate_version_id = target.id
+    prompt.candidate_traffic_pct = traffic_pct
+    await session.commit()
+    await session.refresh(prompt)
+    return prompt
+
+
+async def clear_candidate_version(name: str, session: AsyncSession) -> Prompt:
+    """Remove any configured A/B candidate for a prompt, restoring 100% active traffic.
+
+    As lightweight as `set_candidate_version`: no eval gate, no cache
+    invalidation - clearing a candidate never touches what's actually
+    serving default traffic. A no-op (but still succeeds) if no candidate
+    was configured. Raises PromptNotFoundError if the prompt doesn't exist.
+    """
+    prompt = await _get_prompt_row(name, session)
+    prompt.candidate_version_id = None
+    prompt.candidate_traffic_pct = None
+    await session.commit()
+    await session.refresh(prompt)
+    return prompt
+
+
+async def resolve_prompt_version_for_request(
+    name: str, session: AsyncSession
+) -> PromptVersion:
+    """Resolve which PromptVersion should serve one incoming request.
+
+    This is the request-time A/B split: when a prompt has no candidate
+    configured (the default), this always returns the active version,
+    identical to `get_active_prompt_version` - existing promote/rollback
+    behavior is completely unaffected by this function existing.
+
+    When a candidate *is* configured, each call independently draws a fresh
+    `random.random()` and routes to the candidate iff the draw falls within
+    `candidate_traffic_pct` percent, otherwise to the active version. This
+    is a stateless, per-request random split rather than a sticky
+    per-key/session assignment: it's the simpler of the two designs (no
+    assignment state to persist or expire), and matches the roadmap's
+    framing of this as measuring a population-level traffic split rather
+    than tracking individual users through a multi-request experience. The
+    tradeoff is that a single client can be assigned to either version
+    across consecutive requests in the same "experiment" - acceptable here
+    since these are independent, stateless completion requests, not a
+    multi-turn conversation pinned to one prompt version.
+
+    "Is a candidate configured" (`candidate_version_id is not None`) and
+    "how much traffic routes to it" (`candidate_traffic_pct`) are distinct
+    states: a candidate configured at 0% traffic is a real, deliberate
+    state - e.g. a rollout paused back to 0% without discarding which
+    version it was testing, so it can be resumed by raising the pct again
+    - and it is visible as such via `gatekeep prompt show` even though, for
+    routing purposes, it behaves identically to no candidate (100% active).
+    100% behaves like always-candidate. If `candidate_version_id` ever
+    pointed at a row that no longer exists, this falls back to the active
+    version rather than raising - in practice the `prompts.
+    candidate_version_id` foreign key already makes that state
+    unreachable (versions are immutable and never deleted), so this is
+    defense-in-depth rather than a path exercised in normal operation.
+
+    Raises PromptNotFoundError if the prompt doesn't exist.
+    """
+    prompt = await _get_prompt_row(name, session)
+    active = await session.get(PromptVersion, prompt.active_version_id)
+    # "is a candidate configured" (candidate_version_id) and "how much
+    # traffic routes to it" (candidate_traffic_pct) are deliberately checked
+    # separately: a candidate configured at 0% is a real, distinct state
+    # (e.g. a paused rollout, kept configured so it can be resumed by just
+    # raising the pct) from no candidate being configured at all - even
+    # though both currently route 100% of requests to the active version.
+    if prompt.candidate_version_id is None:
+        return active
+    traffic_pct = prompt.candidate_traffic_pct or 0.0
+    if random.random() * 100 < traffic_pct:
+        candidate = await session.get(PromptVersion, prompt.candidate_version_id)
+        if candidate is not None:
+            return candidate
+    return active
 
 
 async def list_prompts(session: AsyncSession) -> list[Prompt]:

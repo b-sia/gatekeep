@@ -21,16 +21,19 @@ from gatekeep.evals import (
 )
 from gatekeep.fixtures import load_fixtures_dir
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey
+from gatekeep.models import ApiKey, PromptVersion
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
     add_prompt_version,
+    clear_candidate_version,
     create_prompt,
     get_active_prompt_version,
+    get_prompt_row,
     list_prompts,
     promote_prompt,
     rollback_prompt,
+    set_candidate_version,
     sync_prompt_from_text,
 )
 from gatekeep.providers.anthropic import AnthropicProvider
@@ -54,20 +57,39 @@ async def _add_version(name: str, template_file: str) -> None:
     print(f"added version {version.version_num} to {name!r} (not active; promote it)")
 
 
+async def _candidate_suffix(prompt, session) -> str:
+    """Format a prompt's candidate state for CLI display, or "" if none is configured.
+
+    A configured candidate is always shown, even at 0% traffic: a paused
+    rollout (candidate kept configured, traffic pct dialed to 0) is a
+    real, distinct state from no candidate being configured at all, even
+    though both currently route 100% of requests to the active version.
+    """
+    if prompt.candidate_version_id is None:
+        return ""
+    candidate = await session.get(PromptVersion, prompt.candidate_version_id)
+    pct = prompt.candidate_traffic_pct or 0.0
+    paused = " (paused)" if pct == 0 else ""
+    return f" (candidate: v{candidate.version_num} @ {pct}%{paused})"
+
+
 async def _list() -> None:
-    """Print every registered prompt name with its current active version number."""
+    """Print every registered prompt name with its active version and candidate state."""
     async with SessionLocal() as session:
         prompts = await list_prompts(session)
         for prompt in prompts:
             version = await get_active_prompt_version(prompt.name, session)
-            print(f"{prompt.name}\tv{version.version_num}")
+            suffix = await _candidate_suffix(prompt, session)
+            print(f"{prompt.name}\tv{version.version_num}{suffix}")
 
 
 async def _show(name: str) -> None:
-    """Print the active version's number and template text for a prompt."""
+    """Print the active version's number/template and any configured candidate's state."""
     async with SessionLocal() as session:
-        version = await get_active_prompt_version(name, session)
-        print(f"# {name} (active version {version.version_num})")
+        prompt = await get_prompt_row(name, session)
+        version = await session.get(PromptVersion, prompt.active_version_id)
+        suffix = await _candidate_suffix(prompt, session)
+        print(f"# {name} (active version {version.version_num}){suffix}")
         print(version.template)
 
 
@@ -95,6 +117,28 @@ async def _rollback(name: str) -> None:
     async with SessionLocal() as session:
         rolled_back = await rollback_prompt(name, session, redis=redis)
     print(f"rolled back {name!r} to version {rolled_back.version_num}")
+
+
+async def _set_candidate(name: str, version_num: int, pct: float) -> None:
+    """Configure an A/B candidate version + traffic percentage for a prompt.
+
+    Lightweight compared to `promote`: does not run the eval gate and does
+    not invalidate any cache, since the candidate isn't becoming "active".
+    """
+    async with SessionLocal() as session:
+        prompt = await set_candidate_version(name, version_num, pct, session)
+    print(
+        f"set {name!r} candidate to version {version_num} at {prompt.candidate_traffic_pct}% traffic"
+    )
+
+
+async def _clear_candidate(name: str) -> None:
+    """Remove any configured A/B candidate for a prompt (100% back to active)."""
+    async with SessionLocal() as session:
+        await clear_candidate_version(name, session)
+    print(
+        f"cleared candidate for {name!r}; 100% of traffic now goes to the active version"
+    )
 
 
 async def _sync(directory: str) -> None:
@@ -317,6 +361,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("name")
 
+    set_candidate_parser = prompt_subparsers.add_parser(
+        "set-candidate",
+        help="route a percentage of traffic to a candidate version (A/B test)",
+    )
+    set_candidate_parser.add_argument("name")
+    set_candidate_parser.add_argument("version", type=int)
+    set_candidate_parser.add_argument(
+        "--pct",
+        type=float,
+        required=True,
+        help="percentage (0-100) of traffic to route to the candidate version",
+    )
+
+    clear_candidate_parser = prompt_subparsers.add_parser(
+        "clear-candidate", help="remove a prompt's configured A/B candidate"
+    )
+    clear_candidate_parser.add_argument("name")
+
     sync_parser = prompt_subparsers.add_parser(
         "sync", help="sync all *.txt files from a directory into the DB"
     )
@@ -403,6 +465,10 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_promote(args.name, args.version))
             elif args.prompt_command == "rollback":
                 asyncio.run(_rollback(args.name))
+            elif args.prompt_command == "set-candidate":
+                asyncio.run(_set_candidate(args.name, args.version, args.pct))
+            elif args.prompt_command == "clear-candidate":
+                asyncio.run(_clear_candidate(args.name))
             elif args.prompt_command == "sync":
                 asyncio.run(_sync(args.directory))
         elif args.command == "key":
