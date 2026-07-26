@@ -174,6 +174,17 @@ class CachedResponse(Base):
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt_version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    __table_args__ = (
+        # Speeds up find_semantic_match's equality filters (model, and
+        # optionally prompt_version_num for A/B-scoped lookups) before it
+        # sorts the matches by cosine distance.
+        Index(
+            "ix_cached_responses_model_prompt_version_num",
+            "model",
+            "prompt_version_num",
+        ),
+    )
+
 
 class RequestSample(Base):
     """A durable, append-only sample of one cache-miss request's content.

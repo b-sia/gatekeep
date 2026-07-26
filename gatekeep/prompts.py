@@ -318,6 +318,8 @@ async def resolve_prompt_version_for_request(
     """
     prompt = await _get_prompt_row(name, session)
     active = await session.get(PromptVersion, prompt.active_version_id)
+    # `not candidate_traffic_pct` also catches an explicit 0.0, which is
+    # intentional: 0% traffic must behave identically to "no candidate".
     if not prompt.candidate_version_id or not prompt.candidate_traffic_pct:
         return active
     if random.random() * 100 < prompt.candidate_traffic_pct:
