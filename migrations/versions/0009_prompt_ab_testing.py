@@ -1,15 +1,15 @@
 """prompt A/B candidate traffic split + version tagging on logs/cache
 
-Revision ID: 0008
-Revises: 0007
+Revision ID: 0009
+Revises: 0008
 Create Date: 2026-07-23
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0008"
-down_revision = "0007"
+revision = "0009"
+down_revision = "0008"
 branch_labels = None
 depends_on = None
 

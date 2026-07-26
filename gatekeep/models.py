@@ -3,7 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +38,10 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Hard cap on USD spend per calendar month; None means unlimited. Enforced
+    # by gatekeep.middleware.budget.require_budget, tracked against cumulative
+    # request_logs.cost_usd for the key in the current UTC calendar month.
+    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class RequestLog(Base):
@@ -57,6 +70,12 @@ class RequestLog(Base):
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     routed_from: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt_version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        # Speeds up budget.get_period_spend's DB-fallback aggregate, which
+        # filters by key_id and created_at >= period_start.
+        Index("ix_request_logs_key_id_created_at", "key_id", "created_at"),
+    )
 
 
 class Prompt(Base):

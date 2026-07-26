@@ -17,6 +17,14 @@ class _FakeProvider:
         return CompletionResult(
             text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
         )
+import pytest
+
+from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.cli import _eval_review, _eval_run, _set_budget, main
+from gatekeep.evals import add_case, create_suite
+from gatekeep.models import ApiKey
+from gatekeep.prompts import create_prompt
+from tests.helpers import FakeProvider as _FakeProvider
 
 
 def _patch_provider(monkeypatch, texts):
@@ -171,3 +179,104 @@ def test_main_set_candidate_rejects_out_of_range_pct(monkeypatch):
     code = main(["prompt", "set-candidate", "system-context", "2", "--pct", "150"])
 
     assert code == 1
+
+# --- _eval_review: does the edit path handle quit correctly? ----------------------
+
+
+async def test_eval_review_edit_then_quit_does_not_delete_the_case(
+    session, monkeypatch
+):
+    """Regression test: typing `q` at the post-edit "approve?" prompt used to fall
+    through to `approve=(answer == "y")` (False), which deletes the case instead of
+    quitting the review loop. Editing then quitting must leave the case in place,
+    still unreviewed, with the edited criteria kept.
+    """
+    await create_prompt("system-context", "answer helpfully", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    case = await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="llm_judge",
+        judge_criteria="original criteria",
+        reviewed=False,
+        source="curated",
+    )
+
+    answers = iter(["e", "edited criteria", "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    await _eval_review("system-context")
+
+    await session.refresh(case)
+    assert case.judge_criteria == "edited criteria"
+    assert case.reviewed is False
+
+# --- key set-budget: does it set/clear monthly_budget_usd? -----------------------
+
+
+async def test_set_budget_sets_amount_on_existing_key(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    await _set_budget("budget-key", 25.0, unlimited=False)
+
+    session.expire_all()
+    key = await session.get(ApiKey, 1)
+    assert key.monthly_budget_usd == 25.0
+
+
+async def test_set_budget_unlimited_clears_amount(session):
+    raw = generate_key()
+    session.add(
+        ApiKey(name="budget-key", key_hash=hash_key(raw), monthly_budget_usd=10.0)
+    )
+    await session.commit()
+
+    await _set_budget("budget-key", None, unlimited=True)
+
+    session.expire_all()
+    key = await session.get(ApiKey, 1)
+    assert key.monthly_budget_usd is None
+
+
+async def test_set_budget_raises_for_unknown_key_name():
+    with pytest.raises(ValueError, match="no API key named"):
+        await _set_budget("does-not-exist", 5.0, unlimited=False)
+
+
+async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="must provide an amount"):
+        await _set_budget("budget-key", None, unlimited=False)
+
+
+async def test_set_budget_raises_for_non_positive_amount(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", -5.0, unlimited=False)
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", 0.0, unlimited=False)
+
+
+
+def test_main_key_set_budget_dispatches(monkeypatch):
+    """`main(["key", "set-budget", ...])` must parse and dispatch to _set_budget."""
+    calls = []
+
+    async def _fake_set_budget(name, amount, unlimited):
+        calls.append((name, amount, unlimited))
+
+    monkeypatch.setattr("gatekeep.cli._set_budget", _fake_set_budget)
+
+    code = main(["key", "set-budget", "some-key", "12.5"])
+
+    assert code == 0
+    assert calls == [("some-key", 12.5, False)]

@@ -7,6 +7,7 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounting import calculate_cost
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
@@ -24,17 +25,18 @@ from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 @pytest.fixture(autouse=True)
 async def _clean_cache():
-    """Flush exact-cache and rate-limit keys so tests in this file don't collide."""
+    """Flush exact-cache, rate-limit, and budget keys so tests in this file
+    don't collide (the schema reset between tests recycles api_keys ids, so
+    a new key can otherwise inherit a stale Redis bucket/counter/cache entry
+    left by an earlier test's key of the same id)."""
     redis = get_redis()
-    async for key in redis.scan_iter("cache:exact:*"):
-        await redis.delete(key)
-    async for key in redis.scan_iter("ratelimit:*"):
-        await redis.delete(key)
+    for prefix in ("cache:exact:*", "ratelimit:*", "budget:*"):
+        async for key in redis.scan_iter(prefix):
+            await redis.delete(key)
     yield
-    async for key in redis.scan_iter("cache:exact:*"):
-        await redis.delete(key)
-    async for key in redis.scan_iter("ratelimit:*"):
-        await redis.delete(key)
+    for prefix in ("cache:exact:*", "ratelimit:*", "budget:*"):
+        async for key in redis.scan_iter(prefix):
+            await redis.delete(key)
 
 
 class FakeProvider:
@@ -443,6 +445,50 @@ async def test_rate_limit_exhaustion_returns_429_with_retry_after(
     assert int(r.headers["retry-after"]) >= 1
     body = r.json()
     assert body["error"]["type"] == "rate_limit_error"
+
+
+@pytest_asyncio.fixture
+async def budgeted_raw_key(session):
+    """A key whose monthly_budget_usd is set to half of one FakeProvider
+    completion's cost, so the first request is allowed (spend starts at $0)
+    but the second is rejected once the first request's full cost has been
+    recorded."""
+    raw = generate_key()
+    one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
+    session.add(
+        ApiKey(name="b", key_hash=hash_key(raw), monthly_budget_usd=one_call_cost / 2)
+    )
+    await session.commit()
+    return raw
+
+
+async def test_budget_cap_allows_below_cap_then_rejects_once_exceeded(
+    client, budgeted_raw_key
+):
+    """Exercise the budget cap through the real /v1/chat/completions endpoint:
+    a request under the cap succeeds, and the very next request - now that
+    the first request's cost has pushed cumulative spend past the cap -
+    gets a real 429 with a budget-shaped error body (not just at the
+    require_budget dependency level)."""
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "spend-me"}],
+    }
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {budgeted_raw_key}"},
+        json=body,
+    )
+    assert r.status_code == 200
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {budgeted_raw_key}"},
+        json={**body, "messages": [{"role": "user", "content": "spend-me-again"}]},
+    )
+    assert r.status_code == 429
+    response_body = r.json()
+    assert response_body["error"]["type"] == "budget_exceeded_error"
 
 
 async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):
