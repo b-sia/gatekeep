@@ -212,6 +212,19 @@ async def get_active_prompt_version(name: str, session: AsyncSession) -> PromptV
     return version
 
 
+async def get_prompt_row(name: str, session: AsyncSession) -> Prompt:
+    """Fetch the Prompt row for `name`, exposing its candidate config.
+
+    Unlike `get_active_prompt_version` (which returns the active
+    PromptVersion's template), this returns the parent Prompt row itself -
+    for callers that need to report or reason about
+    `candidate_version_id`/`candidate_traffic_pct`, e.g. CLI display.
+
+    Raises PromptNotFoundError if the prompt doesn't exist.
+    """
+    return await _get_prompt_row(name, session)
+
+
 async def get_prompt(name: str, session: AsyncSession) -> str:
     """Fetch the active template text for `name`.
 
@@ -306,10 +319,16 @@ async def resolve_prompt_version_for_request(
     since these are independent, stateless completion requests, not a
     multi-turn conversation pinned to one prompt version.
 
-    `candidate_traffic_pct` of 0 behaves exactly like no candidate (always
-    active); 100 behaves like always-candidate. If `candidate_version_id`
-    ever pointed at a row that no longer exists, this falls back to the
-    active version rather than raising - in practice the `prompts.
+    "Is a candidate configured" (`candidate_version_id is not None`) and
+    "how much traffic routes to it" (`candidate_traffic_pct`) are distinct
+    states: a candidate configured at 0% traffic is a real, deliberate
+    state - e.g. a rollout paused back to 0% without discarding which
+    version it was testing, so it can be resumed by raising the pct again
+    - and it is visible as such via `gatekeep prompt show` even though, for
+    routing purposes, it behaves identically to no candidate (100% active).
+    100% behaves like always-candidate. If `candidate_version_id` ever
+    pointed at a row that no longer exists, this falls back to the active
+    version rather than raising - in practice the `prompts.
     candidate_version_id` foreign key already makes that state
     unreachable (versions are immutable and never deleted), so this is
     defense-in-depth rather than a path exercised in normal operation.
@@ -318,11 +337,16 @@ async def resolve_prompt_version_for_request(
     """
     prompt = await _get_prompt_row(name, session)
     active = await session.get(PromptVersion, prompt.active_version_id)
-    # `not candidate_traffic_pct` also catches an explicit 0.0, which is
-    # intentional: 0% traffic must behave identically to "no candidate".
-    if not prompt.candidate_version_id or not prompt.candidate_traffic_pct:
+    # "is a candidate configured" (candidate_version_id) and "how much
+    # traffic routes to it" (candidate_traffic_pct) are deliberately checked
+    # separately: a candidate configured at 0% is a real, distinct state
+    # (e.g. a paused rollout, kept configured so it can be resumed by just
+    # raising the pct) from no candidate being configured at all - even
+    # though both currently route 100% of requests to the active version.
+    if prompt.candidate_version_id is None:
         return active
-    if random.random() * 100 < prompt.candidate_traffic_pct:
+    traffic_pct = prompt.candidate_traffic_pct or 0.0
+    if random.random() * 100 < traffic_pct:
         candidate = await session.get(PromptVersion, prompt.candidate_version_id)
         if candidate is not None:
             return candidate

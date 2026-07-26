@@ -3,7 +3,6 @@ from pydantic import ValidationError
 
 from gatekeep.api.anthropic_schemas import (
     ContentBlock,
-    MessageParam,
     MessagesRequest,
     MessagesResponse,
     MessagesUsage,

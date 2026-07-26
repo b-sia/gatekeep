@@ -1,29 +1,22 @@
 from __future__ import annotations
 
-from gatekeep.cli import _clear_candidate, _eval_run, _set_candidate, build_parser, main
-from gatekeep.evals import add_case, create_suite
-from gatekeep.prompts import add_prompt_version, create_prompt
-from gatekeep.providers.base import CompletionResult
-
-
-class _FakeProvider:
-    """Fake provider that returns queued text responses in order, ignoring the payload."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-
-    async def complete(self, payload):
-        """Pop and return the next queued text as a CompletionResult."""
-        return CompletionResult(
-            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
 import pytest
 
 from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.cli import _eval_review, _eval_run, _set_budget, main
+from gatekeep.cli import (
+    _clear_candidate,
+    _eval_review,
+    _eval_run,
+    _list,
+    _set_budget,
+    _set_candidate,
+    _show,
+    build_parser,
+    main,
+)
 from gatekeep.evals import add_case, create_suite
 from gatekeep.models import ApiKey
-from gatekeep.prompts import create_prompt
+from gatekeep.prompts import add_prompt_version, create_prompt
 from tests.helpers import FakeProvider as _FakeProvider
 
 
@@ -180,6 +173,7 @@ def test_main_set_candidate_rejects_out_of_range_pct(monkeypatch):
 
     assert code == 1
 
+
 # --- _eval_review: does the edit path handle quit correctly? ----------------------
 
 
@@ -211,6 +205,7 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(
     await session.refresh(case)
     assert case.judge_criteria == "edited criteria"
     assert case.reviewed is False
+
 
 # --- key set-budget: does it set/clear monthly_budget_usd? -----------------------
 
@@ -266,7 +261,6 @@ async def test_set_budget_raises_for_non_positive_amount(session):
         await _set_budget("budget-key", 0.0, unlimited=False)
 
 
-
 def test_main_key_set_budget_dispatches(monkeypatch):
     """`main(["key", "set-budget", ...])` must parse and dispatch to _set_budget."""
     calls = []
@@ -280,3 +274,56 @@ def test_main_key_set_budget_dispatches(monkeypatch):
 
     assert code == 0
     assert calls == [("some-key", 12.5, False)]
+
+
+# --- candidate visibility: no candidate vs. candidate paused at 0% -----------
+
+
+async def test_show_reports_no_candidate_suffix_when_none_configured(session, capsys):
+    await create_prompt("system-context", "v1", session)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate" not in out
+
+
+async def test_show_reports_candidate_paused_at_zero_pct_distinctly(session, capsys):
+    """A candidate configured at 0% traffic (a paused rollout) must be visibly
+    distinct from no candidate being configured at all - both route 100% of
+    traffic to the active version, but they are not the same state."""
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 0.0)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate: v2 @ 0.0% (paused)" in out
+
+
+async def test_show_reports_candidate_at_nonzero_pct_without_paused_label(
+    session, capsys
+):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 25.0)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate: v2 @ 25.0%" in out
+    assert "paused" not in out
+
+
+async def test_list_reports_candidate_state_per_prompt(session, capsys):
+    await create_prompt("no-candidate-prompt", "v1", session)
+    await create_prompt("paused-candidate-prompt", "v1", session)
+    await add_prompt_version("paused-candidate-prompt", "v2 text", session)
+    await _set_candidate("paused-candidate-prompt", 2, 0.0)
+
+    await _list()
+
+    out = capsys.readouterr().out
+    assert "no-candidate-prompt\tv1\n" in out
+    assert "paused-candidate-prompt\tv1 (candidate: v2 @ 0.0% (paused))" in out
