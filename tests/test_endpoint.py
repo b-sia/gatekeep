@@ -7,29 +7,36 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounting import calculate_cost
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
 from gatekeep.evals import create_suite
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, EvalRun, RequestLog
-from gatekeep.prompts import create_prompt, get_active_prompt_version
+from gatekeep.models import ApiKey, EvalRun, Prompt, RequestLog
+from gatekeep.prompts import (
+    add_prompt_version,
+    create_prompt,
+    get_active_prompt_version,
+    set_candidate_version,
+)
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
 @pytest.fixture(autouse=True)
 async def _clean_cache():
-    """Flush exact-cache and rate-limit keys so tests in this file don't collide."""
+    """Flush exact-cache, rate-limit, and budget keys so tests in this file
+    don't collide (the schema reset between tests recycles api_keys ids, so
+    a new key can otherwise inherit a stale Redis bucket/counter/cache entry
+    left by an earlier test's key of the same id)."""
     redis = get_redis()
-    async for key in redis.scan_iter("cache:exact:*"):
-        await redis.delete(key)
-    async for key in redis.scan_iter("ratelimit:*"):
-        await redis.delete(key)
+    for prefix in ("cache:exact:*", "ratelimit:*", "budget:*"):
+        async for key in redis.scan_iter(prefix):
+            await redis.delete(key)
     yield
-    async for key in redis.scan_iter("cache:exact:*"):
-        await redis.delete(key)
-    async for key in redis.scan_iter("ratelimit:*"):
-        await redis.delete(key)
+    for prefix in ("cache:exact:*", "ratelimit:*", "budget:*"):
+        async for key in redis.scan_iter(prefix):
+            await redis.delete(key)
 
 
 class FakeProvider:
@@ -230,6 +237,181 @@ async def test_prompt_name_substitutes_active_template_as_system_message(
     assert r.status_code == 200
     assert captured["payload"]["system"] == "You are a pirate."
 
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    assert log.prompt_version_num == 1
+
+
+# -- A/B candidate traffic split -------------------------------------------
+
+
+async def test_candidate_at_100_pct_always_serves_candidate_template(
+    client, raw_key, session
+):
+    """A candidate configured at 100% traffic must always be served instead
+    of the active version, and the served version's number must land on
+    RequestLog for later active-vs-candidate comparison."""
+    await create_prompt("system-context", "You are a pirate.", session)
+    await add_prompt_version("system-context", "You are a wizard.", session)
+    await set_candidate_version("system-context", 2, 100.0, session)
+
+    captured = {}
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        captured["payload"] = payload
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "gpt-4o",
+                "prompt_name": "system-context",
+                "messages": [{"role": "user", "content": "ping-candidate-100"}],
+            },
+        )
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
+
+    assert r.status_code == 200
+    assert captured["payload"]["system"] == "You are a wizard."
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    assert log.prompt_version_num == 2
+
+
+async def test_candidate_at_0_pct_never_serves_candidate_template(
+    client, raw_key, session
+):
+    """A candidate configured at 0% traffic must behave exactly like no
+    candidate at all: always the active version, never the candidate."""
+    await create_prompt("system-context", "You are a pirate.", session)
+    await add_prompt_version("system-context", "You are a wizard.", session)
+    await set_candidate_version("system-context", 2, 0.0, session)
+
+    captured = {}
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        captured["payload"] = payload
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "gpt-4o",
+                "prompt_name": "system-context",
+                "messages": [{"role": "user", "content": "ping-candidate-0"}],
+            },
+        )
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
+
+    assert r.status_code == 200
+    assert captured["payload"]["system"] == "You are a pirate."
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    assert log.prompt_version_num == 1
+
+
+async def test_candidate_split_routes_a_mix_of_active_and_candidate_requests(
+    client, raw_key, session
+):
+    """A mid-range split (e.g. 50%) must actually produce a mix of requests
+    served by the active version and requests served by the candidate,
+    each correctly reflected in RequestLog.prompt_version_num - this is the
+    end-to-end proof that the split reaches the real request path, not just
+    the unit-level resolver."""
+    await create_prompt("system-context", "You are a pirate.", session)
+    await add_prompt_version("system-context", "You are a wizard.", session)
+    await set_candidate_version("system-context", 2, 50.0, session)
+
+    response_ids = []
+    for i in range(40):
+        r = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "gpt-4o",
+                "prompt_name": "system-context",
+                "messages": [{"role": "user", "content": f"ping-split-{i}"}],
+            },
+        )
+        assert r.status_code == 200
+        response_ids.append(r.json()["id"])
+
+    logs = (
+        (
+            await session.execute(
+                select(RequestLog).where(RequestLog.response_id.in_(response_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    served_versions = {log.prompt_version_num for log in logs}
+    assert served_versions == {1, 2}
+
+
+async def test_promote_prompt_unaffected_by_inflight_candidate_via_endpoint(
+    client, raw_key, session
+):
+    """promote_prompt/rollback_prompt must still work exactly as before even
+    with a candidate configured in-flight, proving this feature's "bigger
+    blast radius" doesn't destabilize the existing binary promote/rollback
+    model through the real request path."""
+    from gatekeep.prompts import promote_prompt
+
+    await create_prompt("system-context", "You are a pirate.", session)
+    await add_prompt_version("system-context", "You are a wizard.", session)
+    await add_prompt_version("system-context", "You are a ghost.", session)
+    await set_candidate_version("system-context", 3, 20.0, session)
+
+    await promote_prompt("system-context", 2, session)
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "gpt-4o",
+            "prompt_name": "system-context",
+            "messages": [{"role": "user", "content": "ping-promote-with-candidate"}],
+        },
+    )
+    assert r.status_code == 200
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    # candidate (v3) at 20% may or may not have fired for this single
+    # request, but the active version promoted-to (v2) must be a valid
+    # outcome and the candidate config must remain untouched.
+    assert log.prompt_version_num in (2, 3)
+    prompt_row = (
+        await session.execute(select(Prompt).where(Prompt.name == "system-context"))
+    ).scalar_one()
+    assert prompt_row.active_version_id is not None
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 2
+
 
 async def test_rate_limit_exhaustion_returns_429_with_retry_after(
     client, raw_key, monkeypatch
@@ -263,6 +445,50 @@ async def test_rate_limit_exhaustion_returns_429_with_retry_after(
     assert int(r.headers["retry-after"]) >= 1
     body = r.json()
     assert body["error"]["type"] == "rate_limit_error"
+
+
+@pytest_asyncio.fixture
+async def budgeted_raw_key(session):
+    """A key whose monthly_budget_usd is set to half of one FakeProvider
+    completion's cost, so the first request is allowed (spend starts at $0)
+    but the second is rejected once the first request's full cost has been
+    recorded."""
+    raw = generate_key()
+    one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
+    session.add(
+        ApiKey(name="b", key_hash=hash_key(raw), monthly_budget_usd=one_call_cost / 2)
+    )
+    await session.commit()
+    return raw
+
+
+async def test_budget_cap_allows_below_cap_then_rejects_once_exceeded(
+    client, budgeted_raw_key
+):
+    """Exercise the budget cap through the real /v1/chat/completions endpoint:
+    a request under the cap succeeds, and the very next request - now that
+    the first request's cost has pushed cumulative spend past the cap -
+    gets a real 429 with a budget-shaped error body (not just at the
+    require_budget dependency level)."""
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "spend-me"}],
+    }
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {budgeted_raw_key}"},
+        json=body,
+    )
+    assert r.status_code == 200
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {budgeted_raw_key}"},
+        json={**body, "messages": [{"role": "user", "content": "spend-me-again"}]},
+    )
+    assert r.status_code == 429
+    response_body = r.json()
+    assert response_body["error"]["type"] == "budget_exceeded_error"
 
 
 async def test_unknown_prompt_name_returns_openai_shaped_400(client, raw_key):

@@ -54,6 +54,7 @@ from gatekeep.api.translation import (
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
 from gatekeep.embeddings import embed_text
+from gatekeep.middleware.budget import require_budget
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
@@ -65,7 +66,7 @@ from gatekeep.middleware.cache_semantic import (
     find_semantic_match,
     store_cached_response,
 )
-from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import (
     cache_cost_saved_usd,
@@ -77,7 +78,7 @@ from gatekeep.observability.metrics import (
     observe_request,
     requests_total,
 )
-from gatekeep.prompts import PromptNotFoundError, get_prompt
+from gatekeep.prompts import PromptNotFoundError, resolve_prompt_version_for_request
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.google import GoogleProvider
@@ -120,7 +121,7 @@ async def _http_exception_handler(
 
     FastAPI's default handler nests HTTPException.detail under a "detail"
     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
-    require_api_key and require_rate_limit raise), this returns it verbatim
+    require_api_key, require_rate_limit, and require_budget raise), this returns it verbatim
     at the top level for every endpoint except /v1/messages, whose real
     Anthropic SDK clients expect the {"type": "error", "error": {...}}
     envelope instead - so that shape is reconstructed via
@@ -135,7 +136,9 @@ async def _http_exception_handler(
             status_code=exc.status_code, content=content, headers=exc.headers
         )
     if is_messages:
-        return anthropic_error(exc.status_code, str(exc.detail), "invalid_request_error")
+        return anthropic_error(
+            exc.status_code, str(exc.detail), "invalid_request_error"
+        )
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
 
 
@@ -165,27 +168,33 @@ async def metrics() -> Response:
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
-    key: ApiKey = Depends(require_rate_limit),
+    key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
 ):
     """OpenAI-compatible chat completions endpoint, routed per-request by model.
 
-    Requires a valid, rate-limit-unexhausted API key. Translates the request
-    to a provider-neutral payload, resolves which provider (Anthropic or
-    Ollama) should serve the requested model, then either streams the
-    response as SSE (when `stream: true`) or returns a single OpenAI-shaped
-    JSON completion. Non-streaming requests are first checked against the
-    exact-match cache; on a miss, the semantic cache is checked next (an
-    embedding-similarity match above threshold); a miss on both falls
-    through to the provider, and the fresh response is written to both
-    caches afterwards. Every completed request is logged via `log_request`
-    for cost accounting.
+    Requires a valid, rate-limit-unexhausted, budget-unexceeded API key.
+    Translates the request to a provider-neutral payload, resolves which
+    provider (Anthropic or Ollama) should serve the requested model, then
+    either streams the response as SSE (when `stream: true`) or returns a
+    single OpenAI-shaped JSON completion. Non-streaming requests are first
+    checked against the exact-match cache; on a miss, the semantic cache is
+    checked next (an embedding-similarity match above threshold); a miss on
+    both falls through to the provider, and the fresh response is written to
+    both caches afterwards. Every completed request is logged via
+    `log_request` for cost accounting.
 
-    If `prompt_name` is set on the request, the active template registered
-    under that name is resolved via `get_prompt` and prepended to
-    `req.messages` as a system message, ahead of any system/developer
-    messages the client also sent (openai_to_payload lifts and concatenates
-    all of them into one `system` string, in message order).
+    If `prompt_name` is set on the request, the template served is resolved
+    via `resolve_prompt_version_for_request`, which returns the active
+    version unless the prompt has an A/B candidate configured, in which case
+    it randomly routes some percentage of requests to the candidate version
+    instead (see prompts.py for the split logic). Whichever version is
+    resolved, its template is prepended to `req.messages` as a system
+    message, ahead of any system/developer messages the client also sent
+    (openai_to_payload lifts and concatenates all of them into one `system`
+    string, in message order). The resolved version's number is recorded on
+    the resulting `RequestLog` row as `prompt_version_num`, so cost/eval
+    metrics can later be compared active-vs-candidate.
 
     If `route_by_cost` is set on the request (and `prompt_name` is also set),
     the requested model may be substituted for a strictly cheaper one via
@@ -201,12 +210,16 @@ async def chat_completions(
     samples for.
     """
     settings = get_settings()
+    served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
-            template = await get_prompt(req.prompt_name, session)
+            version = await resolve_prompt_version_for_request(req.prompt_name, session)
         except PromptNotFoundError as exc:
             return openai_error(400, str(exc), "invalid_request_error")
-        req.messages = [ChatMessage(role="system", content=template)] + req.messages
+        served_prompt_version = version.version_num
+        req.messages = [
+            ChatMessage(role="system", content=version.template)
+        ] + req.messages
     try:
         provider_name, payload = openai_to_payload(
             req,
@@ -232,7 +245,15 @@ async def chat_completions(
 
     if req.stream:
         return StreamingResponse(
-            _sse(provider, payload, model, key_id=key.id, prompt_name=req.prompt_name, routed_from=routed_from),
+            _sse(
+                provider,
+                payload,
+                model,
+                key_id=key.id,
+                prompt_name=req.prompt_name,
+                routed_from=routed_from,
+                prompt_version_num=served_prompt_version,
+            ),
             media_type="text/event-stream",
         )
 
@@ -260,6 +281,8 @@ async def chat_completions(
             response_id=cached.id,
             cached=True,
             cache_key=request_hash,
+            prompt_name=req.prompt_name,
+            prompt_version_num=served_prompt_version,
         )
         observe_request(
             model=model,
@@ -280,6 +303,7 @@ async def chat_completions(
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
+            prompt_version_num=served_prompt_version,
         )
         if semantic_match is not None:
             cache_semantic_hits.labels(model=model).inc()
@@ -298,6 +322,8 @@ async def chat_completions(
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
+                prompt_name=req.prompt_name,
+                prompt_version_num=served_prompt_version,
             )
             observe_request(
                 model=model,
@@ -336,6 +362,7 @@ async def chat_completions(
             model=model,
             cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
             prompt_name=req.prompt_name,
+            prompt_version_num=served_prompt_version,
         )
     if req.prompt_name is not None:
         await record_request_sample(
@@ -355,6 +382,7 @@ async def chat_completions(
         response_id=response.id,
         prompt_name=req.prompt_name,
         routed_from=routed_from,
+        prompt_version_num=served_prompt_version,
     )
     observe_request(
         model=model,
@@ -369,32 +397,42 @@ async def chat_completions(
 @app.post("/v1/messages")
 async def messages(
     req: MessagesRequest,
-    key: ApiKey = Depends(require_rate_limit),
+    key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
 ):
     """Anthropic-native /v1/messages endpoint, sharing every middleware with
-    /v1/chat/completions (auth, rate limiting, tiered cache, cost-aware
+    /v1/chat/completions (auth, rate limiting, budget cap, tiered cache, cost-aware
     routing, accounting) but speaking the real Messages API request/response
     shape instead of OpenAI's. See `messages_to_payload` for why this needs
     far less translation than the OpenAI-compat path: gatekeep's internal
     payload is already Anthropic-shaped.
 
     `prompt_name` and `route_by_cost` behave identically to their
-    `/v1/chat/completions` counterparts. The exact/semantic cache is shared
-    across both endpoints (same request-hash derivation over the same
-    provider-neutral payload); a hit is converted from the cache's stored
-    OpenAI shape via `openai_response_to_messages`.
+    `/v1/chat/completions` counterparts, including A/B candidate resolution
+    via `resolve_prompt_version_for_request` and `prompt_version_num`
+    accounting. The exact/semantic cache is shared across both endpoints
+    (same request-hash derivation over the same provider-neutral payload);
+    a hit is converted from the cache's stored OpenAI shape via
+    `openai_response_to_messages`.
     """
     settings = get_settings()
+    served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
-            template = await get_prompt(req.prompt_name, session)
+            version = await resolve_prompt_version_for_request(req.prompt_name, session)
         except PromptNotFoundError as exc:
             return anthropic_error(400, str(exc), "invalid_request_error")
+        served_prompt_version = version.version_num
         existing_system = extract_text(req.system) if req.system is not None else ""
-        req.system = f"{template}\n\n{existing_system}" if existing_system else template
+        req.system = (
+            f"{version.template}\n\n{existing_system}"
+            if existing_system
+            else version.template
+        )
 
-    provider_name, payload = messages_to_payload(req, model_aliases=settings.model_aliases)
+    provider_name, payload = messages_to_payload(
+        req, model_aliases=settings.model_aliases
+    )
     provider = get_provider(provider_name)
     model = payload["model"]
 
@@ -418,6 +456,7 @@ async def messages(
                 key_id=key.id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
+                prompt_version_num=served_prompt_version,
             ),
             media_type="text/event-stream",
         )
@@ -446,6 +485,8 @@ async def messages(
             response_id=cached.id,
             cached=True,
             cache_key=request_hash,
+            prompt_name=req.prompt_name,
+            prompt_version_num=served_prompt_version,
         )
         observe_request(
             model=model,
@@ -466,6 +507,7 @@ async def messages(
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
+            prompt_version_num=served_prompt_version,
         )
         if semantic_match is not None:
             cache_semantic_hits.labels(model=model).inc()
@@ -484,6 +526,8 @@ async def messages(
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
+                prompt_name=req.prompt_name,
+                prompt_version_num=served_prompt_version,
             )
             observe_request(
                 model=model,
@@ -525,6 +569,7 @@ async def messages(
             model=model,
             cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
             prompt_name=req.prompt_name,
+            prompt_version_num=served_prompt_version,
         )
     if req.prompt_name is not None:
         await record_request_sample(
@@ -544,6 +589,7 @@ async def messages(
         response_id=messages_response.id,
         prompt_name=req.prompt_name,
         routed_from=routed_from,
+        prompt_version_num=served_prompt_version,
     )
     observe_request(
         model=model,
@@ -563,6 +609,7 @@ async def _messages_sse(
     key_id: int,
     prompt_name: str | None = None,
     routed_from: str | None = None,
+    prompt_version_num: int | None = None,
 ):
     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
 
@@ -604,6 +651,7 @@ async def _messages_sse(
                         response_id=message_id,
                         prompt_name=prompt_name,
                         routed_from=routed_from,
+                        prompt_version_num=prompt_version_num,
                     )
                 observe_request(
                     model=model,
@@ -633,6 +681,7 @@ async def _sse(
     key_id: int,
     prompt_name: str | None = None,
     routed_from: str | None = None,
+    prompt_version_num: int | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
@@ -668,6 +717,7 @@ async def _sse(
                         response_id=completion_id,
                         prompt_name=prompt_name,
                         routed_from=routed_from,
+                        prompt_version_num=prompt_version_num,
                     )
                 observe_request(
                     model=model,

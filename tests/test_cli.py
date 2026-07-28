@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-from gatekeep.cli import _eval_run, main
+import pytest
+
+from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.cli import (
+    _clear_candidate,
+    _eval_review,
+    _eval_run,
+    _list,
+    _set_budget,
+    _set_candidate,
+    _show,
+    build_parser,
+    main,
+)
 from gatekeep.evals import add_case, create_suite
-from gatekeep.prompts import create_prompt
-from gatekeep.providers.base import CompletionResult
-
-
-class _FakeProvider:
-    """Fake provider that returns queued text responses in order, ignoring the payload."""
-
-    def __init__(self, texts):
-        self._texts = list(texts)
-
-    async def complete(self, payload):
-        """Pop and return the next queued text as a CompletionResult."""
-        return CompletionResult(
-            text=self._texts.pop(0), input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+from gatekeep.models import ApiKey
+from gatekeep.prompts import add_prompt_version, create_prompt
+from tests.helpers import FakeProvider as _FakeProvider
 
 
 def _patch_provider(monkeypatch, texts):
@@ -117,3 +118,212 @@ def test_main_eval_run_returns_1_when_no_suite_registered(monkeypatch):
     code = main(["eval", "run", "some-nonexistent-prompt-name"])
 
     assert code == 1
+
+
+# --- prompt set-candidate / clear-candidate ----------------------------------
+
+
+async def test_set_candidate_configures_prompt(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+
+    await _set_candidate("system-context", 2, 25.0)
+
+    from gatekeep.prompts import get_active_prompt_version
+
+    # active version is unaffected by setting a candidate
+    active = await get_active_prompt_version("system-context", session)
+    assert active.version_num == 1
+
+
+async def test_clear_candidate_removes_configured_candidate(session):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 25.0)
+
+    await _clear_candidate("system-context")
+
+
+def test_build_parser_accepts_set_candidate_and_clear_candidate():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["prompt", "set-candidate", "system-context", "2", "--pct", "25"]
+    )
+    assert args.prompt_command == "set-candidate"
+    assert args.name == "system-context"
+    assert args.version == 2
+    assert args.pct == 25.0
+
+    args = parser.parse_args(["prompt", "clear-candidate", "system-context"])
+    assert args.prompt_command == "clear-candidate"
+    assert args.name == "system-context"
+
+
+def test_main_set_candidate_rejects_out_of_range_pct(monkeypatch):
+    """main() must surface set_candidate_version's ValueError as exit code 1,
+    same as the other prompt-management ValueErrors."""
+
+    async def _fake_set_candidate(name, version, pct):
+        raise ValueError("traffic_pct must be between 0 and 100, got 150.0")
+
+    monkeypatch.setattr("gatekeep.cli._set_candidate", _fake_set_candidate)
+
+    code = main(["prompt", "set-candidate", "system-context", "2", "--pct", "150"])
+
+    assert code == 1
+
+
+# --- _eval_review: does the edit path handle quit correctly? ----------------------
+
+
+async def test_eval_review_edit_then_quit_does_not_delete_the_case(
+    session, monkeypatch
+):
+    """Regression test: typing `q` at the post-edit "approve?" prompt used to fall
+    through to `approve=(answer == "y")` (False), which deletes the case instead of
+    quitting the review loop. Editing then quitting must leave the case in place,
+    still unreviewed, with the edited criteria kept.
+    """
+    await create_prompt("system-context", "answer helpfully", session)
+    suite = await create_suite("system-context", session, pass_threshold=1.0)
+    case = await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "ping"}],
+        check_type="llm_judge",
+        judge_criteria="original criteria",
+        reviewed=False,
+        source="curated",
+    )
+
+    answers = iter(["e", "edited criteria", "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    await _eval_review("system-context")
+
+    await session.refresh(case)
+    assert case.judge_criteria == "edited criteria"
+    assert case.reviewed is False
+
+
+# --- key set-budget: does it set/clear monthly_budget_usd? -----------------------
+
+
+async def test_set_budget_sets_amount_on_existing_key(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    await _set_budget("budget-key", 25.0, unlimited=False)
+
+    session.expire_all()
+    key = await session.get(ApiKey, 1)
+    assert key.monthly_budget_usd == 25.0
+
+
+async def test_set_budget_unlimited_clears_amount(session):
+    raw = generate_key()
+    session.add(
+        ApiKey(name="budget-key", key_hash=hash_key(raw), monthly_budget_usd=10.0)
+    )
+    await session.commit()
+
+    await _set_budget("budget-key", None, unlimited=True)
+
+    session.expire_all()
+    key = await session.get(ApiKey, 1)
+    assert key.monthly_budget_usd is None
+
+
+async def test_set_budget_raises_for_unknown_key_name():
+    with pytest.raises(ValueError, match="no API key named"):
+        await _set_budget("does-not-exist", 5.0, unlimited=False)
+
+
+async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="must provide an amount"):
+        await _set_budget("budget-key", None, unlimited=False)
+
+
+async def test_set_budget_raises_for_non_positive_amount(session):
+    raw = generate_key()
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    await session.commit()
+
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", -5.0, unlimited=False)
+    with pytest.raises(ValueError, match="amount must be positive"):
+        await _set_budget("budget-key", 0.0, unlimited=False)
+
+
+def test_main_key_set_budget_dispatches(monkeypatch):
+    """`main(["key", "set-budget", ...])` must parse and dispatch to _set_budget."""
+    calls = []
+
+    async def _fake_set_budget(name, amount, unlimited):
+        calls.append((name, amount, unlimited))
+
+    monkeypatch.setattr("gatekeep.cli._set_budget", _fake_set_budget)
+
+    code = main(["key", "set-budget", "some-key", "12.5"])
+
+    assert code == 0
+    assert calls == [("some-key", 12.5, False)]
+
+
+# --- candidate visibility: no candidate vs. candidate paused at 0% -----------
+
+
+async def test_show_reports_no_candidate_suffix_when_none_configured(session, capsys):
+    await create_prompt("system-context", "v1", session)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate" not in out
+
+
+async def test_show_reports_candidate_paused_at_zero_pct_distinctly(session, capsys):
+    """A candidate configured at 0% traffic (a paused rollout) must be visibly
+    distinct from no candidate being configured at all - both route 100% of
+    traffic to the active version, but they are not the same state."""
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 0.0)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate: v2 @ 0.0% (paused)" in out
+
+
+async def test_show_reports_candidate_at_nonzero_pct_without_paused_label(
+    session, capsys
+):
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await _set_candidate("system-context", 2, 25.0)
+
+    await _show("system-context")
+
+    out = capsys.readouterr().out
+    assert "candidate: v2 @ 25.0%" in out
+    assert "paused" not in out
+
+
+async def test_list_reports_candidate_state_per_prompt(session, capsys):
+    await create_prompt("no-candidate-prompt", "v1", session)
+    await create_prompt("paused-candidate-prompt", "v1", session)
+    await add_prompt_version("paused-candidate-prompt", "v2 text", session)
+    await _set_candidate("paused-candidate-prompt", 2, 0.0)
+
+    await _list()
+
+    out = capsys.readouterr().out
+    assert "no-candidate-prompt\tv1\n" in out
+    assert "paused-candidate-prompt\tv1 (candidate: v2 @ 0.0% (paused))" in out

@@ -2,13 +2,14 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
+from sqlalchemy import select
 
 import gatekeep.app as app_module
 from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey
-from gatekeep.prompts import create_prompt
+from gatekeep.models import ApiKey, RequestLog
+from gatekeep.prompts import add_prompt_version, create_prompt, set_candidate_version
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
@@ -98,7 +99,9 @@ async def test_streaming_message(client, raw_key):
     assert "event: message_stop" in body
 
 
-async def test_streaming_error_emits_anthropic_shaped_error_event(client, raw_key, monkeypatch):
+async def test_streaming_error_emits_anthropic_shaped_error_event(
+    client, raw_key, monkeypatch
+):
     class FailingProvider:
         async def stream(self, payload):
             raise RuntimeError("boom")
@@ -192,6 +195,54 @@ async def test_prompt_name_prepends_template_as_system(client, raw_key, session)
         app_module._providers["anthropic"].complete = original_complete
     assert r.status_code == 200
     assert calls[0]["system"] == "Always say hi first.\n\nalso be polite"
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    assert log.prompt_version_num == 1
+
+
+async def test_prompt_name_candidate_at_100_pct_serves_candidate_via_messages(
+    client, raw_key, session
+):
+    """The A/B candidate split must also apply to /v1/messages, not just
+    /v1/chat/completions - both endpoints share resolve_prompt_version_for_request."""
+    await create_prompt("greeter", "Always say hi first.", session)
+    await add_prompt_version("greeter", "Always say bye first.", session)
+    await set_candidate_version("greeter", 2, 100.0, session)
+
+    calls = []
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        calls.append(payload)
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        r = await client.post(
+            "/v1/messages",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={
+                "model": "claude-sonnet-5",
+                "max_tokens": 50,
+                "messages": [{"role": "user", "content": "ping"}],
+                "prompt_name": "greeter",
+            },
+        )
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
+    assert r.status_code == 200
+    assert calls[0]["system"] == "Always say bye first."
+
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
+        )
+    ).scalar_one()
+    assert log.prompt_version_num == 2
 
 
 async def test_unknown_prompt_name_returns_anthropic_shaped_400(client, raw_key):
