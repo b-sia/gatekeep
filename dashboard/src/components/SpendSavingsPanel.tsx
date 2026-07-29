@@ -21,10 +21,7 @@ interface SpendSavingsPanelProps {
 export default function SpendSavingsPanel({ timeseries }: SpendSavingsPanelProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: formatBucketLabel(
-        bucket.bucket_start,
-        timeseries.interval as "minute" | "hour" | "day",
-      ),
+      time: formatBucketLabel(bucket.bucket_start, timeseries.interval),
       spend: bucket.spend_usd,
       savings: bucket.savings_usd,
     })) ?? [];

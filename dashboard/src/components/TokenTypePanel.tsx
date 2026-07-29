@@ -26,10 +26,7 @@ interface TokenTypePanelProps {
 export default function TokenTypePanel({ timeseries }: TokenTypePanelProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: formatBucketLabel(
-        bucket.bucket_start,
-        timeseries.interval as "minute" | "hour" | "day",
-      ),
+      time: formatBucketLabel(bucket.bucket_start, timeseries.interval),
       input: bucket.prompt_tokens,
       output: bucket.completion_tokens,
       cached: bucket.cached_tokens,

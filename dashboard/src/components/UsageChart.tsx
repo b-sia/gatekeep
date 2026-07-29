@@ -21,10 +21,7 @@ interface UsageChartProps {
 export default function UsageChart({ timeseries }: UsageChartProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: formatBucketLabel(
-        bucket.bucket_start,
-        timeseries.interval as "minute" | "hour" | "day",
-      ),
+      time: formatBucketLabel(bucket.bucket_start, timeseries.interval),
       nonCached: bucket.request_count - bucket.cache_hit_count,
       cached: bucket.cache_hit_count,
       cost: bucket.cost_usd,

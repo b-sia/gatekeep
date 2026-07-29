@@ -45,7 +45,7 @@ export interface TimeseriesBucket {
 export interface TimeseriesResponse {
   start: string;
   end: string;
-  interval: string;
+  interval: "minute" | "hour" | "day";
   buckets: TimeseriesBucket[];
 }
 
@@ -63,7 +63,7 @@ export interface UsageByModelBucket {
 export interface UsageByModelTimeseriesResponse {
   start: string;
   end: string;
-  interval: string;
+  interval: "minute" | "hour" | "day";
   rows: UsageByModelBucket[];
 }
 

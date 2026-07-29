@@ -27,7 +27,20 @@ const METRIC_LABELS: Record<Metric, string> = {
   cost: "Cost (USD)",
 };
 
-const MODEL_COLORS = ["#6366f1", "#f97316", "#22d3ee", "#a3e635", "#f472b6", "#facc15"];
+const MODEL_COLORS = [
+  "#6366f1",
+  "#f97316",
+  "#22d3ee",
+  "#a3e635",
+  "#f472b6",
+  "#facc15",
+  "#8b5cf6",
+  "#14b8a6",
+  "#f43f5e",
+  "#0ea5e9",
+  "#d946ef",
+  "#f59e0b",
+];
 
 /** Stacked bar chart of per-model usage over time. A metric toggle switches
  * which field feeds bar height (tokens / requests / cost) by re-pivoting

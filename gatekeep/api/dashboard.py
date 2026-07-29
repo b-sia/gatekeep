@@ -430,7 +430,7 @@ async def usage_timeseries_by_model(
             )
             .where(*filters)
             .group_by(bucket, RequestLog.model)
-            .order_by(bucket)
+            .order_by(bucket, RequestLog.model)
         )
     ).all()
 
