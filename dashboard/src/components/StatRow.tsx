@@ -28,22 +28,24 @@ function StatCard({ label, value, context }: { label: string; value: string; con
   );
 }
 
-/** Row of headline stat tiles (requests, cost, tokens, cache hit rate) for
+/** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate) for
  * the current filter selection. Renders loading placeholders until
  * `summary` is available. */
 export default function StatRow({ summary }: StatRowProps) {
   if (!summary) {
     return (
-      <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-4">
-        {["Requests", "Total cost", "Total tokens", "Cache hit rate"].map((label) => (
-          <StatCard key={label} label={label} value="-" context="Loading..." />
-        ))}
+      <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-5">
+        {["Requests", "Total cost", "Total tokens", "Total savings", "Cache hit rate"].map(
+          (label) => (
+            <StatCard key={label} label={label} value="-" context="Loading..." />
+          ),
+        )}
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-5">
       <StatCard
         label="Requests"
         value={summary.request_count.toLocaleString()}
@@ -54,6 +56,11 @@ export default function StatRow({ summary }: StatRowProps) {
         label="Total tokens"
         value={formatTokens(summary.total_tokens)}
         context={`${formatTokens(summary.prompt_tokens)} in / ${formatTokens(summary.completion_tokens)} out`}
+      />
+      <StatCard
+        label="Total savings"
+        value={formatCost(summary.savings_usd)}
+        context={`${formatCost(summary.spend_usd)} spent`}
       />
       <StatCard
         label="Cache hit rate"
