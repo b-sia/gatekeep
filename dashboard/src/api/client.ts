@@ -8,20 +8,38 @@ import type {
 
 const STORAGE_KEY = "gatekeep_dashboard_api_key";
 
+/** Reads the dashboard API key from localStorage, if one has been saved. */
 export function getStoredApiKey(): string | null {
   return localStorage.getItem(STORAGE_KEY);
 }
 
+/** Persists the dashboard API key to localStorage. */
 export function setStoredApiKey(key: string): void {
   localStorage.setItem(STORAGE_KEY, key);
 }
 
+/** Removes the stored dashboard API key, e.g. after it's rejected or the
+ * user chooses to replace it. */
 export function clearStoredApiKey(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
+/** Thrown when a dashboard API request has no stored key, or the gateway
+ * rejects the stored key with a 401 (in which case the key is also cleared
+ * from storage as a side effect). */
 export class UnauthorizedError extends Error {}
 
+/**
+ * Issues an authenticated GET request against `/dashboard/api/<path>`.
+ *
+ * @param path - API path under `/dashboard/api/`, without a leading slash.
+ * @param params - Query params to attach; entries with an `undefined` value
+ *   are omitted.
+ * @returns The parsed JSON response body.
+ * @throws {UnauthorizedError} If no API key is stored, or the gateway
+ *   responds 401 (the stored key is cleared in that case).
+ * @throws {Error} For any other non-OK response status.
+ */
 async function request<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
@@ -49,6 +67,8 @@ async function request<T>(
   return response.json() as Promise<T>;
 }
 
+/** Common filters accepted by the usage summary/timeseries endpoints. All
+ * fields are optional; omitting one leaves that dimension unfiltered. */
 export interface UsageFilters {
   start?: string;
   end?: string;
@@ -57,6 +77,7 @@ export interface UsageFilters {
   promptName?: string;
 }
 
+/** Fetches aggregate usage/cost totals and breakdowns for the given filters. */
 export function getUsageSummary(filters: UsageFilters): Promise<UsageSummaryResponse> {
   return request<UsageSummaryResponse>("usage/summary", {
     start: filters.start,
@@ -67,6 +88,8 @@ export function getUsageSummary(filters: UsageFilters): Promise<UsageSummaryResp
   });
 }
 
+/** Fetches usage bucketed into hourly or daily intervals for the given
+ * filters, for charting over time. */
 export function getUsageTimeseries(
   filters: UsageFilters & { interval: "hour" | "day" },
 ): Promise<TimeseriesResponse> {
@@ -80,14 +103,17 @@ export function getUsageTimeseries(
   });
 }
 
+/** Fetches eval run history, optionally scoped to a single prompt name. */
 export function getEvalHistory(promptName?: string): Promise<EvalHistoryResponse> {
   return request<EvalHistoryResponse>("evals", { prompt_name: promptName });
 }
 
+/** Fetches all registered prompts. */
 export function getPrompts(): Promise<PromptListResponse> {
   return request<PromptListResponse>("prompts");
 }
 
+/** Fetches the version history for a single named prompt. */
 export function getPromptVersions(name: string): Promise<PromptVersionTimelineResponse> {
   return request<PromptVersionTimelineResponse>(`prompts/${encodeURIComponent(name)}/versions`);
 }

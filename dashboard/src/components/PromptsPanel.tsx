@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
-import { getPromptVersions } from "../api/client";
+import { getPromptVersions, UnauthorizedError } from "../api/client";
 import type { PromptOut, PromptVersionOut } from "../api/types";
 
 interface PromptsPanelProps {
   prompts: PromptOut[];
+  /** Called when fetching version history comes back 401, so the app can
+   * drop back to the API key entry screen. */
+  onUnauthorized: () => void;
 }
 
-export default function PromptsPanel({ prompts }: PromptsPanelProps) {
+/** Panel showing prompt version history for a selected prompt, with a
+ * dropdown to switch between registered prompts. */
+export default function PromptsPanel({ prompts, onUnauthorized }: PromptsPanelProps) {
   const [selected, setSelected] = useState<string>("");
   const [versions, setVersions] = useState<PromptVersionOut[]>([]);
 
@@ -22,13 +27,24 @@ export default function PromptsPanel({ prompts }: PromptsPanelProps) {
       return;
     }
     let cancelled = false;
-    getPromptVersions(selected).then((res) => {
-      if (!cancelled) setVersions(res.versions);
-    });
+    getPromptVersions(selected)
+      .then((res) => {
+        if (!cancelled) setVersions(res.versions);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        // Non-fatal for this panel: log and leave `versions` as-is rather
+        // than owning a full error-banner UI here.
+        console.error("Failed to load prompt versions", err);
+      });
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, onUnauthorized]);
 
   return (
     <div className="mx-6 mb-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
@@ -61,10 +77,12 @@ export default function PromptsPanel({ prompts }: PromptsPanelProps) {
             <tr key={version.version_num} className="border-t border-slate-800">
               <td className="py-2 text-slate-200">v{version.version_num}</td>
               <td className="py-2">
-                {version.active && (
+                {version.active ? (
                   <span className="rounded bg-emerald-900 px-2 py-0.5 text-xs text-emerald-300">
                     Active
                   </span>
+                ) : (
+                  "-"
                 )}
               </td>
               <td className="py-2 text-slate-300">{new Date(version.created_at).toLocaleString()}</td>
