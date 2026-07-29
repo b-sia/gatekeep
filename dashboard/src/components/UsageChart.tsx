@@ -10,7 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import type { TimeseriesResponse } from "../api/types";
-import { formatBucketLabel } from "../format";
+import { formatBucketLabel, formatUsd } from "../format";
 
 interface UsageChartProps {
   timeseries: TimeseriesResponse | null;
@@ -39,9 +39,18 @@ export default function UsageChart({ timeseries }: UsageChartProps) {
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <YAxis yAxisId="left" tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <YAxis yAxisId="right" orientation="right" tick={{ fill: "#94a3b8", fontSize: 12 }} />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              tick={{ fill: "#94a3b8", fontSize: 12 }}
+              tickFormatter={(value: number) => formatUsd(value)}
+            />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
+              labelStyle={{ color: "#e2e8f0" }}
+              formatter={(value: number, name: string) =>
+                name === "Cost (USD)" ? formatUsd(value) : value
+              }
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar yAxisId="left" dataKey="nonCached" stackId="requests" fill="#6366f1" name="Requests" />

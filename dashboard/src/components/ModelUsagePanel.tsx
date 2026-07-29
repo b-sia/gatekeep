@@ -82,6 +82,7 @@ export default function ModelUsagePanel({ data, interval }: ModelUsagePanelProps
             />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
+              labelStyle={{ color: "#e2e8f0" }}
               formatter={(value: number) => (metric === "cost" ? formatUsd(value) : String(value))}
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />

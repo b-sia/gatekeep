@@ -46,6 +46,7 @@ export default function TokenTypePanel({ timeseries }: TokenTypePanelProps) {
             <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
+              labelStyle={{ color: "#e2e8f0" }}
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="input" fill="#6366f1" name="Input tokens" />

@@ -43,6 +43,7 @@ export default function SpendSavingsPanel({ timeseries }: SpendSavingsPanelProps
             />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
+              labelStyle={{ color: "#e2e8f0" }}
               formatter={(value: number) => formatUsd(value)}
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
