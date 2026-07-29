@@ -5,6 +5,8 @@ interface BreakdownPanelsProps {
   summary: UsageSummaryResponse | null;
 }
 
+/** Renders the three usage breakdown tables (by model, by API key, by
+ * prompt) side by side. */
 export default function BreakdownPanels({ summary }: BreakdownPanelsProps) {
   return (
     <div className="grid grid-cols-1 gap-4 px-6 py-4 lg:grid-cols-3">

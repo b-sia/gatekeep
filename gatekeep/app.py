@@ -112,6 +112,15 @@ async def serve_dashboard(path: str = "") -> FileResponse:
 
     Registered after `dashboard_router` (which owns `/dashboard/api/*`), so
     FastAPI matches the more specific API routes first.
+
+    Args:
+        path: The sub-path requested under `/dashboard` (e.g. `prompts` for
+            `/dashboard/prompts`). Unused - every non-API path resolves to
+            the same SPA entry point, and client-side routing takes over
+            from there.
+
+    Returns:
+        A `FileResponse` streaming the built `dashboard/dist/index.html`.
     """
     return FileResponse(_DASHBOARD_DIST / "index.html")
 

@@ -5,9 +5,13 @@ interface KeyEntryScreenProps {
   onKeySaved: () => void;
 }
 
+/** One-time entry screen prompting for a Gatekeep API key before the
+ * dashboard can load; saves the key to localStorage on submit. */
 export default function KeyEntryScreen({ onKeySaved }: KeyEntryScreenProps) {
   const [value, setValue] = useState("");
 
+  /** Trims and persists the entered key, then notifies the parent, unless
+   * the field is empty. */
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const trimmed = value.trim();

@@ -2,6 +2,8 @@ interface HeaderProps {
   onClearKey: () => void;
 }
 
+/** Dashboard top bar: app title and a button to clear/replace the stored
+ * API key. */
 export default function Header({ onClearKey }: HeaderProps) {
   return (
     <header className="flex items-center justify-between border-b border-slate-800 px-6 py-4">

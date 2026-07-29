@@ -5,6 +5,8 @@ interface BreakdownTableProps {
   rows: UsageBreakdownRow[];
 }
 
+/** A titled table of usage breakdown rows, with a relative cost bar per row
+ * scaled against the row with the highest cost. */
 export default function BreakdownTable({ title, rows }: BreakdownTableProps) {
   const maxCost = Math.max(1e-9, ...rows.map((row) => row.cost_usd));
 

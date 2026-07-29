@@ -4,16 +4,20 @@ interface StatRowProps {
   summary: UsageSummaryResponse | null;
 }
 
+/** Formats a USD amount as `$X.XX`. */
 function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+/** Formats a token count with a `k`/`M` suffix for readability. */
 function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
   return String(count);
 }
 
+/** A single stat tile showing a label, headline value, and supporting
+ * context line. */
 function StatCard({ label, value, context }: { label: string; value: string; context: string }) {
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
@@ -24,6 +28,9 @@ function StatCard({ label, value, context }: { label: string; value: string; con
   );
 }
 
+/** Row of headline stat tiles (requests, cost, tokens, cache hit rate) for
+ * the current filter selection. Renders loading placeholders until
+ * `summary` is available. */
 export default function StatRow({ summary }: StatRowProps) {
   if (!summary) {
     return (

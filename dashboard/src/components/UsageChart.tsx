@@ -2,6 +2,7 @@ import {
   Bar,
   CartesianGrid,
   ComposedChart,
+  Legend,
   Line,
   ResponsiveContainer,
   Tooltip,
@@ -14,6 +15,8 @@ interface UsageChartProps {
   timeseries: TimeseriesResponse | null;
 }
 
+/** Stacked bar + line chart showing requests (split into cached/non-cached)
+ * and cost over time, bucketed per the selected interval. */
 export default function UsageChart({ timeseries }: UsageChartProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
@@ -40,6 +43,7 @@ export default function UsageChart({ timeseries }: UsageChartProps) {
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
             />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar yAxisId="left" dataKey="nonCached" stackId="requests" fill="#6366f1" name="Requests" />
             <Bar yAxisId="left" dataKey="cached" stackId="requests" fill="#22d3ee" name="Cache hits" />
             <Line

@@ -4,6 +4,8 @@ interface EvalHistoryPanelProps {
   runs: EvalRunOut[];
 }
 
+/** Table of past eval suite runs, most recent first, with a pass/fail
+ * badge per row. */
 export default function EvalHistoryPanel({ runs }: EvalHistoryPanelProps) {
   return (
     <div className="mx-6 mb-6 rounded-lg border border-slate-800 bg-slate-900 p-4">

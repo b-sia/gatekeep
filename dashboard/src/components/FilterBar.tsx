@@ -1,3 +1,5 @@
+/** The current dashboard-wide filter selection: time range, chart bucket
+ * interval, and an optional model filter. */
 export interface DashboardFilters {
   rangeDays: 1 | 7 | 30;
   interval: "hour" | "day";
@@ -10,6 +12,8 @@ interface FilterBarProps {
   onChange: (filters: DashboardFilters) => void;
 }
 
+/** Row of dropdowns for selecting the dashboard's time range, chart
+ * interval, and model filter. */
 export default function FilterBar({ filters, availableModels, onChange }: FilterBarProps) {
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 px-6 py-3">
