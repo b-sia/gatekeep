@@ -14,6 +14,14 @@ interface SpendSavingsPanelProps {
   timeseries: TimeseriesResponse | null;
 }
 
+/** Formats a USD amount, using extra decimal places for sub-cent values so
+ * distinct small amounts (common with per-request LLM costs) don't collapse
+ * into duplicate-looking "$0.00" ticks. */
+function formatUsd(value: number): string {
+  if (value !== 0 && Math.abs(value) < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+}
+
 /** Stacked bar chart of actual spend vs. cache savings over time. Spend and
  * savings are mutually exclusive per bucket (split by the `cached` flag),
  * so stacking them sums to that bucket's total cost. */
@@ -40,11 +48,11 @@ export default function SpendSavingsPanel({ timeseries }: SpendSavingsPanelProps
             <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 12 }} />
             <YAxis
               tick={{ fill: "#94a3b8", fontSize: 12 }}
-              tickFormatter={(value: number) => `$${value.toFixed(2)}`}
+              tickFormatter={(value: number) => formatUsd(value)}
             />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
-              formatter={(value: number) => `$${value.toFixed(2)}`}
+              formatter={(value: number) => formatUsd(value)}
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="spend" stackId="cost" fill="#f97316" name="Spend" />
