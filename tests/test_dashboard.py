@@ -140,6 +140,8 @@ async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
     assert body["total_tokens"] == 150 + 300 + 15
     assert body["prompt_tokens"] == 100 + 200 + 10
     assert body["completion_tokens"] == 50 + 100 + 5
+    assert body["spend_usd"] == 1.0 + 0.05
+    assert body["savings_usd"] == 2.0
     assert body["cost_usd"] == 3.05
     assert body["cache_hit_count"] == 1
     assert body["cache_hit_rate"] == 1 / 3

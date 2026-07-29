@@ -58,6 +58,8 @@ class UsageSummaryResponse(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float
+    spend_usd: float
+    savings_usd: float
     cache_hit_count: int
     cache_hit_rate: float
     by_model: list[UsageBreakdownRow]
@@ -199,6 +201,18 @@ async def usage_summary(
                 func.coalesce(func.sum(RequestLog.completion_tokens), 0),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
                 func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+                    ),
+                    0.0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+                    ),
+                    0.0,
+                ),
+                func.coalesce(
                     func.sum(func.cast(RequestLog.cached, Integer)),
                     0,
                 ),
@@ -211,6 +225,8 @@ async def usage_summary(
         prompt_tokens,
         completion_tokens,
         cost_usd,
+        spend_usd,
+        savings_usd,
         cache_hit_count,
     ) = totals_row
     request_count = int(request_count)
@@ -229,6 +245,8 @@ async def usage_summary(
         prompt_tokens=int(prompt_tokens),
         completion_tokens=int(completion_tokens),
         cost_usd=float(cost_usd),
+        spend_usd=float(spend_usd),
+        savings_usd=float(savings_usd),
         cache_hit_count=cache_hit_count,
         cache_hit_rate=cache_hit_rate,
         by_model=by_model,
