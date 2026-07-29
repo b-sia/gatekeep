@@ -341,6 +341,72 @@ async def test_usage_timeseries_rejects_invalid_interval(client, raw_key):
     assert r.status_code == 400
 
 
+# -- usage timeseries by model ---------------------------------------------
+
+
+async def test_usage_timeseries_by_model_requires_auth(client):
+    r = await client.get("/dashboard/api/usage/timeseries/by-model")
+    assert r.status_code == 401
+
+
+async def test_usage_timeseries_by_model_groups_by_bucket_and_model(
+    client, raw_key, session
+):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=100,
+        completion_tokens=50,
+        cost_usd=1.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="claude-sonnet-5",
+        prompt_tokens=200,
+        completion_tokens=100,
+        cost_usd=2.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=0.1,
+        created_at=now,
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries/by-model",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "interval": "day",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    rows = {row["model"]: row for row in body["rows"]}
+    assert rows["gpt-4o"]["request_count"] == 2
+    assert rows["gpt-4o"]["total_tokens"] == 165
+    assert rows["gpt-4o"]["cost_usd"] == 1.1
+    assert rows["claude-sonnet-5"]["request_count"] == 1
+    assert rows["claude-sonnet-5"]["total_tokens"] == 300
+    assert rows["claude-sonnet-5"]["cost_usd"] == 2.0
+
+
 # -- evals ----------------------------------------------------------------
 
 

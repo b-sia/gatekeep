@@ -368,6 +368,87 @@ async def usage_timeseries(
     return TimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
 
 
+class UsageByModelBucket(BaseModel):
+    """One (time bucket, model) row of request/token/cost totals."""
+
+    bucket_start: datetime
+    model: str
+    request_count: int
+    total_tokens: int
+    cost_usd: float
+
+
+class UsageByModelTimeseriesResponse(BaseModel):
+    """Usage bucketed by both time and model, as a flat list of rows.
+
+    Kept flat (rather than nested by model) so the response shape stays
+    simple regardless of how many distinct models appear in the window;
+    callers group by `model` themselves.
+    """
+
+    start: datetime
+    end: datetime
+    interval: str
+    rows: list[UsageByModelBucket]
+
+
+@router.get(
+    "/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse
+)
+async def usage_timeseries_by_model(
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    interval: Literal["minute", "hour", "day"] = Query(default="day"),
+    model: str | None = Query(default=None),
+    key_id: int | None = Query(default=None),
+    prompt_name: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _caller: ApiKey = Depends(require_api_key),
+) -> UsageByModelTimeseriesResponse:
+    """Return request volume, tokens, and cost, bucketed by both time and
+    model, for the per-model usage-over-time panel.
+
+    Same filters and defaults as `usage_timeseries`. Requires a valid API
+    key (`require_api_key`).
+    """
+    default_start, default_end = _default_window()
+    start = start or default_start
+    end = end or default_end
+    filters = _base_filters(
+        start, end, model=model, key_id=key_id, prompt_name=prompt_name
+    )
+
+    bucket = func.date_trunc(interval, RequestLog.created_at)
+    rows = (
+        await session.execute(
+            select(
+                bucket,
+                RequestLog.model,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+            )
+            .where(*filters)
+            .group_by(bucket, RequestLog.model)
+            .order_by(bucket)
+        )
+    ).all()
+
+    by_model_rows = [
+        UsageByModelBucket(
+            bucket_start=bucket_start,
+            model=model_name,
+            request_count=int(count),
+            total_tokens=int(total_tokens),
+            cost_usd=float(cost_usd),
+        )
+        for bucket_start, model_name, count, total_tokens, cost_usd in rows
+    ]
+    return UsageByModelTimeseriesResponse(
+        start=start, end=end, interval=interval, rows=by_model_rows
+    )
+
+
 class EvalRunOut(BaseModel):
     """One eval run, joined with its suite's prompt name and the prompt
     version number it evaluated."""
