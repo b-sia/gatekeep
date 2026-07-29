@@ -138,6 +138,10 @@ async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
 
     assert body["request_count"] == 3
     assert body["total_tokens"] == 150 + 300 + 15
+    assert body["prompt_tokens"] == 100 + 200 + 10
+    assert body["completion_tokens"] == 50 + 100 + 5
+    assert body["spend_usd"] == 1.0 + 0.05
+    assert body["savings_usd"] == 2.0
     assert body["cost_usd"] == 3.05
     assert body["cache_hit_count"] == 1
     assert body["cache_hit_rate"] == 1 / 3
@@ -149,6 +153,7 @@ async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
 
     by_key = {row["key"]: row for row in body["by_key"]}
     assert by_key[str(key_row.id)]["request_count"] == 3
+    assert by_key[str(key_row.id)]["label"] == "dashboard-test"
 
     by_prompt = {row["key"]: row for row in body["by_prompt"]}
     assert by_prompt["system-context"]["request_count"] == 2
@@ -252,6 +257,81 @@ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
     assert total_cost == 6.0
 
 
+async def test_usage_timeseries_includes_token_and_spend_fields(client, raw_key, session):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=100,
+        completion_tokens=50,
+        cost_usd=1.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=200,
+        completion_tokens=100,
+        cost_usd=2.0,
+        cached=True,
+        created_at=now,
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "interval": "day",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["buckets"]) == 1
+    bucket = body["buckets"][0]
+    assert bucket["prompt_tokens"] == 300
+    assert bucket["completion_tokens"] == 150
+    assert bucket["cached_tokens"] == 300
+    assert bucket["spend_usd"] == 1.0
+    assert bucket["savings_usd"] == 2.0
+
+
+async def test_usage_timeseries_accepts_minute_interval(client, raw_key, session):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(minutes=5)).isoformat(),
+            "end": (now + timedelta(minutes=5)).isoformat(),
+            "interval": "minute",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["interval"] == "minute"
+    assert sum(b["request_count"] for b in body["buckets"]) == 1
+
+
 async def test_usage_timeseries_rejects_invalid_interval(client, raw_key):
     r = await client.get(
         "/dashboard/api/usage/timeseries",
@@ -259,6 +339,72 @@ async def test_usage_timeseries_rejects_invalid_interval(client, raw_key):
         params={"interval": "fortnight"},
     )
     assert r.status_code == 400
+
+
+# -- usage timeseries by model ---------------------------------------------
+
+
+async def test_usage_timeseries_by_model_requires_auth(client):
+    r = await client.get("/dashboard/api/usage/timeseries/by-model")
+    assert r.status_code == 401
+
+
+async def test_usage_timeseries_by_model_groups_by_bucket_and_model(
+    client, raw_key, session
+):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=100,
+        completion_tokens=50,
+        cost_usd=1.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="claude-sonnet-5",
+        prompt_tokens=200,
+        completion_tokens=100,
+        cost_usd=2.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=0.1,
+        created_at=now,
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries/by-model",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "interval": "day",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    rows = {row["model"]: row for row in body["rows"]}
+    assert rows["gpt-4o"]["request_count"] == 2
+    assert rows["gpt-4o"]["total_tokens"] == 165
+    assert rows["gpt-4o"]["cost_usd"] == 1.1
+    assert rows["claude-sonnet-5"]["request_count"] == 1
+    assert rows["claude-sonnet-5"]["total_tokens"] == 300
+    assert rows["claude-sonnet-5"]["cost_usd"] == 2.0
 
 
 # -- evals ----------------------------------------------------------------
@@ -387,4 +533,17 @@ async def test_prompt_versions_timeline_404_for_unknown_prompt(client, raw_key):
         "/dashboard/api/prompts/does-not-exist/versions",
         headers={"Authorization": f"Bearer {raw_key}"},
     )
+    assert r.status_code == 404
+
+
+# -- dashboard SPA fallback ---------------------------------------------
+
+
+async def test_dashboard_unmatched_api_path_returns_404(client):
+    r = await client.get("/dashboard/api/does-not-exist")
+    assert r.status_code == 404
+
+
+async def test_dashboard_api_prefix_alone_returns_404(client):
+    r = await client.get("/dashboard/api")
     assert r.status_code == 404

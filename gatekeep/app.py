@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 import time
 
 import ollama
@@ -12,7 +13,8 @@ from openai import AsyncOpenAI
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
@@ -91,6 +93,55 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
 app.include_router(dashboard_router)
+
+_DASHBOARD_DIST = pathlib.Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+
+if (_DASHBOARD_DIST / "assets").is_dir():
+    app.mount(
+        "/dashboard/assets",
+        StaticFiles(directory=str(_DASHBOARD_DIST / "assets")),
+        name="dashboard-assets",
+    )
+
+
+@app.get("/dashboard")
+@app.get("/dashboard/{path:path}")
+async def serve_dashboard(path: str = "") -> FileResponse:
+    """Serve the dashboard SPA's index.html for any non-API path under
+    `/dashboard`, so client-side routing/asset requests resolve correctly.
+
+    Registered after `dashboard_router` (which owns `/dashboard/api/*`), so
+    FastAPI matches the more specific API routes first. `dashboard_router`
+    only defines literal paths, so a request under `/dashboard/api/...`
+    that doesn't match any of them (a typo, a removed endpoint) would
+    otherwise fall through to this catch-all and get served the SPA's HTML
+    with a misleading 200 - `path` is checked for that case and rejected
+    with a 404 instead.
+
+    Args:
+        path: The sub-path requested under `/dashboard` (e.g. `prompts` for
+            `/dashboard/prompts`). Unused for SPA routes - every non-API
+            path resolves to the same entry point, and client-side routing
+            takes over from there.
+
+    Returns:
+        A `FileResponse` streaming the built `dashboard/dist/index.html`.
+
+    Raises:
+        HTTPException: 404 if `path` is an unmatched `/dashboard/api/*`
+            request; 503 if the dashboard hasn't been built (`dashboard/dist`
+            is missing), which would otherwise be an unhandled crash.
+    """
+    if path == "api" or path.startswith("api/"):
+        raise FastAPIHTTPException(status_code=404, detail="Not Found")
+    index_path = _DASHBOARD_DIST / "index.html"
+    if not index_path.is_file():
+        raise FastAPIHTTPException(
+            status_code=503,
+            detail="Dashboard is not built. Run `npm run build` in dashboard/.",
+        )
+    return FileResponse(index_path)
+
 
 _settings = get_settings()
 _GatewayProvider = AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider

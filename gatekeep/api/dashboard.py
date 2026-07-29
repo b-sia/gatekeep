@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Integer, func, select
+from sqlalchemy import Integer, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.db import get_session
@@ -40,6 +40,7 @@ class UsageBreakdownRow(BaseModel):
     (model id, API key id, or prompt name)."""
 
     key: str
+    label: str | None = None
     request_count: int
     total_tokens: int
     cost_usd: float
@@ -54,7 +55,11 @@ class UsageSummaryResponse(BaseModel):
     end: datetime
     request_count: int
     total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
     cost_usd: float
+    spend_usd: float
+    savings_usd: float
     cache_hit_count: int
     cache_hit_rate: float
     by_model: list[UsageBreakdownRow]
@@ -122,6 +127,47 @@ async def _breakdown(
     ]
 
 
+async def _key_breakdown(
+    session: AsyncSession, filters: list
+) -> list[UsageBreakdownRow]:
+    """Run the same aggregate as `_breakdown` grouped by `RequestLog.key_id`,
+    but also join `ApiKey` to attach each key's display name as `label`.
+
+    Uses an outer join so requests from a since-deleted API key still show
+    up, with `label` falling back to `#<id>`.
+    """
+    rows = (
+        await session.execute(
+            select(
+                RequestLog.key_id,
+                ApiKey.name,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                func.coalesce(
+                    func.sum(func.cast(RequestLog.cached, Integer)),
+                    0,
+                ),
+            )
+            .outerjoin(ApiKey, RequestLog.key_id == ApiKey.id)
+            .where(*filters)
+            .group_by(RequestLog.key_id, ApiKey.name)
+            .order_by(func.sum(RequestLog.cost_usd).desc())
+        )
+    ).all()
+    return [
+        UsageBreakdownRow(
+            key=str(key_id),
+            label=name if name is not None else f"#{key_id}",
+            request_count=count,
+            total_tokens=int(total_tokens),
+            cost_usd=float(cost_usd),
+            cache_hit_count=int(cache_hits),
+        )
+        for key_id, name, count, total_tokens, cost_usd, cache_hits in rows
+    ]
+
+
 @router.get("/usage/summary", response_model=UsageSummaryResponse)
 async def usage_summary(
     start: datetime | None = Query(default=None),
@@ -151,7 +197,21 @@ async def usage_summary(
             select(
                 func.count(RequestLog.id),
                 func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                func.coalesce(func.sum(RequestLog.completion_tokens), 0),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+                    ),
+                    0.0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+                    ),
+                    0.0,
+                ),
                 func.coalesce(
                     func.sum(func.cast(RequestLog.cached, Integer)),
                     0,
@@ -159,13 +219,22 @@ async def usage_summary(
             ).where(*filters)
         )
     ).one()
-    request_count, total_tokens, cost_usd, cache_hit_count = totals_row
+    (
+        request_count,
+        total_tokens,
+        prompt_tokens,
+        completion_tokens,
+        cost_usd,
+        spend_usd,
+        savings_usd,
+        cache_hit_count,
+    ) = totals_row
     request_count = int(request_count)
     cache_hit_count = int(cache_hit_count)
     cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
 
     by_model = await _breakdown(session, RequestLog.model, filters)
-    by_key = await _breakdown(session, RequestLog.key_id, filters)
+    by_key = await _key_breakdown(session, filters)
     by_prompt = await _breakdown(session, RequestLog.prompt_name, filters)
 
     return UsageSummaryResponse(
@@ -173,7 +242,11 @@ async def usage_summary(
         end=end,
         request_count=request_count,
         total_tokens=int(total_tokens),
+        prompt_tokens=int(prompt_tokens),
+        completion_tokens=int(completion_tokens),
         cost_usd=float(cost_usd),
+        spend_usd=float(spend_usd),
+        savings_usd=float(savings_usd),
         cache_hit_count=cache_hit_count,
         cache_hit_rate=cache_hit_rate,
         by_model=by_model,
@@ -183,12 +256,17 @@ async def usage_summary(
 
 
 class TimeseriesBucket(BaseModel):
-    """One time bucket of request volume/cache-hit/cost data."""
+    """One time bucket of request volume/cache-hit/cost/token data."""
 
     bucket_start: datetime
     request_count: int
     cache_hit_count: int
     cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    spend_usd: float
+    savings_usd: float
 
 
 class TimeseriesResponse(BaseModel):
@@ -204,14 +282,15 @@ class TimeseriesResponse(BaseModel):
 async def usage_timeseries(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
-    interval: Literal["hour", "day"] = Query(default="day"),
+    interval: Literal["minute", "hour", "day"] = Query(default="day"),
     model: str | None = Query(default=None),
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
     _caller: ApiKey = Depends(require_api_key),
 ) -> TimeseriesResponse:
-    """Return request volume, cache-hit count, and cost, bucketed by hour or day.
+    """Return request volume, cache-hit count, cost, and token/spend/savings
+    totals, bucketed by minute, hour, or day.
 
     `start`/`end` default to the trailing 7 days when omitted; `interval`
     selects the bucket width via Postgres `date_trunc`. Requires a valid API
@@ -235,6 +314,26 @@ async def usage_timeseries(
                     0,
                 ),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                func.coalesce(func.sum(RequestLog.completion_tokens), 0),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.total_tokens), else_=0)
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+                    ),
+                    0.0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+                    ),
+                    0.0,
+                ),
             )
             .where(*filters)
             .group_by(bucket)
@@ -248,10 +347,106 @@ async def usage_timeseries(
             request_count=int(count),
             cache_hit_count=int(cache_hits),
             cost_usd=float(cost_usd),
+            prompt_tokens=int(prompt_tokens),
+            completion_tokens=int(completion_tokens),
+            cached_tokens=int(cached_tokens),
+            spend_usd=float(spend_usd),
+            savings_usd=float(savings_usd),
         )
-        for bucket_start, count, cache_hits, cost_usd in rows
+        for (
+            bucket_start,
+            count,
+            cache_hits,
+            cost_usd,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            spend_usd,
+            savings_usd,
+        ) in rows
     ]
     return TimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
+
+
+class UsageByModelBucket(BaseModel):
+    """One (time bucket, model) row of request/token/cost totals."""
+
+    bucket_start: datetime
+    model: str
+    request_count: int
+    total_tokens: int
+    cost_usd: float
+
+
+class UsageByModelTimeseriesResponse(BaseModel):
+    """Usage bucketed by both time and model, as a flat list of rows.
+
+    Kept flat (rather than nested by model) so the response shape stays
+    simple regardless of how many distinct models appear in the window;
+    callers group by `model` themselves.
+    """
+
+    start: datetime
+    end: datetime
+    interval: str
+    rows: list[UsageByModelBucket]
+
+
+@router.get(
+    "/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse
+)
+async def usage_timeseries_by_model(
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    interval: Literal["minute", "hour", "day"] = Query(default="day"),
+    model: str | None = Query(default=None),
+    key_id: int | None = Query(default=None),
+    prompt_name: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _caller: ApiKey = Depends(require_api_key),
+) -> UsageByModelTimeseriesResponse:
+    """Return request volume, tokens, and cost, bucketed by both time and
+    model, for the per-model usage-over-time panel.
+
+    Same filters and defaults as `usage_timeseries`. Requires a valid API
+    key (`require_api_key`).
+    """
+    default_start, default_end = _default_window()
+    start = start or default_start
+    end = end or default_end
+    filters = _base_filters(
+        start, end, model=model, key_id=key_id, prompt_name=prompt_name
+    )
+
+    bucket = func.date_trunc(interval, RequestLog.created_at)
+    rows = (
+        await session.execute(
+            select(
+                bucket,
+                RequestLog.model,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+            )
+            .where(*filters)
+            .group_by(bucket, RequestLog.model)
+            .order_by(bucket, RequestLog.model)
+        )
+    ).all()
+
+    by_model_rows = [
+        UsageByModelBucket(
+            bucket_start=bucket_start,
+            model=model_name,
+            request_count=int(count),
+            total_tokens=int(total_tokens),
+            cost_usd=float(cost_usd),
+        )
+        for bucket_start, model_name, count, total_tokens, cost_usd in rows
+    ]
+    return UsageByModelTimeseriesResponse(
+        start=start, end=end, interval=interval, rows=by_model_rows
+    )
 
 
 class EvalRunOut(BaseModel):
