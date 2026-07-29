@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Integer, func, select
+from sqlalchemy import Integer, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.db import get_session
@@ -238,12 +238,17 @@ async def usage_summary(
 
 
 class TimeseriesBucket(BaseModel):
-    """One time bucket of request volume/cache-hit/cost data."""
+    """One time bucket of request volume/cache-hit/cost/token data."""
 
     bucket_start: datetime
     request_count: int
     cache_hit_count: int
     cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    spend_usd: float
+    savings_usd: float
 
 
 class TimeseriesResponse(BaseModel):
@@ -259,14 +264,15 @@ class TimeseriesResponse(BaseModel):
 async def usage_timeseries(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
-    interval: Literal["hour", "day"] = Query(default="day"),
+    interval: Literal["minute", "hour", "day"] = Query(default="day"),
     model: str | None = Query(default=None),
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
     _caller: ApiKey = Depends(require_api_key),
 ) -> TimeseriesResponse:
-    """Return request volume, cache-hit count, and cost, bucketed by hour or day.
+    """Return request volume, cache-hit count, cost, and token/spend/savings
+    totals, bucketed by minute, hour, or day.
 
     `start`/`end` default to the trailing 7 days when omitted; `interval`
     selects the bucket width via Postgres `date_trunc`. Requires a valid API
@@ -290,6 +296,26 @@ async def usage_timeseries(
                     0,
                 ),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                func.coalesce(func.sum(RequestLog.completion_tokens), 0),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.total_tokens), else_=0)
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+                    ),
+                    0.0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+                    ),
+                    0.0,
+                ),
             )
             .where(*filters)
             .group_by(bucket)
@@ -303,8 +329,23 @@ async def usage_timeseries(
             request_count=int(count),
             cache_hit_count=int(cache_hits),
             cost_usd=float(cost_usd),
+            prompt_tokens=int(prompt_tokens),
+            completion_tokens=int(completion_tokens),
+            cached_tokens=int(cached_tokens),
+            spend_usd=float(spend_usd),
+            savings_usd=float(savings_usd),
         )
-        for bucket_start, count, cache_hits, cost_usd in rows
+        for (
+            bucket_start,
+            count,
+            cache_hits,
+            cost_usd,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            spend_usd,
+            savings_usd,
+        ) in rows
     ]
     return TimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
 

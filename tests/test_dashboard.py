@@ -255,6 +255,81 @@ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
     assert total_cost == 6.0
 
 
+async def test_usage_timeseries_includes_token_and_spend_fields(client, raw_key, session):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=100,
+        completion_tokens=50,
+        cost_usd=1.0,
+        created_at=now,
+    )
+    await _seed_log(
+        session,
+        key_id=key_row.id,
+        model="gpt-4o",
+        prompt_tokens=200,
+        completion_tokens=100,
+        cost_usd=2.0,
+        cached=True,
+        created_at=now,
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "interval": "day",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["buckets"]) == 1
+    bucket = body["buckets"][0]
+    assert bucket["prompt_tokens"] == 300
+    assert bucket["completion_tokens"] == 150
+    assert bucket["cached_tokens"] == 300
+    assert bucket["spend_usd"] == 1.0
+    assert bucket["savings_usd"] == 2.0
+
+
+async def test_usage_timeseries_accepts_minute_interval(client, raw_key, session):
+    key_row = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    await _seed_log(
+        session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(minutes=5)).isoformat(),
+            "end": (now + timedelta(minutes=5)).isoformat(),
+            "interval": "minute",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["interval"] == "minute"
+    assert sum(b["request_count"] for b in body["buckets"]) == 1
+
+
 async def test_usage_timeseries_rejects_invalid_interval(client, raw_key):
     r = await client.get(
         "/dashboard/api/usage/timeseries",
