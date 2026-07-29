@@ -3,6 +3,7 @@ import type {
   PromptListResponse,
   PromptVersionTimelineResponse,
   TimeseriesResponse,
+  UsageByModelTimeseriesResponse,
   UsageSummaryResponse,
 } from "./types";
 
@@ -88,12 +89,27 @@ export function getUsageSummary(filters: UsageFilters): Promise<UsageSummaryResp
   });
 }
 
-/** Fetches usage bucketed into hourly or daily intervals for the given
- * filters, for charting over time. */
+/** Fetches usage bucketed into minute, hourly, or daily intervals for the
+ * given filters, for charting over time. */
 export function getUsageTimeseries(
-  filters: UsageFilters & { interval: "hour" | "day" },
+  filters: UsageFilters & { interval: "minute" | "hour" | "day" },
 ): Promise<TimeseriesResponse> {
   return request<TimeseriesResponse>("usage/timeseries", {
+    start: filters.start,
+    end: filters.end,
+    interval: filters.interval,
+    model: filters.model,
+    key_id: filters.keyId,
+    prompt_name: filters.promptName,
+  });
+}
+
+/** Fetches usage bucketed by both time and model, for the per-model usage
+ * panel. */
+export function getUsageTimeseriesByModel(
+  filters: UsageFilters & { interval: "minute" | "hour" | "day" },
+): Promise<UsageByModelTimeseriesResponse> {
+  return request<UsageByModelTimeseriesResponse>("usage/timeseries/by-model", {
     start: filters.start,
     end: filters.end,
     interval: filters.interval,

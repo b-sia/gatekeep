@@ -18,6 +18,8 @@ export interface UsageSummaryResponse {
   prompt_tokens: number;
   completion_tokens: number;
   cost_usd: number;
+  spend_usd: number;
+  savings_usd: number;
   cache_hit_count: number;
   cache_hit_rate: number;
   by_model: UsageBreakdownRow[];
@@ -25,13 +27,18 @@ export interface UsageSummaryResponse {
   by_prompt: UsageBreakdownRow[];
 }
 
-/** One bucket of a usage timeseries (requests/cache hits/cost within a
- * single hour or day interval). */
+/** One bucket of a usage timeseries (requests/cache hits/cost/tokens within
+ * a single minute, hour, or day interval). */
 export interface TimeseriesBucket {
   bucket_start: string;
   request_count: number;
   cache_hit_count: number;
   cost_usd: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  spend_usd: number;
+  savings_usd: number;
 }
 
 /** Usage broken into fixed-size time buckets over a window, for charting. */
@@ -40,6 +47,24 @@ export interface TimeseriesResponse {
   end: string;
   interval: string;
   buckets: TimeseriesBucket[];
+}
+
+/** One (time bucket, model) row of request/token/cost totals. */
+export interface UsageByModelBucket {
+  bucket_start: string;
+  model: string;
+  request_count: number;
+  total_tokens: number;
+  cost_usd: number;
+}
+
+/** Usage bucketed by both time and model, as a flat list of rows - group by
+ * `model` client-side to build per-model chart series. */
+export interface UsageByModelTimeseriesResponse {
+  start: string;
+  end: string;
+  interval: string;
+  rows: UsageByModelBucket[];
 }
 
 /** Result of a single eval suite run against a prompt version. */
