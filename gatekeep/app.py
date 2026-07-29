@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
 import time
 
 import ollama
@@ -12,7 +13,8 @@ from openai import AsyncOpenAI
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
@@ -91,6 +93,28 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
 app.include_router(dashboard_router)
+
+_DASHBOARD_DIST = pathlib.Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+
+if (_DASHBOARD_DIST / "assets").is_dir():
+    app.mount(
+        "/dashboard/assets",
+        StaticFiles(directory=str(_DASHBOARD_DIST / "assets")),
+        name="dashboard-assets",
+    )
+
+
+@app.get("/dashboard")
+@app.get("/dashboard/{path:path}")
+async def serve_dashboard(path: str = "") -> FileResponse:
+    """Serve the dashboard SPA's index.html for any non-API path under
+    `/dashboard`, so client-side routing/asset requests resolve correctly.
+
+    Registered after `dashboard_router` (which owns `/dashboard/api/*`), so
+    FastAPI matches the more specific API routes first.
+    """
+    return FileResponse(_DASHBOARD_DIST / "index.html")
+
 
 _settings = get_settings()
 _GatewayProvider = AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider
