@@ -55,6 +55,8 @@ class UsageSummaryResponse(BaseModel):
     end: datetime
     request_count: int
     total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
     cost_usd: float
     cache_hit_count: int
     cache_hit_rate: float
@@ -193,6 +195,8 @@ async def usage_summary(
             select(
                 func.count(RequestLog.id),
                 func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                func.coalesce(func.sum(RequestLog.completion_tokens), 0),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
                 func.coalesce(
                     func.sum(func.cast(RequestLog.cached, Integer)),
@@ -201,7 +205,14 @@ async def usage_summary(
             ).where(*filters)
         )
     ).one()
-    request_count, total_tokens, cost_usd, cache_hit_count = totals_row
+    (
+        request_count,
+        total_tokens,
+        prompt_tokens,
+        completion_tokens,
+        cost_usd,
+        cache_hit_count,
+    ) = totals_row
     request_count = int(request_count)
     cache_hit_count = int(cache_hit_count)
     cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
@@ -215,6 +226,8 @@ async def usage_summary(
         end=end,
         request_count=request_count,
         total_tokens=int(total_tokens),
+        prompt_tokens=int(prompt_tokens),
+        completion_tokens=int(completion_tokens),
         cost_usd=float(cost_usd),
         cache_hit_count=cache_hit_count,
         cache_hit_rate=cache_hit_rate,
