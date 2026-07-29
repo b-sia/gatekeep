@@ -111,18 +111,36 @@ async def serve_dashboard(path: str = "") -> FileResponse:
     `/dashboard`, so client-side routing/asset requests resolve correctly.
 
     Registered after `dashboard_router` (which owns `/dashboard/api/*`), so
-    FastAPI matches the more specific API routes first.
+    FastAPI matches the more specific API routes first. `dashboard_router`
+    only defines literal paths, so a request under `/dashboard/api/...`
+    that doesn't match any of them (a typo, a removed endpoint) would
+    otherwise fall through to this catch-all and get served the SPA's HTML
+    with a misleading 200 - `path` is checked for that case and rejected
+    with a 404 instead.
 
     Args:
         path: The sub-path requested under `/dashboard` (e.g. `prompts` for
-            `/dashboard/prompts`). Unused - every non-API path resolves to
-            the same SPA entry point, and client-side routing takes over
-            from there.
+            `/dashboard/prompts`). Unused for SPA routes - every non-API
+            path resolves to the same entry point, and client-side routing
+            takes over from there.
 
     Returns:
         A `FileResponse` streaming the built `dashboard/dist/index.html`.
+
+    Raises:
+        HTTPException: 404 if `path` is an unmatched `/dashboard/api/*`
+            request; 503 if the dashboard hasn't been built (`dashboard/dist`
+            is missing), which would otherwise be an unhandled crash.
     """
-    return FileResponse(_DASHBOARD_DIST / "index.html")
+    if path == "api" or path.startswith("api/"):
+        raise FastAPIHTTPException(status_code=404, detail="Not Found")
+    index_path = _DASHBOARD_DIST / "index.html"
+    if not index_path.is_file():
+        raise FastAPIHTTPException(
+            status_code=503,
+            detail="Dashboard is not built. Run `npm run build` in dashboard/.",
+        )
+    return FileResponse(index_path)
 
 
 _settings = get_settings()

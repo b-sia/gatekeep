@@ -534,3 +534,16 @@ async def test_prompt_versions_timeline_404_for_unknown_prompt(client, raw_key):
         headers={"Authorization": f"Bearer {raw_key}"},
     )
     assert r.status_code == 404
+
+
+# -- dashboard SPA fallback ---------------------------------------------
+
+
+async def test_dashboard_unmatched_api_path_returns_404(client):
+    r = await client.get("/dashboard/api/does-not-exist")
+    assert r.status_code == 404
+
+
+async def test_dashboard_api_prefix_alone_returns_404(client):
+    r = await client.get("/dashboard/api")
+    assert r.status_code == 404
