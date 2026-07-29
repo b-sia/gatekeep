@@ -40,6 +40,7 @@ class UsageBreakdownRow(BaseModel):
     (model id, API key id, or prompt name)."""
 
     key: str
+    label: str | None = None
     request_count: int
     total_tokens: int
     cost_usd: float
@@ -122,6 +123,47 @@ async def _breakdown(
     ]
 
 
+async def _key_breakdown(
+    session: AsyncSession, filters: list
+) -> list[UsageBreakdownRow]:
+    """Run the same aggregate as `_breakdown` grouped by `RequestLog.key_id`,
+    but also join `ApiKey` to attach each key's display name as `label`.
+
+    Uses an outer join so requests from a since-deleted API key still show
+    up, with `label` falling back to `#<id>`.
+    """
+    rows = (
+        await session.execute(
+            select(
+                RequestLog.key_id,
+                ApiKey.name,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                func.coalesce(
+                    func.sum(func.cast(RequestLog.cached, Integer)),
+                    0,
+                ),
+            )
+            .outerjoin(ApiKey, RequestLog.key_id == ApiKey.id)
+            .where(*filters)
+            .group_by(RequestLog.key_id, ApiKey.name)
+            .order_by(func.sum(RequestLog.cost_usd).desc())
+        )
+    ).all()
+    return [
+        UsageBreakdownRow(
+            key=str(key_id),
+            label=name if name is not None else f"#{key_id}",
+            request_count=count,
+            total_tokens=int(total_tokens),
+            cost_usd=float(cost_usd),
+            cache_hit_count=int(cache_hits),
+        )
+        for key_id, name, count, total_tokens, cost_usd, cache_hits in rows
+    ]
+
+
 @router.get("/usage/summary", response_model=UsageSummaryResponse)
 async def usage_summary(
     start: datetime | None = Query(default=None),
@@ -165,7 +207,7 @@ async def usage_summary(
     cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
 
     by_model = await _breakdown(session, RequestLog.model, filters)
-    by_key = await _breakdown(session, RequestLog.key_id, filters)
+    by_key = await _key_breakdown(session, filters)
     by_prompt = await _breakdown(session, RequestLog.prompt_name, filters)
 
     return UsageSummaryResponse(

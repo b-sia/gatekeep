@@ -149,6 +149,7 @@ async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
 
     by_key = {row["key"]: row for row in body["by_key"]}
     assert by_key[str(key_row.id)]["request_count"] == 3
+    assert by_key[str(key_row.id)]["label"] == "dashboard-test"
 
     by_prompt = {row["key"]: row for row in body["by_prompt"]}
     assert by_prompt["system-context"]["request_count"] == 2
