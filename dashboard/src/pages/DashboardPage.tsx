@@ -3,6 +3,9 @@ import Header from "../components/Header";
 import FilterBar, { type DashboardFilters } from "../components/FilterBar";
 import StatRow from "../components/StatRow";
 import UsageChart from "../components/UsageChart";
+import ModelUsagePanel from "../components/ModelUsagePanel";
+import TokenTypePanel from "../components/TokenTypePanel";
+import SpendSavingsPanel from "../components/SpendSavingsPanel";
 import BreakdownPanels from "../components/BreakdownPanels";
 import PromptsPanel from "../components/PromptsPanel";
 import EvalHistoryPanel from "../components/EvalHistoryPanel";
@@ -12,8 +15,15 @@ import {
   getPrompts,
   getUsageSummary,
   getUsageTimeseries,
+  getUsageTimeseriesByModel,
 } from "../api/client";
-import type { EvalRunOut, PromptOut, TimeseriesResponse, UsageSummaryResponse } from "../api/types";
+import type {
+  EvalRunOut,
+  PromptOut,
+  TimeseriesResponse,
+  UsageByModelTimeseriesResponse,
+  UsageSummaryResponse,
+} from "../api/types";
 
 interface DashboardPageProps {
   /** Called when any dashboard API call comes back 401, so the app can drop
@@ -24,8 +34,8 @@ interface DashboardPageProps {
 /**
  * Top-level dashboard view: owns filter state, fetches usage/eval/prompt
  * data for the current time window and model filter, and renders the
- * dashboard layout (header, filters, stat cards, chart, breakdowns, prompts,
- * eval history).
+ * dashboard layout (header, filters, stat cards, charts, breakdowns,
+ * prompts, eval history).
  */
 export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   const [filters, setFilters] = useState<DashboardFilters>({
@@ -36,6 +46,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   const [summary, setSummary] = useState<UsageSummaryResponse | null>(null);
   const [allModels, setAllModels] = useState<string[]>([]);
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
+  const [byModel, setByModel] = useState<UsageByModelTimeseriesResponse | null>(null);
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
   const [prompts, setPrompts] = useState<PromptOut[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -46,9 +57,14 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
     const start = new Date(end.getTime() - filters.rangeDays * 24 * 60 * 60 * 1000);
     const windowParams = { start: start.toISOString(), end: end.toISOString() };
     try {
-      const [summaryRes, timeseriesRes, evalsRes, promptsRes] = await Promise.all([
+      const [summaryRes, timeseriesRes, byModelRes, evalsRes, promptsRes] = await Promise.all([
         getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
         getUsageTimeseries({
+          ...windowParams,
+          interval: filters.interval,
+          model: filters.model ?? undefined,
+        }),
+        getUsageTimeseriesByModel({
           ...windowParams,
           interval: filters.interval,
           model: filters.model ?? undefined,
@@ -58,6 +74,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       ]);
       setSummary(summaryRes);
       setTimeseries(timeseriesRes);
+      setByModel(byModelRes);
       setRuns(evalsRes.runs);
       setPrompts(promptsRes.prompts);
     } catch (err) {
@@ -115,6 +132,9 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       )}
       <StatRow summary={summary} />
       <UsageChart timeseries={timeseries} />
+      <ModelUsagePanel data={byModel} interval={filters.interval} />
+      <TokenTypePanel timeseries={timeseries} />
+      <SpendSavingsPanel timeseries={timeseries} />
       <BreakdownPanels summary={summary} />
       <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
       <EvalHistoryPanel runs={runs} />
