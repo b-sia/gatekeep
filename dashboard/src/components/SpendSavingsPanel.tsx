@@ -9,17 +9,10 @@ import {
   YAxis,
 } from "recharts";
 import type { TimeseriesResponse } from "../api/types";
+import { formatBucketLabel, formatUsd } from "../format";
 
 interface SpendSavingsPanelProps {
   timeseries: TimeseriesResponse | null;
-}
-
-/** Formats a USD amount, using extra decimal places for sub-cent values so
- * distinct small amounts (common with per-request LLM costs) don't collapse
- * into duplicate-looking "$0.00" ticks. */
-function formatUsd(value: number): string {
-  if (value !== 0 && Math.abs(value) < 0.01) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(2)}`;
 }
 
 /** Stacked bar chart of actual spend vs. cache savings over time. Spend and
@@ -28,12 +21,10 @@ function formatUsd(value: number): string {
 export default function SpendSavingsPanel({ timeseries }: SpendSavingsPanelProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: new Date(bucket.bucket_start).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: timeseries.interval !== "day" ? "numeric" : undefined,
-        minute: timeseries.interval === "minute" ? "numeric" : undefined,
-      }),
+      time: formatBucketLabel(
+        bucket.bucket_start,
+        timeseries.interval as "minute" | "hour" | "day",
+      ),
       spend: bucket.spend_usd,
       savings: bucket.savings_usd,
     })) ?? [];

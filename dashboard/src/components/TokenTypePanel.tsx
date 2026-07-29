@@ -9,6 +9,7 @@ import {
   YAxis,
 } from "recharts";
 import type { TimeseriesResponse } from "../api/types";
+import { formatBucketLabel } from "../format";
 
 interface TokenTypePanelProps {
   timeseries: TimeseriesResponse | null;
@@ -25,12 +26,10 @@ interface TokenTypePanelProps {
 export default function TokenTypePanel({ timeseries }: TokenTypePanelProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: new Date(bucket.bucket_start).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: timeseries.interval !== "day" ? "numeric" : undefined,
-        minute: timeseries.interval === "minute" ? "numeric" : undefined,
-      }),
+      time: formatBucketLabel(
+        bucket.bucket_start,
+        timeseries.interval as "minute" | "hour" | "day",
+      ),
       input: bucket.prompt_tokens,
       output: bucket.completion_tokens,
       cached: bucket.cached_tokens,

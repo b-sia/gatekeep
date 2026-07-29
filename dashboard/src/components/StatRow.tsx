@@ -1,12 +1,8 @@
 import type { UsageSummaryResponse } from "../api/types";
+import { formatUsd } from "../format";
 
 interface StatRowProps {
   summary: UsageSummaryResponse | null;
-}
-
-/** Formats a USD amount as `$X.XX`. */
-function formatCost(usd: number): string {
-  return `$${usd.toFixed(2)}`;
 }
 
 /** Formats a token count with a `k`/`M` suffix for readability. */
@@ -51,7 +47,7 @@ export default function StatRow({ summary }: StatRowProps) {
         value={summary.request_count.toLocaleString()}
         context={`${summary.cache_hit_count} cache hits`}
       />
-      <StatCard label="Total cost" value={formatCost(summary.cost_usd)} context="Across all models" />
+      <StatCard label="Total cost" value={formatUsd(summary.cost_usd)} context="Across all models" />
       <StatCard
         label="Total tokens"
         value={formatTokens(summary.total_tokens)}
@@ -59,8 +55,8 @@ export default function StatRow({ summary }: StatRowProps) {
       />
       <StatCard
         label="Total savings"
-        value={formatCost(summary.savings_usd)}
-        context={`${formatCost(summary.spend_usd)} spent`}
+        value={formatUsd(summary.savings_usd)}
+        context={`${formatUsd(summary.spend_usd)} spent`}
       />
       <StatCard
         label="Cache hit rate"

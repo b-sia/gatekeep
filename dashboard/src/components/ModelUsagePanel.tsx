@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import type { UsageByModelTimeseriesResponse } from "../api/types";
+import { formatBucketLabel, formatUsd } from "../format";
 
 type Metric = "tokens" | "requests" | "cost";
 
@@ -27,15 +28,6 @@ const METRIC_LABELS: Record<Metric, string> = {
 };
 
 const MODEL_COLORS = ["#6366f1", "#f97316", "#22d3ee", "#a3e635", "#f472b6", "#facc15"];
-
-function formatBucketLabel(isoString: string, interval: "minute" | "hour" | "day"): string {
-  return new Date(isoString).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: interval !== "day" ? "numeric" : undefined,
-    minute: interval === "minute" ? "numeric" : undefined,
-  });
-}
 
 /** Stacked bar chart of per-model usage over time. A metric toggle switches
  * which field feeds bar height (tokens / requests / cost) by re-pivoting
@@ -84,9 +76,13 @@ export default function ModelUsagePanel({ data, interval }: ModelUsagePanelProps
           <ComposedChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 12 }} />
-            <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} />
+            <YAxis
+              tick={{ fill: "#94a3b8", fontSize: 12 }}
+              tickFormatter={(value: number) => (metric === "cost" ? formatUsd(value) : String(value))}
+            />
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
+              formatter={(value: number) => (metric === "cost" ? formatUsd(value) : String(value))}
             />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             {models.map((modelName, i) => (

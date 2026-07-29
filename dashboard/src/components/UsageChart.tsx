@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import type { TimeseriesResponse } from "../api/types";
+import { formatBucketLabel } from "../format";
 
 interface UsageChartProps {
   timeseries: TimeseriesResponse | null;
@@ -20,11 +21,10 @@ interface UsageChartProps {
 export default function UsageChart({ timeseries }: UsageChartProps) {
   const data =
     timeseries?.buckets.map((bucket) => ({
-      time: new Date(bucket.bucket_start).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: timeseries.interval === "hour" ? "numeric" : undefined,
-      }),
+      time: formatBucketLabel(
+        bucket.bucket_start,
+        timeseries.interval as "minute" | "hour" | "day",
+      ),
       nonCached: bucket.request_count - bucket.cache_hit_count,
       cached: bucket.cache_hit_count,
       cost: bucket.cost_usd,
