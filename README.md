@@ -66,6 +66,7 @@ Project layout, in more detail than the summary at the bottom of this file:
 | `gatekeep/prompts.py`, `evals.py`, `curation.py`, `fixtures.py` | Prompt versioning, eval suites, real-traffic curation, CI fixtures - see the "Eval gate" section below |
 | `gatekeep/cli.py` | The `gatekeep prompt ...` / `gatekeep eval ...` commands, run via `python -m gatekeep.cli` or the installed `gatekeep` console script |
 | `gatekeep/observability/` | Prometheus/Grafana config used by `docker-compose.yml` |
+| `dashboard/` | First-party React/TypeScript dashboard SPA, served by the gateway at `/dashboard` - see "Dashboard" below |
 | `demo/` | Standalone chat app exercising the gateway as a real client would |
 | `tests/` | Pytest suite, one file per module; `conftest.py` resets the DB schema per test |
 
@@ -150,6 +151,27 @@ curl http://localhost:8100/metrics | grep gatekeep_cache_exact_hits
 `/metrics` is a Prometheus-format endpoint (unauthenticated, like `/healthz`); `docker-compose.yml` also runs Prometheus and a Grafana dashboard at `http://localhost:3000` for cost, usage, and cache-hit-rate visualization.
 
 Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt create/promote/rollback ...`) are cache-aware: promoting a new prompt version automatically invalidates any cached responses that were built using the old version, so clients never see a stale answer generated from a prompt that's no longer active.
+
+## Dashboard
+
+Once the gateway is running, the first-party dashboard is served at
+`http://localhost:8100/dashboard` - a cost/usage/eval-history view over the
+same data as the Grafana dashboard above, plus prompt version history. On
+first load it prompts for an API key (the same kind used for
+`/v1/chat/completions`); the key is stored in the browser's `localStorage`
+and sent as a bearer token to the dashboard's own read-only API under
+`/dashboard/api/*`.
+
+For local frontend development, run the dev server separately from the
+gateway:
+
+```bash
+cd dashboard && npm install && npm run dev
+```
+
+This runs Vite's dev server with hot reload, proxying `/dashboard/api`
+requests to `http://localhost:8100` (so the gateway still needs to be up via
+`docker-compose up -d`).
 
 ## Run the demo app
 
@@ -261,6 +283,7 @@ Both streaming (`"stream": true`) and non-streaming requests are supported, matc
 gatekeep/       gateway source (FastAPI app, providers, middleware)
 migrations/     Alembic database migrations
 scripts/        setup helpers (init-test-key.sh, run-demo.sh)
+dashboard/      first-party React dashboard SPA, served at /dashboard
 demo/           example chat app showing gateway integration
 docs/           design docs and specs
 ```

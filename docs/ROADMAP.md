@@ -6,7 +6,10 @@ section) plus items explicitly deferred out of Phase 3
 (`docs/superpowers/plans/2026-07-13-gatekeep-phase-3-eval-gate.md`).
 
 Already shipped, off the list: **model-downgrade routing** — implemented in
-`gatekeep/routing.py:select_model`, wired into `gatekeep/app.py`.
+`gatekeep/routing.py:select_model`, wired into `gatekeep/app.py`. Also
+shipped: **custom web dashboard** — first-party cost/usage/eval-history UI,
+implemented as `gatekeep/api/dashboard.py` plus the `dashboard/` React SPA,
+served at `/dashboard`.
 
 ## 1. Additional upstream providers (OpenAI, Google)
 
@@ -39,27 +42,20 @@ Today's eval gate scores against a fixed generic rubric string. Self-contained
 inside `evals.py` — no architectural changes, but a genuine prompt-engineering
 problem (how curated cases become a rubric). No plan written yet.
 
-## 5. Custom web dashboard
-
-First-party UI for cost/usage/eval history, beyond Grafana. Mostly read-only
-endpoints over data that already exists, plus a frontend (can lean on
-`demo/` as a UI template). Large in scope/time, low in technical risk. No
-plan written yet.
-
-## 6. A/B testing prompt versions in production (partial traffic split)
+## 5. A/B testing prompt versions in production (partial traffic split)
 
 Extend `prompts.py`'s resolve-at-request-time logic to route a percentage of
 traffic to a candidate version, plus comparative metrics to evaluate the
 split — today's promotion model is binary (promote/rollback). Touches
-request-time routing correctness, bigger blast radius than items 1-5. No
+request-time routing correctness, bigger blast radius than items 1-4. No
 plan written yet.
 
-## 7. Per-organization eval suites / multi-tenant isolation
+## 6. Per-organization eval suites / multi-tenant isolation
 
 A new tenancy dimension cutting across auth, keys, prompts, evals, and
 curation — significant data-model and migration work. No plan written yet.
 
-## 8. Canary rollout with automatic rollback
+## 7. Canary rollout with automatic rollback
 
 Gradual prompt-version rollout with automatic rollback on live metric/quality
 regression. Needs Prometheus/Grafana-integrated live monitoring, an automated
