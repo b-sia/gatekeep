@@ -6,4 +6,5 @@ venv/
 .env
 .pytest_cache/
 .superpowers/
+.mcp.json
 .mcp.json.worktrees/
