@@ -483,6 +483,7 @@ async def chat_completions(
 
 @app.post("/v1/messages")
 async def messages(
+    request: Request,
     req: MessagesRequest,
     key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
@@ -533,6 +534,7 @@ async def messages(
             payload["model"] = chosen
 
     requests_total.labels(model=model, key_id=str(key.id)).inc()
+    mark(request, model=model)
 
     if req.stream:
         return StreamingResponse(
@@ -544,6 +546,7 @@ async def messages(
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
+                started_at=getattr(request.state, "started_at", None),
             ),
             media_type="text/event-stream",
         )
@@ -563,6 +566,10 @@ async def messages(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
+        mark(request, path="cache_exact")
+        timings = observe_non_streaming(
+            request, model=model, path="cache_exact", provider_ms=None
+        )
         await log_request(
             session,
             key_id=key.id,
@@ -574,6 +581,9 @@ async def messages(
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
+            duration_ms=timings.duration_ms,
+            provider_ms=timings.provider_ms,
+            ttft_ms=timings.ttft_ms,
         )
         observe_request(
             model=model,
@@ -603,6 +613,10 @@ async def messages(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
+            mark(request, path="cache_semantic")
+            timings = observe_non_streaming(
+                request, model=model, path="cache_semantic", provider_ms=None
+            )
             await log_request(
                 session,
                 key_id=key.id,
@@ -615,6 +629,9 @@ async def messages(
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
+                duration_ms=timings.duration_ms,
+                provider_ms=timings.provider_ms,
+                ttft_ms=timings.ttft_ms,
             )
             observe_request(
                 model=model,
@@ -628,10 +645,14 @@ async def messages(
             )
         cache_semantic_misses.labels(model=model).inc()
 
+    # Marked before the call so a provider error still carries labels.
+    mark(request, path="provider")
+    provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error_anthropic(exc)
+    provider_ms = (time.perf_counter() - provider_started) * 1000
     openai_shaped = result_to_openai(result, model=model)
     messages_response = result_to_messages(result, model=model)
     try:
@@ -667,6 +688,9 @@ async def messages(
             input_messages=payload["messages"],
             output_text=messages_response.content[0].text,
         )
+    timings = observe_non_streaming(
+        request, model=model, path="provider", provider_ms=provider_ms
+    )
     await log_request(
         session,
         key_id=key.id,
@@ -677,6 +701,9 @@ async def messages(
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
+        duration_ms=timings.duration_ms,
+        provider_ms=timings.provider_ms,
+        ttft_ms=timings.ttft_ms,
     )
     observe_request(
         model=model,
@@ -697,6 +724,7 @@ async def _messages_sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
+    started_at: float | None = None,
 ):
     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
 
@@ -706,15 +734,22 @@ async def _messages_sse(
     `log_request` once the stream ends, using its own DB session for the
     same reason `_sse` does (the request-scoped session dependency is
     already closed by the time this generator keeps running).
+
+    `started_at` is the middleware's start stamp, passed in because a
+    StreamingResponse is returned before the provider is ever called, so the
+    middleware cannot time this path itself.
     """
     message_id = new_message_id()
+    timer = StreamTimer(started_at, model=model)
     yield _anthropic_event(
         "message_start", message_start_event(id=message_id, model=model)
     )
     yield _anthropic_event("content_block_start", content_block_start_event())
     try:
+        timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
+                timer.delta()
                 yield _anthropic_event(
                     "content_block_delta", content_block_delta_event(ev.text)
                 )
@@ -728,6 +763,7 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
+                timings = timer.finish()
                 async with SessionLocal() as session:
                     await log_request(
                         session,
@@ -739,6 +775,9 @@ async def _messages_sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        duration_ms=timings.duration_ms,
+                        provider_ms=timings.provider_ms,
+                        ttft_ms=timings.ttft_ms,
                     )
                 observe_request(
                     model=model,
