@@ -110,3 +110,42 @@ def test_mark_sets_model_and_path_on_request_state():
     mark(request, model="m-mark", path="provider")
     assert request.state.model == "m-mark"
     assert request.state.path == "provider"
+
+
+# -- derived mean inter-token latency ----------------------------------
+#
+# No production code computes this yet: it is a read-time formula for the
+# out-of-scope dashboard. Pinned here so the guard is inherited, not
+# rediscovered. The SQL equivalent is
+# (duration_ms - ttft_ms) / NULLIF(completion_tokens - 1, 0).
+
+
+def mean_itl_ms(
+    duration_ms: float, ttft_ms: float, completion_tokens: int
+) -> float | None:
+    """Mean inter-token latency in ms, or None when it is undefined.
+
+    Undefined below two completion tokens: one token has no gap to measure, and
+    OllamaProvider.stream yields `eval_count or 0`, so zero tokens is reachable
+    and would otherwise produce a denominator of -1 and a negative result.
+
+    Args:
+        duration_ms: Total streamed request duration.
+        ttft_ms: Time to first token.
+        completion_tokens: Tokens the provider reported generating.
+
+    Returns:
+        Mean ms between tokens, or None when completion_tokens < 2.
+    """
+    if completion_tokens < 2:
+        return None
+    return (duration_ms - ttft_ms) / (completion_tokens - 1)
+
+
+def test_mean_itl_is_undefined_below_two_tokens():
+    assert mean_itl_ms(100.0, 10.0, 0) is None
+    assert mean_itl_ms(100.0, 10.0, 1) is None
+
+
+def test_mean_itl_is_positive_for_normal_completions():
+    assert mean_itl_ms(100.0, 10.0, 10) == pytest.approx(10.0)
