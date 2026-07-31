@@ -632,3 +632,98 @@ async def test_route_by_cost_defaults_to_false_and_never_substitutes(
     ).scalar_one()
     assert log.model == "claude-sonnet-5"
     assert log.routed_from is None
+
+
+async def test_non_streaming_records_latency_columns(client, raw_key, session):
+    """Non-streamed requests get duration and provider time, but no TTFT."""
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert response.status_code == 200
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.duration_ms is not None and log.duration_ms > 0
+    assert log.provider_ms is not None and log.provider_ms >= 0
+    assert log.duration_ms >= log.provider_ms
+    assert log.ttft_ms is None
+
+
+async def test_streaming_records_ttft_and_duration(client, raw_key, session):
+    """Streamed requests get all three, with TTFT no later than the total."""
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        async for _ in response.aiter_lines():
+            pass
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.ttft_ms is not None
+    assert log.duration_ms is not None
+    # Non-strict: a fake provider yielding without awaiting can produce equal
+    # values at float resolution, and a strict < would be flaky.
+    assert log.ttft_ms <= log.duration_ms
+    assert log.provider_ms is not None
+
+
+async def test_cache_hit_leaves_provider_ms_null(client, raw_key, session):
+    """A served-from-cache response made no upstream call."""
+    body = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "cache-me"}],
+    }
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    await client.post("/v1/chat/completions", headers=headers, json=body)
+    await client.post("/v1/chat/completions", headers=headers, json=body)
+
+    logs = (
+        (await session.execute(select(RequestLog).order_by(RequestLog.id)))
+        .scalars()
+        .all()
+    )
+    assert len(logs) == 2
+    assert logs[1].cached is True
+    assert logs[1].provider_ms is None
+    assert logs[1].duration_ms is not None
+    assert logs[1].ttft_ms is None
+
+
+async def test_middleware_does_not_record_e2e_for_sse(client, raw_key):
+    """Streaming self-reports; a middleware observation would be recorded before
+    the provider was even called."""
+    from gatekeep.observability import metrics
+
+    def sum_for(path):
+        for sample in metrics.request_duration_seconds.collect()[0].samples:
+            if sample.name.endswith("_sum") and sample.labels == {
+                "model": "claude-sonnet-5",
+                "path": path,
+            }:
+                return sample.value
+        return 0.0
+
+    before_provider = sum_for("provider")
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "sse-only"}],
+            "stream": True,
+        },
+    ) as response:
+        async for _ in response.aiter_lines():
+            pass
+    assert sum_for("provider") == before_provider
+    assert sum_for("stream") > 0

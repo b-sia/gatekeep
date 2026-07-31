@@ -70,7 +70,12 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
-from gatekeep.observability.latency import LatencyMiddleware
+from gatekeep.observability.latency import (
+    LatencyMiddleware,
+    StreamTimer,
+    mark,
+    observe_non_streaming,
+)
 from gatekeep.observability.metrics import (
     cache_cost_saved_usd,
     cache_exact_hits,
@@ -222,6 +227,7 @@ async def metrics() -> Response:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
+    request: Request,
     req: ChatCompletionRequest,
     key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
@@ -297,6 +303,7 @@ async def chat_completions(
             payload["model"] = chosen
 
     requests_total.labels(model=model, key_id=str(key.id)).inc()
+    mark(request, model=model)
 
     if req.stream:
         return StreamingResponse(
@@ -308,6 +315,7 @@ async def chat_completions(
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
+                started_at=getattr(request.state, "started_at", None),
             ),
             media_type="text/event-stream",
         )
@@ -327,6 +335,10 @@ async def chat_completions(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
+        mark(request, path="cache_exact")
+        timings = observe_non_streaming(
+            request, model=model, path="cache_exact", provider_ms=None
+        )
         await log_request(
             session,
             key_id=key.id,
@@ -338,6 +350,9 @@ async def chat_completions(
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
+            duration_ms=timings.duration_ms,
+            provider_ms=timings.provider_ms,
+            ttft_ms=timings.ttft_ms,
         )
         observe_request(
             model=model,
@@ -367,6 +382,10 @@ async def chat_completions(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
+            mark(request, path="cache_semantic")
+            timings = observe_non_streaming(
+                request, model=model, path="cache_semantic", provider_ms=None
+            )
             await log_request(
                 session,
                 key_id=key.id,
@@ -379,6 +398,9 @@ async def chat_completions(
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
+                duration_ms=timings.duration_ms,
+                provider_ms=timings.provider_ms,
+                ttft_ms=timings.ttft_ms,
             )
             observe_request(
                 model=model,
@@ -390,10 +412,14 @@ async def chat_completions(
             return JSONResponse(content=semantic_response.model_dump())
         cache_semantic_misses.labels(model=model).inc()
 
+    # Marked before the call so a provider error still carries labels.
+    mark(request, path="provider")
+    provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error(exc)
+    provider_ms = (time.perf_counter() - provider_started) * 1000
     response = result_to_openai(result, model=model)
     try:
         await set_cached_response(
@@ -428,6 +454,9 @@ async def chat_completions(
             input_messages=payload["messages"],
             output_text=response.choices[0].message.content or "",
         )
+    timings = observe_non_streaming(
+        request, model=model, path="provider", provider_ms=provider_ms
+    )
     await log_request(
         session,
         key_id=key.id,
@@ -438,6 +467,9 @@ async def chat_completions(
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
+        duration_ms=timings.duration_ms,
+        provider_ms=timings.provider_ms,
+        ttft_ms=timings.ttft_ms,
     )
     observe_request(
         model=model,
@@ -737,6 +769,7 @@ async def _sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
+    started_at: float | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
@@ -746,13 +779,21 @@ async def _sse(
     via `log_request` once the stream ends, using its own DB session since
     this generator keeps running after the request-scoped session dependency
     has already been closed.
+
+    `started_at` is the middleware's start stamp, passed in because a
+    StreamingResponse is returned before the provider is ever called, so the
+    middleware cannot time this path itself. Timing is recorded via StreamTimer
+    and lands on the same RequestLog row.
     """
     completion_id = new_completion_id()
     created = int(time.time())
+    timer = StreamTimer(started_at, model=model)
     yield _event(role_chunk(id=completion_id, created=created, model=model))
     try:
+        timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
+                timer.delta()
                 yield _event(
                     text_chunk(ev.text, id=completion_id, created=created, model=model)
                 )
@@ -762,6 +803,7 @@ async def _sse(
                         ev.stop_reason, id=completion_id, created=created, model=model
                     )
                 )
+                timings = timer.finish()
                 async with SessionLocal() as session:
                     await log_request(
                         session,
@@ -773,6 +815,9 @@ async def _sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        duration_ms=timings.duration_ms,
+                        provider_ms=timings.provider_ms,
+                        ttft_ms=timings.ttft_ms,
                     )
                 observe_request(
                     model=model,
