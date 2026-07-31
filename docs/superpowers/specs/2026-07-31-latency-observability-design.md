@@ -102,16 +102,25 @@ runs, so the auth, rate-limit, and budget dependencies fall inside the window.
 On the way out it observes the Prometheus E2E histogram, but **skips responses
 with `media_type == "text/event-stream"`** for the reason given above.
 
+This is the **first middleware in the application** - no `add_middleware` call
+exists today - so it runs on every request, including `/healthz`, `/metrics`,
+`/dashboard`, and the mounted static assets. Those never set the labels below,
+so the skip rule already excludes them; no path allowlist is needed.
+
 A middleware cannot know the labels it needs: `model` is only resolved after
 translation and possible cost-based routing, and `path` is only known once the
 cache lookups have run. The endpoint therefore publishes them back as it learns
 them, on the same `request.state` used for the start stamp:
 
 - `request.state.model` is set immediately after routing settles (app.py:293).
-- `request.state.path` is set at each of the four outcomes: `cache_exact` on an
-  exact hit, `cache_semantic` on a semantic hit, `provider` **before** the
-  provider call is made (so a provider error still carries labels), and
-  `stream` before returning the `StreamingResponse`.
+- `request.state.path` is set at each of the three non-streaming outcomes:
+  `cache_exact` on an exact hit, `cache_semantic` on a semantic hit, and
+  `provider` **before** the provider call is made (so a provider error still
+  carries labels).
+
+There is deliberately no `request.state.path = "stream"`. The middleware skips
+SSE responses entirely, and the generator records its own observation with the
+`stream` label directly, so setting it on the request would be dead state.
 
 If either is absent when the middleware runs, the request failed before the
 endpoint body got far enough to resolve a model at all: a validation error, an
@@ -126,14 +135,24 @@ per-model distributions. Those rejections are already counted elsewhere (the
 rate-limit and budget metrics) and their latency is not what this spec is
 about.
 
-**2. Provider call sites** - four in `gatekeep/app.py`.
+**2. Non-streaming provider calls** - the two `await provider.complete(payload)`
+sites in `gatekeep/app.py` (app.py:390 in `chat_completions`, app.py:596 in
+`messages`).
 
-Inline `perf_counter()` around `await provider.complete(payload)`.
+Inline `perf_counter()` around each. The two `provider.stream(payload)` sites
+(app.py:680, app.py:750) are **not** covered here; they live inside the
+generators and belong to instrumentation point 3.
 
 Rejected alternative: a `TimedProvider` decorator wrapping `get_provider`. The
 four providers are duck-typed with no shared base class, and such a wrapper
 still could not capture TTFT, which has to be observed inside the delta loop.
-Inline timing at four sites is less machinery for the same result.
+Inline timing at two sites is less machinery for the same result.
+
+**Endpoint signature change.** `chat_completions` (app.py:220) and `messages`
+(app.py:449) currently take no `Request` parameter, so `request.state` is
+unreachable from either. Both gain `request: Request` (the symbol is already
+imported at app.py:20 for the exception handlers). Without this the entire
+`request.state` mechanism above cannot work.
 
 **3. The SSE generators** - `_sse` (app.py:727) and `_messages_sse`
 (app.py:655).
@@ -160,11 +179,27 @@ because each is genuinely undefined in some cases, not merely unknown:
 Existing rows are `NULL` on all three. Any aggregate query must therefore
 filter or coalesce explicitly; a `NULL` never means "zero latency".
 
+**A NULL `provider_ms` is ambiguous on its own.** It means either "cache hit,
+no provider call" or "row predates this migration". The two are separable only
+via `cached` and `created_at`. Any consumer (notably the Phase 2 dashboard
+queries) must disambiguate on `cached`, never on `provider_ms IS NULL` alone.
+
 **Mean inter-token latency is derived, not stored:**
-`(duration_ms - ttft_ms) / (completion_tokens - 1)`. Storing every individual
-inter-token gap is large write amplification for little gain, and the tail
-behavior that justifies per-gap data is better served by the Prometheus
-histogram.
+
+```
+(duration_ms - ttft_ms) / NULLIF(completion_tokens - 1, 0)
+```
+
+The `NULLIF` is required, not defensive styling. A single-token completion
+gives a zero denominator, and `OllamaProvider.stream` yields
+`eval_count or 0` (ollama.py:58), so `completion_tokens` can legitimately be
+**0**, producing a denominator of `-1` and a nonsensical negative ITL. Mean ITL
+is **undefined for `completion_tokens < 2`** and must be reported as such
+rather than as a number.
+
+Storing every individual inter-token gap is large write amplification for
+little gain, and the tail behavior that justifies per-gap data is better served
+by the Prometheus histogram.
 
 #### What `provider_ms` measures, and its limits
 
@@ -174,7 +209,7 @@ round trip, provider-side queueing and scheduling, token generation, response
 parse. For streaming, the first iteration of `provider.stream(payload)` through
 `StreamEnd`.
 
-Two limits, stated here so they are not rediscovered as bugs:
+Three limits, stated here so they are not rediscovered as bugs:
 
 1. **It does not separate network from provider.** A large `provider_ms` may be
    the provider being slow or gatekeep's egress being slow. Distinguishing them
@@ -182,6 +217,14 @@ Two limits, stated here so they are not rediscovered as bugs:
 2. **It lumps pre-call and post-call gateway work together.** If overhead is
    large, `duration_ms - provider_ms` says *that* but not *where*. Locating it
    is the explicitly out-of-scope Phase 3.
+3. **On the streaming path it includes client backpressure.**
+   `async for ev in provider.stream(payload)` is pull-based: the loop only
+   resumes when the consumer takes the next value, so a slow or stalled client
+   inflates `provider_ms` and every inter-token gap with time that is not the
+   provider's. TTFT is unaffected, since the first delta arrives before any
+   downstream consumption. Streamed `provider_ms` is therefore *upstream time
+   plus downstream drain time*, and is not comparable like-for-like with the
+   non-streaming figure, which has no such contamination.
 
 #### Known approximation in `duration_ms`
 
@@ -217,9 +260,9 @@ two explicit bucket sets:
 
 | Metric | Labels | Recorded by |
 |---|---|---|
-| `gatekeep_request_duration_seconds` | `[model, path]` | middleware, and SSE generators |
-| `gatekeep_provider_duration_seconds` | `[model]` | provider call sites |
-| `gatekeep_gateway_overhead_seconds` | `[model, path]` | same sites, as `duration - provider` |
+| `gatekeep_request_duration_seconds` | `[model, path]` | middleware (non-streaming), SSE generators (streaming) |
+| `gatekeep_provider_duration_seconds` | `[model]` | the two `complete` call sites, and the SSE generators |
+| `gatekeep_gateway_overhead_seconds` | `[model, path]` | endpoint and generators, at log time |
 | `gatekeep_ttft_seconds` | `[model]` | SSE generators |
 | `gatekeep_inter_token_seconds` | `[model]` | SSE generators |
 
@@ -229,6 +272,29 @@ established above, those can never co-occur.
 
 Overhead gets a real histogram rather than being derived in PromQL, because
 subtracting two histograms is not a statistically valid operation.
+
+#### Three caveats on reading these metrics
+
+**`request_duration_seconds` carries two different definitions of E2E,
+separated only by the `path` label.** For `path="stream"` it is start until the
+last token, recorded by the generator. For every other `path` it is the full
+ASGI duration, recorded by the middleware. Aggregating across all paths mixes
+the two and produces a number that means nothing. Any query or alert on this
+metric must pin `path`, or at minimum exclude `stream`.
+
+**`gateway_overhead_seconds` is not `request_duration` minus
+`provider_duration`.** It is computed at log time from the same duration the
+`duration_ms` column uses, which stops just before `log_request` (see the
+approximation note above), whereas `request_duration_seconds` is the full ASGI
+span. The difference is sub-millisecond, but the three metrics are not exactly
+algebraically consistent and should not be assumed to be.
+
+**On a cache hit, overhead equals the entire duration.** There is no provider
+call, so `provider_ms` is NULL and all elapsed time is gatekeep's own. The
+observation is still recorded, with `path="cache_exact"` or
+`path="cache_semantic"` and the full duration as the value. This is deliberate:
+"how fast is a cache hit" is one of the more useful things this feature can
+answer, and skipping the observation would throw it away.
 
 #### Cardinality
 
@@ -284,10 +350,15 @@ between deltas yields assertable TTFT and ITL.
 
 - Non-streaming populates `duration_ms` and `provider_ms`, leaves `ttft_ms`
   NULL.
-- Streaming populates all three, with `ttft_ms < duration_ms`.
+- Streaming populates all three, with `ttft_ms <= duration_ms`. The comparison
+  is deliberately non-strict: a fake provider that yields without awaiting can
+  produce equal values at float resolution, and a strict `<` would be a flaky
+  test.
 - Exact and semantic cache hits populate `duration_ms`, leave `provider_ms`
-  and `ttft_ms` NULL.
+  and `ttft_ms` NULL, and still observe `gateway_overhead_seconds`.
 - `duration_ms >= provider_ms` on every row where both are set.
+- A completion with `completion_tokens` of 0 or 1 does not produce a divide-by-
+  zero or a negative derived ITL.
 - The middleware does not observe E2E for `text/event-stream` responses.
 - Each histogram observes with the expected label set, asserted via the
   Prometheus registry.
@@ -304,5 +375,5 @@ between deltas yields assertable TTFT and ITL.
 | `gatekeep/models.py` | Three columns on `RequestLog`. |
 | `migrations/versions/0011_request_latency.py` | New Alembic revision. |
 | `gatekeep/accounting.py` | Three optional kwargs on `log_request`. |
-| `gatekeep/app.py` | Register middleware; time four provider call sites; thread `started_at` into both SSE generators; observe TTFT/ITL. |
+| `gatekeep/app.py` | Register middleware; add `request: Request` to `chat_completions` and `messages`; set `request.state.model`/`path`; time the two `complete` call sites; thread `started_at` into both SSE generators; observe TTFT/ITL. |
 | `tests/*` | Coverage per above. |
