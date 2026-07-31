@@ -70,6 +70,7 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
+from gatekeep.observability.latency import LatencyMiddleware
 from gatekeep.observability.metrics import (
     cache_cost_saved_usd,
     cache_exact_hits,
@@ -92,6 +93,9 @@ from gatekeep.samples import record_request_sample
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
+# Added first so it wraps everything: the start stamp must land before any
+# FastAPI dependency (auth, rate limit, budget) runs.
+app.add_middleware(LatencyMiddleware)
 app.include_router(dashboard_router)
 
 _DASHBOARD_DIST = pathlib.Path(__file__).resolve().parent.parent / "dashboard" / "dist"
