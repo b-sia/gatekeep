@@ -271,3 +271,57 @@ async def test_metrics_endpoint_reports_cache_semantic_hit_and_miss(client, raw_
     assert misses is not None and misses >= 1
     assert similarity_count is not None and similarity_count >= 1
     assert cost_saved is not None and cost_saved > 0
+
+
+# -- latency histograms ------------------------------------------------
+
+
+def test_latency_histograms_have_llm_appropriate_buckets():
+    """Default prometheus buckets stop at 10s, which is useless for LLM traffic."""
+    from gatekeep.observability import metrics
+
+    assert max(metrics.LATENCY_BUCKETS_WIDE) == 120
+    assert min(metrics.LATENCY_BUCKETS_WIDE) == 0.005
+    assert max(metrics.LATENCY_BUCKETS_TIGHT) == 2
+
+
+def test_request_duration_seconds_is_labeled_by_model_and_path():
+    from gatekeep.observability import metrics
+
+    metrics.request_duration_seconds.labels(
+        model="test-latency-model", path="provider"
+    ).observe(1.5)
+    samples = metrics.request_duration_seconds.collect()[0].samples
+    assert any(
+        s.name.endswith("_sum")
+        and s.labels == {"model": "test-latency-model", "path": "provider"}
+        and s.value == pytest.approx(1.5)
+        for s in samples
+    )
+
+
+def test_latency_histograms_are_not_labeled_by_key_id():
+    """key_id is unbounded; per-key latency comes from Postgres instead."""
+    from gatekeep.observability import metrics
+
+    for histogram in (
+        metrics.request_duration_seconds,
+        metrics.provider_duration_seconds,
+        metrics.gateway_overhead_seconds,
+        metrics.ttft_seconds,
+        metrics.inter_token_seconds,
+    ):
+        assert "key_id" not in histogram._labelnames
+
+
+def test_single_label_histograms_take_model_only():
+    from gatekeep.observability import metrics
+
+    metrics.ttft_seconds.labels(model="test-ttft-model").observe(0.25)
+    metrics.inter_token_seconds.labels(model="test-ttft-model").observe(0.01)
+    metrics.provider_duration_seconds.labels(model="test-ttft-model").observe(2.0)
+    samples = metrics.ttft_seconds.collect()[0].samples
+    assert any(
+        s.name.endswith("_count") and s.labels == {"model": "test-ttft-model"}
+        for s in samples
+    )

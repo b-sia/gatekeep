@@ -81,3 +81,78 @@ def observe_request(
     labels = {"model": model, "key_id": str(key_id)}
     request_tokens.labels(**labels).observe(prompt_tokens + completion_tokens)
     request_cost_usd.labels(**labels).observe(cost_usd)
+
+
+# Latency buckets. prometheus_client's defaults top out at 10s, which cannot
+# describe LLM traffic. The wide set's low end matters because cache hits
+# return in single-digit milliseconds and would otherwise all land in one
+# bucket with provider calls.
+LATENCY_BUCKETS_WIDE = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1,
+    2,
+    5,
+    10,
+    20,
+    30,
+    60,
+    120,
+)
+LATENCY_BUCKETS_TIGHT = (0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2)
+
+# `path` is one of "cache_exact", "cache_semantic", "provider", "stream". One
+# label replaces separate `cached`/`streaming` labels: streaming returns before
+# any cache lookup runs (app.py), so the two can never co-occur.
+#
+# WARNING: this metric carries two different definitions of end-to-end,
+# separated only by `path`. For path="stream" it is start until the last token,
+# recorded by the SSE generator. For every other path it is the full ASGI span,
+# recorded by LatencyMiddleware. Aggregating across all paths mixes the two;
+# queries and alerts must pin `path` or at minimum exclude "stream".
+request_duration_seconds = Histogram(
+    "gatekeep_request_duration_seconds",
+    "End-to-end request latency in seconds.",
+    ["model", "path"],
+    buckets=LATENCY_BUCKETS_WIDE,
+)
+
+provider_duration_seconds = Histogram(
+    "gatekeep_provider_duration_seconds",
+    "Time spent in the upstream provider call, in seconds.",
+    ["model"],
+    buckets=LATENCY_BUCKETS_WIDE,
+)
+
+# Not derived in PromQL: subtracting two histograms is not a statistically
+# valid operation. On a cache hit there is no provider call, so the whole
+# duration is gateway time and is recorded here in full.
+gateway_overhead_seconds = Histogram(
+    "gatekeep_gateway_overhead_seconds",
+    "Request time not spent in the upstream provider, in seconds.",
+    ["model", "path"],
+    buckets=LATENCY_BUCKETS_WIDE,
+)
+
+ttft_seconds = Histogram(
+    "gatekeep_ttft_seconds",
+    "Time to first token on a streamed completion, in seconds.",
+    ["model"],
+    buckets=LATENCY_BUCKETS_TIGHT,
+)
+
+# Providers do not guarantee one token per delta (Anthropic's text_stream
+# yields text pieces; Ollama yields per-token), so this is really inter-chunk
+# latency in provider-native units. The token-normalized figure is the
+# DB-derived mean: (duration_ms - ttft_ms) / NULLIF(completion_tokens - 1, 0).
+inter_token_seconds = Histogram(
+    "gatekeep_inter_token_seconds",
+    "Gap between consecutive streamed text deltas, in seconds.",
+    ["model"],
+    buckets=LATENCY_BUCKETS_TIGHT,
+)
