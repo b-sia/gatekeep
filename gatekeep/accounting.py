@@ -56,6 +56,9 @@ async def log_request(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
+    duration_ms: float | None = None,
+    provider_ms: float | None = None,
+    ttft_ms: float | None = None,
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
@@ -82,6 +85,12 @@ async def log_request(
     paired with `cache_cost_saved_usd` as the discount), while the budget
     cap is a "spend" control meant to track what gatekeep actually pays
     upstream - a served-from-cache response has no such spend.
+
+    `duration_ms`/`provider_ms`/`ttft_ms` are optional timing in milliseconds,
+    defaulting to None so any caller without timing available can still log.
+    `provider_ms` is None on a cache hit (no upstream call was made) and
+    `ttft_ms` is None on any non-streamed request (the concept does not
+    exist there). See gatekeep/observability/latency.py.
     """
     cost_usd = (
         cost_usd_override
@@ -101,6 +110,9 @@ async def log_request(
         prompt_name=prompt_name,
         routed_from=routed_from,
         prompt_version_num=prompt_version_num,
+        duration_ms=duration_ms,
+        provider_ms=provider_ms,
+        ttft_ms=ttft_ms,
     )
     session.add(log)
     await session.commit()

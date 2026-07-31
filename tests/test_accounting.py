@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 
 from gatekeep.accounting import calculate_cost, log_request
@@ -122,3 +123,44 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
 
     assert log.cost_usd == 0.0042
     assert log.cost_usd != calculate_cost("claude-sonnet-5", 0, 0)
+
+
+async def test_log_request_records_latency_columns(session):
+    """Timing kwargs land on the row; omitting them leaves NULLs."""
+    key = ApiKey(name="latency", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+
+    timed = await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=10,
+        completion_tokens=5,
+        response_id="resp-timed",
+        duration_ms=1234.5,
+        provider_ms=1200.0,
+        ttft_ms=300.0,
+    )
+    assert timed.duration_ms == pytest.approx(1234.5)
+    assert timed.provider_ms == pytest.approx(1200.0)
+    assert timed.ttft_ms == pytest.approx(300.0)
+
+
+async def test_log_request_latency_columns_default_to_none(session):
+    """A caller with no timing available must still be able to log."""
+    key = ApiKey(name="untimed", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+
+    untimed = await log_request(
+        session,
+        key_id=key.id,
+        model="claude-sonnet-5",
+        prompt_tokens=10,
+        completion_tokens=5,
+        response_id="resp-untimed",
+    )
+    assert untimed.duration_ms is None
+    assert untimed.provider_ms is None
+    assert untimed.ttft_ms is None

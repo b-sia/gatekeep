@@ -70,6 +70,22 @@ class RequestLog(Base):
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     routed_from: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt_version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Latency, in milliseconds. All three are nullable because each is
+    # genuinely undefined in some cases, not merely unknown:
+    #   duration_ms: request start until just before log_request. On the
+    #     non-streaming path this excludes JSON serialization and the socket
+    #     write, so it is very slightly smaller than the full-ASGI figure in
+    #     gatekeep_request_duration_seconds. On the streaming path
+    #     log_request fires at StreamEnd, so it genuinely is time-to-last-token.
+    #   provider_ms: time in the upstream call. NULL on a cache hit (no call
+    #     was made). A NULL alone cannot distinguish a cache hit from a row
+    #     predating this migration - disambiguate on `cached`, never on
+    #     `provider_ms IS NULL`.
+    #   ttft_ms: time to first token. NULL on every non-streamed request,
+    #     where the concept does not exist.
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    provider_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ttft_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         # Speeds up budget.get_period_spend's DB-fallback aggregate, which
