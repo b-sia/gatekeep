@@ -115,8 +115,12 @@ them, on the same `request.state` used for the start stamp:
 
 If either is absent when the middleware runs, the request failed before the
 endpoint body got far enough to resolve a model at all: a validation error, an
-auth rejection, a rate-limit or budget rejection, or an unknown-model
-translation error. The middleware skips the observation in that case rather
+auth rejection, a rate-limit or budget rejection, an unknown `prompt_name`, or
+a `TranslationError` from `openai_to_payload`/`messages_to_payload` (raised for
+an unsupported message role, or a request with no user/assistant message left
+after system content is lifted out). Note that an unrecognized *model* is not
+in this set: `resolve_route` has no unknown-model failure mode and falls
+through to Ollama. The middleware skips the observation in these cases rather
 than emitting an `unknown` label, so rejected traffic does not pollute the
 per-model distributions. Those rejections are already counted elsewhere (the
 rate-limit and budget metrics) and their latency is not what this spec is
