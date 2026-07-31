@@ -271,6 +271,13 @@ async def chat_completions(
     samples for.
     """
     settings = get_settings()
+    # Read the id once, up front, rather than touching `key.id` later on. A
+    # concurrent duplicate insert makes store_cached_response roll back
+    # (cache_semantic.py), and a rollback expires every object in the session
+    # even under expire_on_commit=False - after which `key.id` would attempt an
+    # implicit lazy refresh that async SQLAlchemy forbids, raising
+    # MissingGreenlet and turning a benign cache race into a 500.
+    key_id = key.id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -302,7 +309,7 @@ async def chat_completions(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key.id)).inc()
+    requests_total.labels(model=model, key_id=str(key_id)).inc()
     mark(request, model=model)
 
     if req.stream:
@@ -311,7 +318,7 @@ async def chat_completions(
                 provider,
                 payload,
                 model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
@@ -341,7 +348,7 @@ async def chat_completions(
         )
         await log_request(
             session,
-            key_id=key.id,
+            key_id=key_id,
             model=model,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
@@ -356,7 +363,7 @@ async def chat_completions(
         )
         observe_request(
             model=model,
-            key_id=key.id,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             cost_usd=cost_usd,
@@ -388,7 +395,7 @@ async def chat_completions(
             )
             await log_request(
                 session,
-                key_id=key.id,
+                key_id=key_id,
                 model=model,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
@@ -404,7 +411,7 @@ async def chat_completions(
             )
             observe_request(
                 model=model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 cost_usd=semantic_match.cached.cost_usd,
@@ -448,7 +455,7 @@ async def chat_completions(
     if req.prompt_name is not None:
         await record_request_sample(
             session,
-            key_id=key.id,
+            key_id=key_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
@@ -459,7 +466,7 @@ async def chat_completions(
     )
     await log_request(
         session,
-        key_id=key.id,
+        key_id=key_id,
         model=model,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
@@ -473,7 +480,7 @@ async def chat_completions(
     )
     observe_request(
         model=model,
-        key_id=key.id,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
@@ -504,6 +511,13 @@ async def messages(
     `openai_response_to_messages`.
     """
     settings = get_settings()
+    # Read the id once, up front, rather than touching `key.id` later on. A
+    # concurrent duplicate insert makes store_cached_response roll back
+    # (cache_semantic.py), and a rollback expires every object in the session
+    # even under expire_on_commit=False - after which `key.id` would attempt an
+    # implicit lazy refresh that async SQLAlchemy forbids, raising
+    # MissingGreenlet and turning a benign cache race into a 500.
+    key_id = key.id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -533,7 +547,7 @@ async def messages(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key.id)).inc()
+    requests_total.labels(model=model, key_id=str(key_id)).inc()
     mark(request, model=model)
 
     if req.stream:
@@ -542,7 +556,7 @@ async def messages(
                 provider,
                 payload,
                 model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
@@ -572,7 +586,7 @@ async def messages(
         )
         await log_request(
             session,
-            key_id=key.id,
+            key_id=key_id,
             model=model,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
@@ -587,7 +601,7 @@ async def messages(
         )
         observe_request(
             model=model,
-            key_id=key.id,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             cost_usd=cost_usd,
@@ -619,7 +633,7 @@ async def messages(
             )
             await log_request(
                 session,
-                key_id=key.id,
+                key_id=key_id,
                 model=model,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
@@ -635,7 +649,7 @@ async def messages(
             )
             observe_request(
                 model=model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 cost_usd=semantic_match.cached.cost_usd,
@@ -682,7 +696,7 @@ async def messages(
     if req.prompt_name is not None:
         await record_request_sample(
             session,
-            key_id=key.id,
+            key_id=key_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
@@ -693,7 +707,7 @@ async def messages(
     )
     await log_request(
         session,
-        key_id=key.id,
+        key_id=key_id,
         model=model,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
@@ -707,7 +721,7 @@ async def messages(
     )
     observe_request(
         model=model,
-        key_id=key.id,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
