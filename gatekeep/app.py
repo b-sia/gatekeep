@@ -172,6 +172,90 @@ def get_provider(name: str) -> _GatewayProvider:
     return _providers[name]
 
 
+async def _finish_request(
+    request: Request,
+    session: AsyncSession,
+    *,
+    model: str,
+    path: str,
+    provider_ms: float | None,
+    key_id: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    response_id: str,
+    cost_usd: float,
+    cached: bool = False,
+    cache_key: str | None = None,
+    cost_usd_override: float | None = None,
+    prompt_name: str | None = None,
+    prompt_version_num: int | None = None,
+    routed_from: str | None = None,
+):
+    """Publish latency labels and record accounting for one completed
+    non-streaming request, at whichever branch (cache_exact, cache_semantic,
+    or provider) actually served it.
+
+    Bundles the four calls that otherwise have to be repeated at every branch
+    exit: `mark` (publishes the histogram labels the middleware itself cannot
+    resolve), `observe_non_streaming` (gateway overhead / provider duration
+    histograms), `log_request` (the DB accounting row), and `observe_request`
+    (token-count / cost histograms).
+
+    Args:
+        request: The Starlette request carrying `state.started_at`.
+        session: DB session to persist the `RequestLog` row through.
+        model: Resolved model id, used as the metric label.
+        path: One of "cache_exact", "cache_semantic", "provider".
+        provider_ms: Upstream call duration, or None on a cache hit.
+        key_id: The requesting API key's id.
+        prompt_tokens: Input token count to record.
+        completion_tokens: Output token count to record.
+        response_id: The id to store on the `RequestLog` row.
+        cost_usd: Cost to record on the token/cost histograms.
+        cached: Whether this was served from a cache.
+        cache_key: The cache key served from, if `cached`.
+        cost_usd_override: Cost to store on `RequestLog` in place of a
+            freshly calculated one, e.g. a semantic-cache hit logging the
+            original generation's cost instead of $0.
+        prompt_name: The prompt template served, if any.
+        prompt_version_num: Which `PromptVersion` served the request, if any.
+        routed_from: The originally requested model, if cost-routing chose a
+            cheaper substitute.
+
+    Returns:
+        The `LatencyTimings` for this request.
+    """
+    mark(request, path=path)
+    timings = observe_non_streaming(
+        request, model=model, path=path, provider_ms=provider_ms
+    )
+    await log_request(
+        session,
+        key_id=key_id,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        response_id=response_id,
+        cached=cached,
+        cache_key=cache_key,
+        cost_usd_override=cost_usd_override,
+        prompt_name=prompt_name,
+        prompt_version_num=prompt_version_num,
+        routed_from=routed_from,
+        duration_ms=timings.duration_ms,
+        provider_ms=timings.provider_ms,
+        ttft_ms=timings.ttft_ms,
+    )
+    observe_request(
+        model=model,
+        key_id=key_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
+    )
+    return timings
+
+
 @app.exception_handler(FastAPIHTTPException)
 async def _http_exception_handler(
     request: Request, exc: FastAPIHTTPException
@@ -342,31 +426,21 @@ async def chat_completions(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
-        mark(request, path="cache_exact")
-        timings = observe_non_streaming(
-            request, model=model, path="cache_exact", provider_ms=None
-        )
-        await log_request(
+        await _finish_request(
+            request,
             session,
-            key_id=key_id,
             model=model,
+            path="cache_exact",
+            provider_ms=None,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
+            cost_usd=cost_usd,
             cached=True,
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
-            duration_ms=timings.duration_ms,
-            provider_ms=timings.provider_ms,
-            ttft_ms=timings.ttft_ms,
-        )
-        observe_request(
-            model=model,
-            key_id=key_id,
-            prompt_tokens=cached.usage.prompt_tokens,
-            completion_tokens=cached.usage.completion_tokens,
-            cost_usd=cost_usd,
         )
         return JSONResponse(content=cached.model_dump())
     cache_exact_misses.labels(model=model).inc()
@@ -389,32 +463,22 @@ async def chat_completions(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
-            mark(request, path="cache_semantic")
-            timings = observe_non_streaming(
-                request, model=model, path="cache_semantic", provider_ms=None
-            )
-            await log_request(
+            await _finish_request(
+                request,
                 session,
-                key_id=key_id,
                 model=model,
+                path="cache_semantic",
+                provider_ms=None,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
+                cost_usd=semantic_match.cached.cost_usd,
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
-                duration_ms=timings.duration_ms,
-                provider_ms=timings.provider_ms,
-                ttft_ms=timings.ttft_ms,
-            )
-            observe_request(
-                model=model,
-                key_id=key_id,
-                prompt_tokens=semantic_response.usage.prompt_tokens,
-                completion_tokens=semantic_response.usage.completion_tokens,
-                cost_usd=semantic_match.cached.cost_usd,
             )
             return JSONResponse(content=semantic_response.model_dump())
         cache_semantic_misses.labels(model=model).inc()
@@ -461,29 +525,20 @@ async def chat_completions(
             input_messages=payload["messages"],
             output_text=response.choices[0].message.content or "",
         )
-    timings = observe_non_streaming(
-        request, model=model, path="provider", provider_ms=provider_ms
-    )
-    await log_request(
+    await _finish_request(
+        request,
         session,
-        key_id=key_id,
         model=model,
+        path="provider",
+        provider_ms=provider_ms,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
-        duration_ms=timings.duration_ms,
-        provider_ms=timings.provider_ms,
-        ttft_ms=timings.ttft_ms,
-    )
-    observe_request(
-        model=model,
-        key_id=key_id,
-        prompt_tokens=result.input_tokens,
-        completion_tokens=result.output_tokens,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
     )
     return JSONResponse(content=response.model_dump())
 
@@ -580,31 +635,21 @@ async def messages(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
-        mark(request, path="cache_exact")
-        timings = observe_non_streaming(
-            request, model=model, path="cache_exact", provider_ms=None
-        )
-        await log_request(
+        await _finish_request(
+            request,
             session,
-            key_id=key_id,
             model=model,
+            path="cache_exact",
+            provider_ms=None,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
+            cost_usd=cost_usd,
             cached=True,
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
-            duration_ms=timings.duration_ms,
-            provider_ms=timings.provider_ms,
-            ttft_ms=timings.ttft_ms,
-        )
-        observe_request(
-            model=model,
-            key_id=key_id,
-            prompt_tokens=cached.usage.prompt_tokens,
-            completion_tokens=cached.usage.completion_tokens,
-            cost_usd=cost_usd,
         )
         return JSONResponse(content=openai_response_to_messages(cached).model_dump())
     cache_exact_misses.labels(model=model).inc()
@@ -627,32 +672,22 @@ async def messages(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
-            mark(request, path="cache_semantic")
-            timings = observe_non_streaming(
-                request, model=model, path="cache_semantic", provider_ms=None
-            )
-            await log_request(
+            await _finish_request(
+                request,
                 session,
-                key_id=key_id,
                 model=model,
+                path="cache_semantic",
+                provider_ms=None,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
+                cost_usd=semantic_match.cached.cost_usd,
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
-                duration_ms=timings.duration_ms,
-                provider_ms=timings.provider_ms,
-                ttft_ms=timings.ttft_ms,
-            )
-            observe_request(
-                model=model,
-                key_id=key_id,
-                prompt_tokens=semantic_response.usage.prompt_tokens,
-                completion_tokens=semantic_response.usage.completion_tokens,
-                cost_usd=semantic_match.cached.cost_usd,
             )
             return JSONResponse(
                 content=openai_response_to_messages(semantic_response).model_dump()
@@ -702,29 +737,20 @@ async def messages(
             input_messages=payload["messages"],
             output_text=messages_response.content[0].text,
         )
-    timings = observe_non_streaming(
-        request, model=model, path="provider", provider_ms=provider_ms
-    )
-    await log_request(
+    await _finish_request(
+        request,
         session,
-        key_id=key_id,
         model=model,
+        path="provider",
+        provider_ms=provider_ms,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=messages_response.id,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
-        duration_ms=timings.duration_ms,
-        provider_ms=timings.provider_ms,
-        ttft_ms=timings.ttft_ms,
-    )
-    observe_request(
-        model=model,
-        key_id=key_id,
-        prompt_tokens=result.input_tokens,
-        completion_tokens=result.output_tokens,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
     )
     return JSONResponse(content=messages_response.model_dump())
 
