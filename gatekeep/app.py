@@ -70,6 +70,12 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
+from gatekeep.observability.latency import (
+    LatencyMiddleware,
+    StreamTimer,
+    mark,
+    observe_non_streaming,
+)
 from gatekeep.observability.metrics import (
     cache_cost_saved_usd,
     cache_exact_hits,
@@ -92,6 +98,9 @@ from gatekeep.samples import record_request_sample
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="gatekeep")
+# Added first so it wraps everything: the start stamp must land before any
+# FastAPI dependency (auth, rate limit, budget) runs.
+app.add_middleware(LatencyMiddleware)
 app.include_router(dashboard_router)
 
 _DASHBOARD_DIST = pathlib.Path(__file__).resolve().parent.parent / "dashboard" / "dist"
@@ -163,6 +172,89 @@ def get_provider(name: str) -> _GatewayProvider:
     return _providers[name]
 
 
+async def _finish_request(
+    request: Request,
+    session: AsyncSession,
+    *,
+    model: str,
+    path: str,
+    provider_ms: float | None,
+    key_id: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    response_id: str,
+    cost_usd: float,
+    cached: bool = False,
+    cache_key: str | None = None,
+    cost_usd_override: float | None = None,
+    prompt_name: str | None = None,
+    prompt_version_num: int | None = None,
+    routed_from: str | None = None,
+):
+    """Publish latency labels and record accounting for one completed
+    non-streaming request, at whichever branch (cache_exact, cache_semantic,
+    or provider) actually served it.
+
+    Bundles the four calls that otherwise have to be repeated at every branch
+    exit: `mark` (publishes the histogram labels the middleware itself cannot
+    resolve), `observe_non_streaming` (gateway overhead / provider duration
+    histograms), `log_request` (the DB accounting row), and `observe_request`
+    (token-count / cost histograms).
+
+    Args:
+        request: The Starlette request carrying `state.started_at`.
+        session: DB session to persist the `RequestLog` row through.
+        model: Resolved model id, used as the metric label.
+        path: One of "cache_exact", "cache_semantic", "provider".
+        provider_ms: Upstream call duration, or None on a cache hit.
+        key_id: The requesting API key's id.
+        prompt_tokens: Input token count to record.
+        completion_tokens: Output token count to record.
+        response_id: The id to store on the `RequestLog` row.
+        cost_usd: Cost to record on the token/cost histograms.
+        cached: Whether this was served from a cache.
+        cache_key: The cache key served from, if `cached`.
+        cost_usd_override: Cost to store on `RequestLog` in place of a
+            freshly calculated one, e.g. a semantic-cache hit logging the
+            original generation's cost instead of $0.
+        prompt_name: The prompt template served, if any.
+        prompt_version_num: Which `PromptVersion` served the request, if any.
+        routed_from: The originally requested model, if cost-routing chose a
+            cheaper substitute.
+
+    Returns:
+        The `LatencyTimings` for this request.
+    """
+    mark(request, path=path)
+    timings = observe_non_streaming(
+        request, model=model, path=path, provider_ms=provider_ms
+    )
+    await log_request(
+        session,
+        key_id=key_id,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        response_id=response_id,
+        cached=cached,
+        cache_key=cache_key,
+        cost_usd_override=cost_usd_override,
+        prompt_name=prompt_name,
+        prompt_version_num=prompt_version_num,
+        routed_from=routed_from,
+        duration_ms=timings.duration_ms,
+        provider_ms=timings.provider_ms,
+        ttft_ms=timings.ttft_ms,
+    )
+    observe_request(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
+    )
+    return timings
+
+
 @app.exception_handler(FastAPIHTTPException)
 async def _http_exception_handler(
     request: Request, exc: FastAPIHTTPException
@@ -218,6 +310,7 @@ async def metrics() -> Response:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
+    request: Request,
     req: ChatCompletionRequest,
     key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
@@ -261,6 +354,13 @@ async def chat_completions(
     samples for.
     """
     settings = get_settings()
+    # Read the id once, up front, rather than touching `key.id` later on. A
+    # concurrent duplicate insert makes store_cached_response roll back
+    # (cache_semantic.py), and a rollback expires every object in the session
+    # even under expire_on_commit=False - after which `key.id` would attempt an
+    # implicit lazy refresh that async SQLAlchemy forbids, raising
+    # MissingGreenlet and turning a benign cache race into a 500.
+    key_id = key.id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -292,7 +392,8 @@ async def chat_completions(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key.id)).inc()
+    requests_total.labels(model=model).inc()
+    mark(request, model=model)
 
     if req.stream:
         return StreamingResponse(
@@ -300,10 +401,11 @@ async def chat_completions(
                 provider,
                 payload,
                 model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
+                started_at=getattr(request.state, "started_at", None),
             ),
             media_type="text/event-stream",
         )
@@ -323,24 +425,21 @@ async def chat_completions(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
-        await log_request(
+        await _finish_request(
+            request,
             session,
-            key_id=key.id,
             model=model,
+            path="cache_exact",
+            provider_ms=None,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
+            cost_usd=cost_usd,
             cached=True,
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
-        )
-        observe_request(
-            model=model,
-            key_id=key.id,
-            prompt_tokens=cached.usage.prompt_tokens,
-            completion_tokens=cached.usage.completion_tokens,
-            cost_usd=cost_usd,
         )
         return JSONResponse(content=cached.model_dump())
     cache_exact_misses.labels(model=model).inc()
@@ -363,33 +462,34 @@ async def chat_completions(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
-            await log_request(
+            await _finish_request(
+                request,
                 session,
-                key_id=key.id,
                 model=model,
+                path="cache_semantic",
+                provider_ms=None,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
+                cost_usd=semantic_match.cached.cost_usd,
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
             )
-            observe_request(
-                model=model,
-                key_id=key.id,
-                prompt_tokens=semantic_response.usage.prompt_tokens,
-                completion_tokens=semantic_response.usage.completion_tokens,
-                cost_usd=semantic_match.cached.cost_usd,
-            )
             return JSONResponse(content=semantic_response.model_dump())
         cache_semantic_misses.labels(model=model).inc()
 
+    # Marked before the call so a provider error still carries labels.
+    mark(request, path="provider")
+    provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error(exc)
+    provider_ms = (time.perf_counter() - provider_started) * 1000
     response = result_to_openai(result, model=model)
     try:
         await set_cached_response(
@@ -418,35 +518,33 @@ async def chat_completions(
     if req.prompt_name is not None:
         await record_request_sample(
             session,
-            key_id=key.id,
+            key_id=key_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
             output_text=response.choices[0].message.content or "",
         )
-    await log_request(
+    await _finish_request(
+        request,
         session,
-        key_id=key.id,
         model=model,
+        path="provider",
+        provider_ms=provider_ms,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
-    )
-    observe_request(
-        model=model,
-        key_id=key.id,
-        prompt_tokens=result.input_tokens,
-        completion_tokens=result.output_tokens,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
     )
     return JSONResponse(content=response.model_dump())
 
 
 @app.post("/v1/messages")
 async def messages(
+    request: Request,
     req: MessagesRequest,
     key: ApiKey = Depends(require_budget),
     session: AsyncSession = Depends(get_session),
@@ -467,6 +565,13 @@ async def messages(
     `openai_response_to_messages`.
     """
     settings = get_settings()
+    # Read the id once, up front, rather than touching `key.id` later on. A
+    # concurrent duplicate insert makes store_cached_response roll back
+    # (cache_semantic.py), and a rollback expires every object in the session
+    # even under expire_on_commit=False - after which `key.id` would attempt an
+    # implicit lazy refresh that async SQLAlchemy forbids, raising
+    # MissingGreenlet and turning a benign cache race into a 500.
+    key_id = key.id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -496,7 +601,8 @@ async def messages(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key.id)).inc()
+    requests_total.labels(model=model).inc()
+    mark(request, model=model)
 
     if req.stream:
         return StreamingResponse(
@@ -504,10 +610,11 @@ async def messages(
                 provider,
                 payload,
                 model,
-                key_id=key.id,
+                key_id=key_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
+                started_at=getattr(request.state, "started_at", None),
             ),
             media_type="text/event-stream",
         )
@@ -527,24 +634,21 @@ async def messages(
             model, cached.usage.prompt_tokens, cached.usage.completion_tokens
         )
         cache_cost_saved_usd.inc(cost_usd)
-        await log_request(
+        await _finish_request(
+            request,
             session,
-            key_id=key.id,
             model=model,
+            path="cache_exact",
+            provider_ms=None,
+            key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
+            cost_usd=cost_usd,
             cached=True,
             cache_key=request_hash,
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
-        )
-        observe_request(
-            model=model,
-            key_id=key.id,
-            prompt_tokens=cached.usage.prompt_tokens,
-            completion_tokens=cached.usage.completion_tokens,
-            cost_usd=cost_usd,
         )
         return JSONResponse(content=openai_response_to_messages(cached).model_dump())
     cache_exact_misses.labels(model=model).inc()
@@ -567,35 +671,36 @@ async def messages(
             )
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
-            await log_request(
+            await _finish_request(
+                request,
                 session,
-                key_id=key.id,
                 model=model,
+                path="cache_semantic",
+                provider_ms=None,
+                key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
+                cost_usd=semantic_match.cached.cost_usd,
                 cached=True,
                 cache_key="semantic",
                 cost_usd_override=semantic_match.cached.cost_usd,
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
             )
-            observe_request(
-                model=model,
-                key_id=key.id,
-                prompt_tokens=semantic_response.usage.prompt_tokens,
-                completion_tokens=semantic_response.usage.completion_tokens,
-                cost_usd=semantic_match.cached.cost_usd,
-            )
             return JSONResponse(
                 content=openai_response_to_messages(semantic_response).model_dump()
             )
         cache_semantic_misses.labels(model=model).inc()
 
+    # Marked before the call so a provider error still carries labels.
+    mark(request, path="provider")
+    provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
         return map_provider_error_anthropic(exc)
+    provider_ms = (time.perf_counter() - provider_started) * 1000
     openai_shaped = result_to_openai(result, model=model)
     messages_response = result_to_messages(result, model=model)
     try:
@@ -625,29 +730,26 @@ async def messages(
     if req.prompt_name is not None:
         await record_request_sample(
             session,
-            key_id=key.id,
+            key_id=key_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
             output_text=messages_response.content[0].text,
         )
-    await log_request(
+    await _finish_request(
+        request,
         session,
-        key_id=key.id,
         model=model,
+        path="provider",
+        provider_ms=provider_ms,
+        key_id=key_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=messages_response.id,
+        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
-    )
-    observe_request(
-        model=model,
-        key_id=key.id,
-        prompt_tokens=result.input_tokens,
-        completion_tokens=result.output_tokens,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
     )
     return JSONResponse(content=messages_response.model_dump())
 
@@ -661,6 +763,7 @@ async def _messages_sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
+    started_at: float | None = None,
 ):
     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
 
@@ -670,15 +773,22 @@ async def _messages_sse(
     `log_request` once the stream ends, using its own DB session for the
     same reason `_sse` does (the request-scoped session dependency is
     already closed by the time this generator keeps running).
+
+    `started_at` is the middleware's start stamp, passed in because a
+    StreamingResponse is returned before the provider is ever called, so the
+    middleware cannot time this path itself.
     """
     message_id = new_message_id()
+    timer = StreamTimer(started_at, model=model)
     yield _anthropic_event(
         "message_start", message_start_event(id=message_id, model=model)
     )
     yield _anthropic_event("content_block_start", content_block_start_event())
     try:
+        timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
+                timer.delta()
                 yield _anthropic_event(
                     "content_block_delta", content_block_delta_event(ev.text)
                 )
@@ -692,6 +802,7 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
+                timings = timer.finish()
                 async with SessionLocal() as session:
                     await log_request(
                         session,
@@ -703,10 +814,12 @@ async def _messages_sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        duration_ms=timings.duration_ms,
+                        provider_ms=timings.provider_ms,
+                        ttft_ms=timings.ttft_ms,
                     )
                 observe_request(
                     model=model,
-                    key_id=key_id,
                     prompt_tokens=ev.input_tokens,
                     completion_tokens=ev.output_tokens,
                     cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
@@ -733,6 +846,7 @@ async def _sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
+    started_at: float | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
@@ -742,13 +856,21 @@ async def _sse(
     via `log_request` once the stream ends, using its own DB session since
     this generator keeps running after the request-scoped session dependency
     has already been closed.
+
+    `started_at` is the middleware's start stamp, passed in because a
+    StreamingResponse is returned before the provider is ever called, so the
+    middleware cannot time this path itself. Timing is recorded via StreamTimer
+    and lands on the same RequestLog row.
     """
     completion_id = new_completion_id()
     created = int(time.time())
+    timer = StreamTimer(started_at, model=model)
     yield _event(role_chunk(id=completion_id, created=created, model=model))
     try:
+        timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
+                timer.delta()
                 yield _event(
                     text_chunk(ev.text, id=completion_id, created=created, model=model)
                 )
@@ -758,6 +880,7 @@ async def _sse(
                         ev.stop_reason, id=completion_id, created=created, model=model
                     )
                 )
+                timings = timer.finish()
                 async with SessionLocal() as session:
                     await log_request(
                         session,
@@ -769,10 +892,12 @@ async def _sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        duration_ms=timings.duration_ms,
+                        provider_ms=timings.provider_ms,
+                        ttft_ms=timings.ttft_ms,
                     )
                 observe_request(
                     model=model,
-                    key_id=key_id,
                     prompt_tokens=ev.input_tokens,
                     completion_tokens=ev.output_tokens,
                     cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),

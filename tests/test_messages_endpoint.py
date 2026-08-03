@@ -260,3 +260,43 @@ async def test_unknown_prompt_name_returns_anthropic_shaped_400(client, raw_key)
     body = r.json()
     assert body["type"] == "error"
     assert body["error"]["type"] == "invalid_request_error"
+
+
+async def test_messages_non_streaming_records_latency(client, raw_key, session):
+    """The Anthropic-native endpoint records the same columns as the OpenAI one."""
+    response = await client.post(
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert response.status_code == 200
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.duration_ms is not None and log.duration_ms > 0
+    assert log.provider_ms is not None
+    assert log.duration_ms >= log.provider_ms
+    assert log.ttft_ms is None
+
+
+async def test_messages_streaming_records_ttft(client, raw_key, session):
+    async with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        async for _ in response.aiter_lines():
+            pass
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.ttft_ms is not None
+    assert log.duration_ms is not None
+    assert log.ttft_ms <= log.duration_ms

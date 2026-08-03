@@ -191,14 +191,10 @@ async def test_check_budget_fires_alert_only_once_per_threshold_per_period(sessi
     redis = get_redis()
     await record_spend(redis, key_id=key.id, cost_usd=8.5)
 
-    before = budget_alerts_total.labels(
-        key_id=str(key.id), threshold="warning"
-    )._value.get()
+    before = budget_alerts_total.labels(threshold="warning")._value.get()
     await check_budget(session, redis, key, alert_threshold=0.8)
     await check_budget(session, redis, key, alert_threshold=0.8)
-    after = budget_alerts_total.labels(
-        key_id=str(key.id), threshold="warning"
-    )._value.get()
+    after = budget_alerts_total.labels(threshold="warning")._value.get()
     assert after - before == 1
 
 

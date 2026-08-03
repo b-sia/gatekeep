@@ -150,6 +150,31 @@ curl http://localhost:8100/metrics | grep gatekeep_cache_exact_hits
 
 `/metrics` is a Prometheus-format endpoint (unauthenticated, like `/healthz`); `docker-compose.yml` also runs Prometheus and a Grafana dashboard at `http://localhost:3000` for cost, usage, and cache-hit-rate visualization.
 
+Latency metrics:
+
+- `gatekeep_request_duration_seconds{model,path}` - end-to-end latency.
+  **Pin `path` when querying.** For `path="stream"` this is start until the
+  last token; for every other path it is the full request span. Aggregating
+  across paths mixes two different definitions.
+- `gatekeep_provider_duration_seconds{model}` - time in the upstream call. On
+  the streaming path this includes downstream backpressure, since the stream
+  loop is pull-based, so it is not comparable like-for-like with the
+  non-streaming figure.
+- `gatekeep_gateway_overhead_seconds{model,path}` - request time not spent
+  upstream. On a cache hit this is the entire duration.
+- `gatekeep_ttft_seconds{model}` - time to first token, streaming only.
+- `gatekeep_inter_token_seconds{model}` - gap between streamed deltas. This is
+  really inter-*chunk* latency: providers do not guarantee one token per delta.
+  The token-normalized figure is derived from `request_logs` instead, as
+  `(duration_ms - ttft_ms) / NULLIF(completion_tokens - 1, 0)`, which is
+  undefined below two completion tokens.
+
+Per-request latency is also stored on `request_logs` as `duration_ms`,
+`provider_ms`, and `ttft_ms`. `provider_ms` is NULL on a cache hit and
+`ttft_ms` is NULL on any non-streamed request. A NULL `provider_ms` alone
+cannot distinguish a cache hit from a row predating the migration - filter on
+`cached`.
+
 Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt create/promote/rollback ...`) are cache-aware: promoting a new prompt version automatically invalidates any cached responses that were built using the old version, so clients never see a stale answer generated from a prompt that's no longer active.
 
 ## Dashboard

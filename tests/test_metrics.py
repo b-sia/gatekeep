@@ -51,7 +51,6 @@ def test_observe_request_records_token_and_cost_histograms():
 
     observe_request(
         model="test-model-tokens",
-        key_id=999,
         prompt_tokens=10,
         completion_tokens=5,
         cost_usd=0.002,
@@ -73,8 +72,8 @@ def test_observe_request_records_token_and_cost_histograms():
 # -- check_rate_limit wiring (via require_rate_limit dependency) --------
 
 
-async def test_check_rate_limit_sets_gauge_directly():
-    """check_rate_limit itself doesn't touch metrics; the gauge is set by the
+async def test_check_rate_limit_returns_raw_token_math():
+    """check_rate_limit itself doesn't touch metrics; that's done by the
     require_rate_limit dependency. This just documents the raw values used."""
     redis = get_redis()
     allowed, tokens = await check_rate_limit(
@@ -185,18 +184,31 @@ async def test_metrics_endpoint_reports_request_totals_after_a_completion(
     assert value >= 1
 
 
-async def test_metrics_endpoint_reports_rate_limit_gauge_after_a_completion(
-    client, raw_key
+async def test_metrics_endpoint_reports_rate_limit_rejections_after_a_429(
+    client, raw_key, monkeypatch
 ):
-    body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi again"}]}
+    from gatekeep.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "rate_limit_tokens_per_min", 1)
+    monkeypatch.setattr(settings, "rate_limit_refill_rate", 1 / 60)
+
+    body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "burn it"}]}
     await client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {raw_key}"},
         json=body,
     )
+    rejected = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body,
+    )
+    assert rejected.status_code == 429
+
     resp = await client.get("/metrics")
-    families = {f.name: f for f in text_string_to_metric_families(resp.text)}
-    assert "gatekeep_rate_limit_remaining" in families
+    value = _metric_sample(resp.text, "gatekeep_rate_limit_rejections_total", {})
+    assert value is not None and value >= 1
 
 
 async def test_metrics_endpoint_reports_cache_exact_hit_and_miss(client, raw_key):
@@ -271,3 +283,71 @@ async def test_metrics_endpoint_reports_cache_semantic_hit_and_miss(client, raw_
     assert misses is not None and misses >= 1
     assert similarity_count is not None and similarity_count >= 1
     assert cost_saved is not None and cost_saved > 0
+
+
+# -- latency histograms ------------------------------------------------
+
+
+def test_latency_histograms_have_llm_appropriate_buckets():
+    """Default prometheus buckets stop at 10s, which is useless for LLM traffic."""
+    from gatekeep.observability import metrics
+
+    assert max(metrics.LATENCY_BUCKETS_WIDE) == 120
+    assert min(metrics.LATENCY_BUCKETS_WIDE) == 0.005
+    assert max(metrics.LATENCY_BUCKETS_TIGHT) == 2
+
+
+def test_request_duration_seconds_is_labeled_by_model_and_path():
+    from gatekeep.observability import metrics
+
+    metrics.request_duration_seconds.labels(
+        model="test-latency-model", path="provider"
+    ).observe(1.5)
+    samples = metrics.request_duration_seconds.collect()[0].samples
+    assert any(
+        s.name.endswith("_sum")
+        and s.labels == {"model": "test-latency-model", "path": "provider"}
+        and s.value == pytest.approx(1.5)
+        for s in samples
+    )
+
+
+def test_latency_histograms_are_not_labeled_by_key_id():
+    """key_id is unbounded; per-key latency comes from Postgres instead."""
+    from gatekeep.observability import metrics
+
+    for histogram in (
+        metrics.request_duration_seconds,
+        metrics.provider_duration_seconds,
+        metrics.gateway_overhead_seconds,
+        metrics.ttft_seconds,
+        metrics.inter_token_seconds,
+    ):
+        assert "key_id" not in histogram._labelnames
+
+
+def test_request_and_budget_metrics_are_not_labeled_by_key_id():
+    """key_id is unbounded; per-key cost/usage comes from Postgres via
+    /dashboard/api/usage/summary instead."""
+    from gatekeep.observability import metrics
+
+    for metric in (
+        metrics.requests_total,
+        metrics.request_tokens,
+        metrics.request_cost_usd,
+        metrics.budget_alerts_total,
+    ):
+        assert "key_id" not in metric._labelnames
+
+
+def test_single_label_histograms_take_model_only():
+    from gatekeep.observability import metrics
+
+    metrics.ttft_seconds.labels(model="test-ttft-model").observe(0.25)
+    metrics.inter_token_seconds.labels(model="test-ttft-model").observe(0.01)
+    metrics.provider_duration_seconds.labels(model="test-ttft-model").observe(2.0)
+    samples = metrics.ttft_seconds.collect()[0].samples
+    assert any(
+        s.name.endswith("_count") and s.labels == {"model": "test-ttft-model"}
+        for s in samples
+    )

@@ -13,7 +13,8 @@
   "panels": [
     {
       "id": 1,
-      "title": "Cost per key (last 7 days)",
+      "title": "Cost per model (last 7 days)",
+      "description": "Per-key cost is unbounded cardinality and not tracked in Prometheus; see GET /dashboard/api/usage/summary?key_id=... for a per-key breakdown.",
       "type": "barchart",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": {
@@ -27,8 +28,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(gatekeep_request_cost_usd_sum[7d])) by (key_id)",
-          "legendFormat": "key {{key_id}}"
+          "expr": "sum(increase(gatekeep_request_cost_usd_sum[7d])) by (model)",
+          "legendFormat": "{{model}}"
         }
       ]
     },
@@ -78,7 +79,7 @@
     },
     {
       "id": 4,
-      "title": "Rate limit exhaustions",
+      "title": "Rate limit rejections",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "fieldConfig": {
@@ -88,8 +89,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count_over_time((gatekeep_rate_limit_remaining{} == 0)[5m:1m])",
-          "legendFormat": "key {{key_id}} exhausted"
+          "expr": "sum(increase(gatekeep_rate_limit_rejections_total[5m]))",
+          "legendFormat": "429s (rate limited)"
         }
       ]
     },

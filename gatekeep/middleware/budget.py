@@ -13,7 +13,7 @@ from gatekeep.config import get_settings
 from gatekeep.db import get_session
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
 from gatekeep.models import ApiKey, RequestLog
-from gatekeep.observability.metrics import budget_alerts_total, budget_spend_usd
+from gatekeep.observability.metrics import budget_alerts_total
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,7 @@ async def _maybe_alert(
                 budget,
                 period,
             )
-            budget_alerts_total.labels(key_id=str(key_id), threshold="exceeded").inc()
+            budget_alerts_total.labels(threshold="exceeded").inc()
     elif spent >= budget * alert_threshold:
         if await _fire_alert_if_new(redis, key_id, period, "warning"):
             logger.warning(
@@ -210,7 +210,7 @@ async def _maybe_alert(
                 alert_threshold * 100,
                 period,
             )
-            budget_alerts_total.labels(key_id=str(key_id), threshold="warning").inc()
+            budget_alerts_total.labels(threshold="warning").inc()
 
 
 async def check_budget(
@@ -249,7 +249,6 @@ async def check_budget(
     now = now or dt.datetime.now(dt.timezone.utc)
     period = _current_period(now)
     spent = await get_period_spend(session, redis, key_id=key.id, now=now)
-    budget_spend_usd.labels(key_id=str(key.id)).set(spent)
 
     threshold = (
         alert_threshold
