@@ -152,10 +152,15 @@ curl http://localhost:8100/metrics | grep gatekeep_cache_exact_hits
 
 Latency metrics:
 
-- `gatekeep_request_duration_seconds{model,path}` - end-to-end latency.
-  **Pin `path` when querying.** For `path="stream"` this is start until the
-  last token; for every other path it is the full request span. Aggregating
-  across paths mixes two different definitions.
+- `gatekeep_request_duration_seconds{model,path}` - end-to-end latency, the
+  full request span on every `path`, recorded in one place. `path` is one of
+  `cache_exact`, `cache_semantic`, `provider`, `stream`. Aggregating across
+  paths is valid, but the distributions differ by orders of magnitude, so a
+  pinned `path` is usually the more useful query.
+- `gatekeep_time_to_last_token_seconds{model}` - request start until the last
+  streamed token, streaming only. Smaller than
+  `gatekeep_request_duration_seconds{path="stream"}` for the same request,
+  which also covers the trailing SSE events and response teardown.
 - `gatekeep_provider_duration_seconds{model}` - time in the upstream call. On
   the streaming path this includes downstream backpressure, since the stream
   loop is pull-based, so it is not comparable like-for-like with the

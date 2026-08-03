@@ -698,21 +698,30 @@ async def test_cache_hit_leaves_provider_ms_null(client, raw_key, session):
     assert logs[1].ttft_ms is None
 
 
-async def test_middleware_does_not_record_e2e_for_sse(client, raw_key):
-    """Streaming self-reports; a middleware observation would be recorded before
-    the provider was even called."""
+async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_key):
+    """One recorder per metric: the middleware owns E2E on every path, and the
+    ASGI span necessarily contains the token span it is compared against."""
     from gatekeep.observability import metrics
 
-    def sum_for(path):
-        for sample in metrics.request_duration_seconds.collect()[0].samples:
-            if sample.name.endswith("_sum") and sample.labels == {
-                "model": "claude-sonnet-5",
-                "path": path,
-            }:
+    def sample_for(histogram, suffix, labels):
+        for sample in histogram.collect()[0].samples:
+            if sample.name.endswith(suffix) and sample.labels == labels:
                 return sample.value
         return 0.0
 
-    before_provider = sum_for("provider")
+    e2e_labels = {"model": "claude-sonnet-5", "path": "stream"}
+    ttlt_labels = {"model": "claude-sonnet-5"}
+    before_e2e_count = sample_for(
+        metrics.request_duration_seconds, "_count", e2e_labels
+    )
+    before_e2e_sum = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels)
+    before_ttlt_count = sample_for(
+        metrics.time_to_last_token_seconds, "_count", ttlt_labels
+    )
+    before_ttlt_sum = sample_for(
+        metrics.time_to_last_token_seconds, "_sum", ttlt_labels
+    )
+
     async with client.stream(
         "POST",
         "/v1/chat/completions",
@@ -725,5 +734,19 @@ async def test_middleware_does_not_record_e2e_for_sse(client, raw_key):
     ) as response:
         async for _ in response.aiter_lines():
             pass
-    assert sum_for("provider") == before_provider
-    assert sum_for("stream") > 0
+
+    e2e_delta = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels) - (
+        before_e2e_sum
+    )
+    ttlt_delta = sample_for(metrics.time_to_last_token_seconds, "_sum", ttlt_labels) - (
+        before_ttlt_sum
+    )
+    assert (
+        sample_for(metrics.request_duration_seconds, "_count", e2e_labels)
+        == before_e2e_count + 1
+    ), "exactly one E2E observation per streamed request, no double-count"
+    assert (
+        sample_for(metrics.time_to_last_token_seconds, "_count", ttlt_labels)
+        == before_ttlt_count + 1
+    )
+    assert e2e_delta >= ttlt_delta, "the ASGI span contains the time-to-last-token span"
