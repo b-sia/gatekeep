@@ -396,6 +396,7 @@ async def chat_completions(
     mark(request, model=model)
 
     if req.stream:
+        mark(request, path="stream")
         return StreamingResponse(
             _sse(
                 provider,
@@ -605,6 +606,7 @@ async def messages(
     mark(request, model=model)
 
     if req.stream:
+        mark(request, path="stream")
         return StreamingResponse(
             _messages_sse(
                 provider,

@@ -9,10 +9,9 @@ from gatekeep.observability.metrics import (
     inter_token_seconds,
     provider_duration_seconds,
     request_duration_seconds,
+    time_to_last_token_seconds,
     ttft_seconds,
 )
-
-_SSE_CONTENT_TYPE = b"text/event-stream"
 
 
 @dataclass(frozen=True)
@@ -40,9 +39,11 @@ class LatencyMiddleware:
     Starlette backs `request.state` with `scope["state"]`, so endpoints read the
     same dict.
 
-    On the way out it observes `request_duration_seconds`, but skips responses
-    with a `text/event-stream` content type: those are self-reported by the SSE
-    generator, which is the only place that knows when the last token was sent.
+    On the way out it observes `request_duration_seconds` for every request,
+    streaming included: the ASGI call does not return until the response body
+    is fully sent, so the measured span covers the whole stream. This is the
+    only writer of that histogram, which is what lets the metric carry a single
+    definition of end-to-end across all `path` values.
 
     It also skips any request that never published `model` and `path` onto the
     state, rather than emitting an "unknown" label. That covers both
@@ -68,23 +69,9 @@ class LatencyMiddleware:
 
         state = scope.setdefault("state", {})
         state["started_at"] = time.perf_counter()
-        is_sse = False
 
-        async def send_wrapper(message: dict) -> None:
-            """Note whether the response is SSE, then forward the message."""
-            nonlocal is_sse
-            if message["type"] == "http.response.start":
-                for name, value in message.get("headers", []):
-                    if name.lower() == b"content-type" and value.lower().startswith(
-                        _SSE_CONTENT_TYPE
-                    ):
-                        is_sse = True
-            await send(message)
+        await self.app(scope, receive, send)
 
-        await self.app(scope, receive, send_wrapper)
-
-        if is_sse:
-            return
         model = state.get("model")
         path = state.get("path")
         if model is None or path is None:
@@ -104,10 +91,10 @@ def mark(request: Any, *, model: str | None = None, path: str | None = None) -> 
     Args:
         request: The Starlette request whose state to annotate.
         model: Resolved model id, if known at this point.
-        path: One of "cache_exact", "cache_semantic", "provider". Never
-            "stream": the middleware skips SSE responses and the generator
-            labels its own observation, so a "stream" value here would be dead
-            state.
+        path: One of "cache_exact", "cache_semantic", "provider", "stream".
+            The streaming endpoints set "stream" before returning their
+            StreamingResponse, since the middleware observes that request too
+            and cannot tell from the scope which branch produced it.
     """
     if model is not None:
         request.state.model = model
@@ -157,8 +144,11 @@ def observe_non_streaming(
 class StreamTimer:
     """Times one streamed completion from inside its SSE generator.
 
-    `StreamingResponse` returns before the provider is called, so the middleware
-    cannot time streaming at all; the generator has to self-report.
+    The middleware measures the full ASGI span for streamed requests as it does
+    for any other, so end-to-end is not this class's job. What only the
+    generator can see is where the tokens land inside that span: TTFT, the gaps
+    between deltas, and time-to-last-token, which stops at the final delta
+    rather than at the end of the response body.
 
     Note that `provider_ms` measured here includes downstream backpressure. The
     `async for` over `provider.stream(...)` is pull-based, so a slow client
@@ -204,8 +194,10 @@ class StreamTimer:
 
         Returns:
             A LatencyTimings for log_request, all-None if no start stamp was
-            available. `duration_ms` here genuinely is time-to-last-token, since
-            log_request fires at StreamEnd.
+            available. `duration_ms` here is time-to-last-token, matching both
+            the `request_logs.duration_ms` column and
+            `time_to_last_token_seconds`, and is slightly smaller than the
+            middleware's `request_duration_seconds` for the same request.
         """
         if self._started_at is None:
             return _NO_TIMINGS
@@ -217,9 +209,7 @@ class StreamTimer:
             if self._provider_started_at is None
             else (now - self._provider_started_at) * 1000
         )
-        request_duration_seconds.labels(model=self._model, path="stream").observe(
-            duration_ms / 1000
-        )
+        time_to_last_token_seconds.labels(model=self._model).observe(duration_ms / 1000)
         overhead_ms = duration_ms if provider_ms is None else duration_ms - provider_ms
         gateway_overhead_seconds.labels(model=self._model, path="stream").observe(
             max(overhead_ms, 0.0) / 1000
