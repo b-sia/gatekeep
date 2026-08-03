@@ -213,9 +213,13 @@ async def test_full_flow_miss_exact_hit_semantic_hit_ratelimit_and_metrics(
     requests_total = _metric_sample(
         metrics_resp.text, "gatekeep_requests_total", {"model": "claude-sonnet-5"}
     )
+    rate_limit_rejections = _metric_sample(
+        metrics_resp.text, "gatekeep_rate_limit_rejections_total", {}
+    )
     assert exact_hits is not None and exact_hits >= 1
     assert semantic_hits is not None and semantic_hits >= 1
     assert requests_total is not None and requests_total >= 1
+    assert rate_limit_rejections is not None and rate_limit_rejections >= 1
 
 
 async def test_prompt_update_invalidates_cache(client, raw_key, session):

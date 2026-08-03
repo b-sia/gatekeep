@@ -248,7 +248,6 @@ async def _finish_request(
     )
     observe_request(
         model=model,
-        key_id=key_id,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cost_usd=cost_usd,
@@ -393,7 +392,7 @@ async def chat_completions(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key_id)).inc()
+    requests_total.labels(model=model).inc()
     mark(request, model=model)
 
     if req.stream:
@@ -602,7 +601,7 @@ async def messages(
             model = chosen
             payload["model"] = chosen
 
-    requests_total.labels(model=model, key_id=str(key_id)).inc()
+    requests_total.labels(model=model).inc()
     mark(request, model=model)
 
     if req.stream:
@@ -821,7 +820,6 @@ async def _messages_sse(
                     )
                 observe_request(
                     model=model,
-                    key_id=key_id,
                     prompt_tokens=ev.input_tokens,
                     completion_tokens=ev.output_tokens,
                     cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
@@ -900,7 +898,6 @@ async def _sse(
                     )
                 observe_request(
                     model=model,
-                    key_id=key_id,
                     prompt_tokens=ev.input_tokens,
                     completion_tokens=ev.output_tokens,
                     cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),

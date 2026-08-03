@@ -51,7 +51,6 @@ def test_observe_request_records_token_and_cost_histograms():
 
     observe_request(
         model="test-model-tokens",
-        key_id=999,
         prompt_tokens=10,
         completion_tokens=5,
         cost_usd=0.002,
@@ -73,8 +72,8 @@ def test_observe_request_records_token_and_cost_histograms():
 # -- check_rate_limit wiring (via require_rate_limit dependency) --------
 
 
-async def test_check_rate_limit_sets_gauge_directly():
-    """check_rate_limit itself doesn't touch metrics; the gauge is set by the
+async def test_check_rate_limit_returns_raw_token_math():
+    """check_rate_limit itself doesn't touch metrics; that's done by the
     require_rate_limit dependency. This just documents the raw values used."""
     redis = get_redis()
     allowed, tokens = await check_rate_limit(
@@ -185,18 +184,31 @@ async def test_metrics_endpoint_reports_request_totals_after_a_completion(
     assert value >= 1
 
 
-async def test_metrics_endpoint_reports_rate_limit_gauge_after_a_completion(
-    client, raw_key
+async def test_metrics_endpoint_reports_rate_limit_rejections_after_a_429(
+    client, raw_key, monkeypatch
 ):
-    body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi again"}]}
+    from gatekeep.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "rate_limit_tokens_per_min", 1)
+    monkeypatch.setattr(settings, "rate_limit_refill_rate", 1 / 60)
+
+    body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "burn it"}]}
     await client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {raw_key}"},
         json=body,
     )
+    rejected = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body,
+    )
+    assert rejected.status_code == 429
+
     resp = await client.get("/metrics")
-    families = {f.name: f for f in text_string_to_metric_families(resp.text)}
-    assert "gatekeep_rate_limit_remaining" in families
+    value = _metric_sample(resp.text, "gatekeep_rate_limit_rejections_total", {})
+    assert value is not None and value >= 1
 
 
 async def test_metrics_endpoint_reports_cache_exact_hit_and_miss(client, raw_key):
@@ -312,6 +324,20 @@ def test_latency_histograms_are_not_labeled_by_key_id():
         metrics.inter_token_seconds,
     ):
         assert "key_id" not in histogram._labelnames
+
+
+def test_request_and_budget_metrics_are_not_labeled_by_key_id():
+    """key_id is unbounded; per-key cost/usage comes from Postgres via
+    /dashboard/api/usage/summary instead."""
+    from gatekeep.observability import metrics
+
+    for metric in (
+        metrics.requests_total,
+        metrics.request_tokens,
+        metrics.request_cost_usd,
+        metrics.budget_alerts_total,
+    ):
+        assert "key_id" not in metric._labelnames
 
 
 def test_single_label_histograms_take_model_only():

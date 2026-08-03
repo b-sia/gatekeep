@@ -8,6 +8,7 @@ from gatekeep.middleware.ratelimit import (
     require_rate_limit,
 )
 from gatekeep.models import ApiKey
+from gatekeep.observability.metrics import rate_limit_rejections_total
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +98,7 @@ async def test_require_rate_limit_rejects_with_429_and_retry_after(
     await session.commit()
     await session.refresh(key)
 
+    before = rate_limit_rejections_total._value.get()
     await require_rate_limit(key=key)
     with pytest.raises(HTTPException) as ei:
         await require_rate_limit(key=key)
@@ -104,6 +106,7 @@ async def test_require_rate_limit_rejects_with_429_and_retry_after(
     assert ei.value.detail["error"]["type"] == "rate_limit_error"
     assert "Retry-After" in ei.value.headers
     assert int(ei.value.headers["Retry-After"]) >= 1
+    assert rate_limit_rejections_total._value.get() - before == 1
 
 
 async def test_require_rate_limit_fails_closed_with_503_on_redis_outage(
