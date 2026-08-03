@@ -711,12 +711,16 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
 
     e2e_labels = {"model": "claude-sonnet-5", "path": "stream"}
     ttlt_labels = {"model": "claude-sonnet-5"}
-    before_e2e_count = sample_for(metrics.request_duration_seconds, "_count", e2e_labels)
+    before_e2e_count = sample_for(
+        metrics.request_duration_seconds, "_count", e2e_labels
+    )
     before_e2e_sum = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels)
     before_ttlt_count = sample_for(
         metrics.time_to_last_token_seconds, "_count", ttlt_labels
     )
-    before_ttlt_sum = sample_for(metrics.time_to_last_token_seconds, "_sum", ttlt_labels)
+    before_ttlt_sum = sample_for(
+        metrics.time_to_last_token_seconds, "_sum", ttlt_labels
+    )
 
     async with client.stream(
         "POST",

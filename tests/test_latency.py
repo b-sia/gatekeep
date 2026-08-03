@@ -91,7 +91,9 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
     """E2E for streams is the middleware's job now; the timer owns TTLT."""
     e2e_labels = {"model": "m-ttlt", "path": "stream"}
     before_e2e = _sum_for(metrics.request_duration_seconds, e2e_labels)
-    before_ttlt = _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"}) or 0.0
+    before_ttlt = (
+        _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"}) or 0.0
+    )
 
     timer = StreamTimer(0.0, model="m-ttlt")
     timer.provider_started()
@@ -100,7 +102,9 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
 
     assert _sum_for(metrics.request_duration_seconds, e2e_labels) == before_e2e
     after_ttlt = _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"})
-    assert after_ttlt - before_ttlt == pytest.approx(timings.duration_ms / 1000, rel=1e-3)
+    assert after_ttlt - before_ttlt == pytest.approx(
+        timings.duration_ms / 1000, rel=1e-3
+    )
 
 
 def test_stream_timer_without_started_at_is_a_no_op():
