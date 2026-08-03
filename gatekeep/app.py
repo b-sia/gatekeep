@@ -406,7 +406,7 @@ async def chat_completions(
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
-                started_at=getattr(request.state, "started_at", None),
+                state=request.scope["state"],
             ),
             media_type="text/event-stream",
         )
@@ -616,7 +616,7 @@ async def messages(
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
-                started_at=getattr(request.state, "started_at", None),
+                state=request.scope["state"],
             ),
             media_type="text/event-stream",
         )
@@ -765,7 +765,7 @@ async def _messages_sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
-    started_at: float | None = None,
+    state: dict | None = None,
 ):
     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
 
@@ -776,13 +776,16 @@ async def _messages_sse(
     same reason `_sse` does (the request-scoped session dependency is
     already closed by the time this generator keeps running).
 
-    `started_at` is the middleware's start stamp, passed in because the
-    generator runs after the endpoint has returned and can no longer reach
-    `request.state`. The middleware still records end-to-end for this request;
-    what the generator adds is TTFT, inter-token gaps, and time-to-last-token.
+    `state` is `request.scope["state"]`, passed in because the generator runs
+    after the endpoint has returned and can no longer reach the `request`
+    object itself. It doubles as the channel back to the middleware:
+    `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
+    derive `gateway_overhead_seconds` once the stream closes. The middleware
+    still records end-to-end for this request; what the generator adds is
+    TTFT, inter-token gaps, and time-to-last-token.
     """
     message_id = new_message_id()
-    timer = StreamTimer(started_at, model=model)
+    timer = StreamTimer(state, model=model)
     yield _anthropic_event(
         "message_start", message_start_event(id=message_id, model=model)
     )
@@ -849,7 +852,7 @@ async def _sse(
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
-    started_at: float | None = None,
+    state: dict | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
@@ -860,15 +863,18 @@ async def _sse(
     this generator keeps running after the request-scoped session dependency
     has already been closed.
 
-    `started_at` is the middleware's start stamp, passed in because the
-    generator runs after the endpoint has returned and can no longer reach
-    `request.state`. The middleware still records end-to-end for this request;
-    what the generator adds is TTFT, inter-token gaps, and time-to-last-token.
-    Timing is recorded via StreamTimer and lands on the same RequestLog row.
+    `state` is `request.scope["state"]`, passed in because the generator runs
+    after the endpoint has returned and can no longer reach the `request`
+    object itself. It doubles as the channel back to the middleware:
+    `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
+    derive `gateway_overhead_seconds` once the stream closes. The middleware
+    still records end-to-end for this request; what the generator adds is
+    TTFT, inter-token gaps, and time-to-last-token. Timing is recorded via
+    StreamTimer and lands on the same RequestLog row.
     """
     completion_id = new_completion_id()
     created = int(time.time())
-    timer = StreamTimer(started_at, model=model)
+    timer = StreamTimer(state, model=model)
     yield _event(role_chunk(id=completion_id, created=created, model=model))
     try:
         timer.provider_started()

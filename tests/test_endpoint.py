@@ -711,6 +711,7 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
 
     e2e_labels = {"model": "claude-sonnet-5", "path": "stream"}
     ttlt_labels = {"model": "claude-sonnet-5"}
+    overhead_labels = {"model": "claude-sonnet-5", "path": "stream"}
     before_e2e_count = sample_for(
         metrics.request_duration_seconds, "_count", e2e_labels
     )
@@ -720,6 +721,15 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     )
     before_ttlt_sum = sample_for(
         metrics.time_to_last_token_seconds, "_sum", ttlt_labels
+    )
+    before_overhead_count = sample_for(
+        metrics.gateway_overhead_seconds, "_count", overhead_labels
+    )
+    before_overhead_sum = sample_for(
+        metrics.gateway_overhead_seconds, "_sum", overhead_labels
+    )
+    before_provider_sum = sample_for(
+        metrics.provider_duration_seconds, "_sum", ttlt_labels
     )
 
     async with client.stream(
@@ -741,6 +751,14 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     ttlt_delta = sample_for(metrics.time_to_last_token_seconds, "_sum", ttlt_labels) - (
         before_ttlt_sum
     )
+    overhead_delta = (
+        sample_for(metrics.gateway_overhead_seconds, "_sum", overhead_labels)
+        - before_overhead_sum
+    )
+    provider_delta = (
+        sample_for(metrics.provider_duration_seconds, "_sum", ttlt_labels)
+        - before_provider_sum
+    )
     assert (
         sample_for(metrics.request_duration_seconds, "_count", e2e_labels)
         == before_e2e_count + 1
@@ -750,3 +768,11 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
         == before_ttlt_count + 1
     )
     assert e2e_delta >= ttlt_delta, "the ASGI span contains the time-to-last-token span"
+    assert (
+        sample_for(metrics.gateway_overhead_seconds, "_count", overhead_labels)
+        == before_overhead_count + 1
+    ), "exactly one overhead observation per streamed request, no double-count"
+    assert overhead_delta == pytest.approx(e2e_delta - provider_delta, rel=1e-3), (
+        "overhead is derived from the same E2E span as request_duration_seconds, "
+        "so it must equal duration minus provider exactly on the stream path"
+    )

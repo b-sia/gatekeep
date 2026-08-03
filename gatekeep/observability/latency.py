@@ -30,6 +30,15 @@ class LatencyTimings:
 
 _NO_TIMINGS = LatencyTimings(duration_ms=None, provider_ms=None, ttft_ms=None)
 
+# Sentinel distinguishing "provider_ms not published" (mark() leaves the state
+# key untouched) from "published as None" (a cache hit: no provider call, so
+# the entire span counts as overhead). Both read back as None from
+# `state.get("provider_ms")` and are handled identically by the middleware,
+# but the sentinel is what lets `mark()` keep its usual "None means leave
+# alone" convention for model/path while still letting provider_ms be set to
+# None on purpose.
+_UNSET = object()
+
 
 class LatencyMiddleware:
     """Pure ASGI middleware stamping request start and observing end-to-end latency.
@@ -39,11 +48,15 @@ class LatencyMiddleware:
     Starlette backs `request.state` with `scope["state"]`, so endpoints read the
     same dict.
 
-    On the way out it observes `request_duration_seconds` for every request,
-    streaming included: the ASGI call does not return until the response body
-    is fully sent, so the measured span covers the whole stream. This is the
-    only writer of that histogram, which is what lets the metric carry a single
-    definition of end-to-end across all `path` values.
+    On the way out it observes `request_duration_seconds` and
+    `gateway_overhead_seconds` for every request, streaming included: the ASGI
+    call does not return until the response body is fully sent, so the
+    measured span covers the whole stream. This is the only writer of either
+    histogram, which is what lets both carry a single definition of "overhead"
+    and "end-to-end" across all `path` values - `gateway_overhead_seconds` is
+    computed from the exact same span as `request_duration_seconds`, so
+    `overhead = duration - provider` holds by construction, not just on
+    average.
 
     It also skips any request that never published `model` and `path` onto the
     state, rather than emitting an "unknown" label. That covers both
@@ -76,16 +89,30 @@ class LatencyMiddleware:
         path = state.get("path")
         if model is None or path is None:
             return
-        request_duration_seconds.labels(model=model, path=path).observe(
-            time.perf_counter() - state["started_at"]
+        e2e_seconds = time.perf_counter() - state["started_at"]
+        request_duration_seconds.labels(model=model, path=path).observe(e2e_seconds)
+
+        provider_ms = state.get("provider_ms")
+        overhead_seconds = (
+            e2e_seconds if provider_ms is None else e2e_seconds - provider_ms / 1000
+        )
+        gateway_overhead_seconds.labels(model=model, path=path).observe(
+            max(overhead_seconds, 0.0)
         )
 
 
-def mark(request: Any, *, model: str | None = None, path: str | None = None) -> None:
+def mark(
+    request: Any,
+    *,
+    model: str | None = None,
+    path: str | None = None,
+    provider_ms: float | None = _UNSET,
+) -> None:
     """Publish the histogram labels the middleware cannot resolve on its own.
 
     `model` is only known after translation and possible cost-based routing;
-    `path` only after the cache lookups have run. Both are written to
+    `path` only after the cache lookups have run; `provider_ms` only once the
+    upstream call (or cache lookup) has completed. All are written to
     `request.state`, which the middleware reads via `scope["state"]`.
 
     Args:
@@ -95,24 +122,32 @@ def mark(request: Any, *, model: str | None = None, path: str | None = None) -> 
             The streaming endpoints set "stream" before returning their
             StreamingResponse, since the middleware observes that request too
             and cannot tell from the scope which branch produced it.
+        provider_ms: Upstream call duration, feeding the middleware's
+            `gateway_overhead_seconds` observation. Pass None explicitly (as
+            the cache paths do) to mark a request as having no provider call,
+            so the middleware counts the entire span as overhead. Leaving
+            this unset (the default) does not touch `state["provider_ms"]`,
+            distinct from passing None.
     """
     if model is not None:
         request.state.model = model
     if path is not None:
         request.state.path = path
+    if provider_ms is not _UNSET:
+        request.state.provider_ms = provider_ms
 
 
 def observe_non_streaming(
     request: Any, *, model: str, path: str, provider_ms: float | None = None
 ) -> LatencyTimings:
-    """Observe overhead and provider histograms for a non-streamed request.
+    """Observe the provider-duration histogram and publish overhead inputs
+    for a non-streamed request.
 
-    Deliberately does not observe `request_duration_seconds`: the middleware
-    already does that for non-streaming responses, and observing here too would
-    double-count. The duration returned here stops at the call site (just before
-    `log_request`) rather than at the end of the ASGI span, so
-    `gateway_overhead_seconds` is not exactly `request_duration_seconds` minus
-    `provider_duration_seconds`. The difference is sub-millisecond.
+    Deliberately does not observe `request_duration_seconds` or
+    `gateway_overhead_seconds` directly: the middleware owns both, and
+    observing here too would double-count. Instead this publishes
+    `provider_ms` onto `request.state` via `mark()` so the middleware can
+    derive overhead from its own end-to-end span once the response closes.
 
     Args:
         request: The Starlette request carrying `state.started_at`.
@@ -130,10 +165,7 @@ def observe_non_streaming(
         return _NO_TIMINGS
 
     duration_ms = (time.perf_counter() - started_at) * 1000
-    overhead_ms = duration_ms if provider_ms is None else duration_ms - provider_ms
-    gateway_overhead_seconds.labels(model=model, path=path).observe(
-        max(overhead_ms, 0.0) / 1000
-    )
+    mark(request, provider_ms=provider_ms)
     if provider_ms is not None:
         provider_duration_seconds.labels(model=model).observe(provider_ms / 1000)
     return LatencyTimings(
@@ -156,14 +188,23 @@ class StreamTimer:
     the provider's. TTFT is unaffected, since the first delta arrives before any
     downstream consumption.
 
+    `finish()` publishes `provider_ms` onto `state["provider_ms"]` rather than
+    observing `gateway_overhead_seconds` itself: the generator has no
+    `request` to call `mark()` on (it outlives the endpoint that returned it),
+    but `state` is the same `scope["state"]` dict the middleware reads back
+    once the stream closes, so writing into it here is equivalent.
+
     Args:
-        started_at: `request.state.started_at`, or None if unavailable, in which
-            case every method becomes a no-op and `finish` returns all-None.
+        state: `request.scope["state"]`, or None if unavailable, in which case
+            every method becomes a no-op and `finish` returns all-None. Reused
+            rather than a bare `started_at` float so `finish()` has somewhere
+            to publish `provider_ms` back to the middleware.
         model: Resolved model id, used as the metric label.
     """
 
-    def __init__(self, started_at: float | None, *, model: str) -> None:
-        self._started_at = started_at
+    def __init__(self, state: dict | None, *, model: str) -> None:
+        self._state = state
+        self._started_at = None if state is None else state.get("started_at")
         self._model = model
         self._provider_started_at: float | None = None
         self._last_delta_at: float | None = None
@@ -210,10 +251,9 @@ class StreamTimer:
             else (now - self._provider_started_at) * 1000
         )
         time_to_last_token_seconds.labels(model=self._model).observe(duration_ms / 1000)
-        overhead_ms = duration_ms if provider_ms is None else duration_ms - provider_ms
-        gateway_overhead_seconds.labels(model=self._model, path="stream").observe(
-            max(overhead_ms, 0.0) / 1000
-        )
+        # self._state is never None here: self._started_at is only set from
+        # state.get(...), so a non-None started_at implies a non-None state.
+        self._state["provider_ms"] = provider_ms
         if provider_ms is not None:
             provider_duration_seconds.labels(model=self._model).observe(
                 provider_ms / 1000

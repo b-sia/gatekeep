@@ -262,7 +262,7 @@ two explicit bucket sets:
 |---|---|---|
 | `gatekeep_request_duration_seconds` | `[model, path]` | middleware (all paths) |
 | `gatekeep_provider_duration_seconds` | `[model]` | the two `complete` call sites, and the SSE generators |
-| `gatekeep_gateway_overhead_seconds` | `[model, path]` | endpoint and generators, at log time |
+| `gatekeep_gateway_overhead_seconds` | `[model, path]` | middleware (all paths) |
 | `gatekeep_ttft_seconds` | `[model]` | SSE generators |
 | `gatekeep_inter_token_seconds` | `[model]` | SSE generators |
 | `gatekeep_time_to_last_token_seconds` | `[model]` | SSE generators |
@@ -287,15 +287,18 @@ moved to `gatekeep_time_to_last_token_seconds{model}`, which sits alongside
 `ttft_seconds` and `inter_token_seconds` as the third streaming-only,
 `(model,)`-labeled metric.
 
-**`gateway_overhead_seconds` is not `request_duration` minus
-`provider_duration`.** It is computed at log time from the same duration the
-`duration_ms` column uses, which stops just before `log_request` (see the
-approximation note above), whereas `request_duration_seconds` is the full ASGI
-span. The difference is sub-millisecond, but the three metrics are not exactly
-algebraically consistent and should not be assumed to be. On the streaming
-path the gap is larger than sub-millisecond, since overhead is computed
-against time-to-last-token while `request_duration_seconds` runs to the end of
-the response body.
+**Revised 2026-08-03: `gateway_overhead_seconds` is now `request_duration_seconds`
+minus `provider_duration`, exactly.** It used to be computed at each call site
+against that call site's own duration span - log-time for non-streaming,
+time-to-last-token for streaming - which didn't match `request_duration_seconds`'s
+full-ASGI span. The mismatch was sub-millisecond on the non-streaming path but
+sizable on the streaming path once `request_duration_seconds` started running
+to the end of the response body instead of stopping at the last token. The
+middleware now owns both histograms and derives overhead from its own
+end-to-end span (`e2e - provider_ms`, endpoints and generators publish
+`provider_ms` onto `request.state` rather than observing overhead themselves),
+so `overhead = duration - provider` holds by construction on every path, not
+just on average.
 
 **On a cache hit, overhead equals the entire duration.** There is no provider
 call, so `provider_ms` is NULL and all elapsed time is gatekeep's own. The
