@@ -260,11 +260,12 @@ two explicit bucket sets:
 
 | Metric | Labels | Recorded by |
 |---|---|---|
-| `gatekeep_request_duration_seconds` | `[model, path]` | middleware (non-streaming), SSE generators (streaming) |
+| `gatekeep_request_duration_seconds` | `[model, path]` | middleware (all paths) |
 | `gatekeep_provider_duration_seconds` | `[model]` | the two `complete` call sites, and the SSE generators |
 | `gatekeep_gateway_overhead_seconds` | `[model, path]` | endpoint and generators, at log time |
 | `gatekeep_ttft_seconds` | `[model]` | SSE generators |
 | `gatekeep_inter_token_seconds` | `[model]` | SSE generators |
+| `gatekeep_time_to_last_token_seconds` | `[model]` | SSE generators |
 
 `path` takes one of `cache_exact`, `cache_semantic`, `provider`, `stream`. A
 single label replaces separate `cached` and `streaming` labels because, as
@@ -275,19 +276,26 @@ subtracting two histograms is not a statistically valid operation.
 
 #### Three caveats on reading these metrics
 
-**`request_duration_seconds` carries two different definitions of E2E,
-separated only by the `path` label.** For `path="stream"` it is start until the
-last token, recorded by the generator. For every other `path` it is the full
-ASGI duration, recorded by the middleware. Aggregating across all paths mixes
-the two and produces a number that means nothing. Any query or alert on this
-metric must pin `path`, or at minimum exclude `stream`.
+**Revised 2026-08-03: `request_duration_seconds` had two definitions of E2E,
+and no longer does.** As originally shipped, `path="stream"` meant start until
+the last token (recorded by the generator) while every other path meant the
+full ASGI span (recorded by the middleware), so any query that did not pin
+`path` aggregated two incomparable spans. The premise was wrong: the ASGI call
+does not return until the streamed body is fully sent, so the middleware can
+time streaming after all. It now records every path, and start-until-last-token
+moved to `gatekeep_time_to_last_token_seconds{model}`, which sits alongside
+`ttft_seconds` and `inter_token_seconds` as the third streaming-only,
+`(model,)`-labeled metric.
 
 **`gateway_overhead_seconds` is not `request_duration` minus
 `provider_duration`.** It is computed at log time from the same duration the
 `duration_ms` column uses, which stops just before `log_request` (see the
 approximation note above), whereas `request_duration_seconds` is the full ASGI
 span. The difference is sub-millisecond, but the three metrics are not exactly
-algebraically consistent and should not be assumed to be.
+algebraically consistent and should not be assumed to be. On the streaming
+path the gap is larger than sub-millisecond, since overhead is computed
+against time-to-last-token while `request_duration_seconds` runs to the end of
+the response body.
 
 **On a cache hit, overhead equals the entire duration.** There is no provider
 call, so `provider_ms` is NULL and all elapsed time is gatekeep's own. The

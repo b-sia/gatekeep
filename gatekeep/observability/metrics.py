@@ -107,11 +107,12 @@ LATENCY_BUCKETS_TIGHT = (0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2)
 # label replaces separate `cached`/`streaming` labels: streaming returns before
 # any cache lookup runs (app.py), so the two can never co-occur.
 #
-# WARNING: this metric carries two different definitions of end-to-end,
-# separated only by `path`. For path="stream" it is start until the last token,
-# recorded by the SSE generator. For every other path it is the full ASGI span,
-# recorded by LatencyMiddleware. Aggregating across all paths mixes the two;
-# queries and alerts must pin `path` or at minimum exclude "stream".
+# One definition on every path: the full ASGI span, written only by
+# LatencyMiddleware. Aggregating across paths is therefore meaningful, though
+# the distributions differ wildly (a cache hit is milliseconds, a stream is
+# however long generation takes), so pinning `path` is usually still what you
+# want. Streaming's start-until-last-token lives in
+# time_to_last_token_seconds, deliberately under a different metric name.
 request_duration_seconds = Histogram(
     "gatekeep_request_duration_seconds",
     "End-to-end request latency in seconds.",

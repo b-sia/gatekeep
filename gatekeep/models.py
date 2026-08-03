@@ -72,11 +72,13 @@ class RequestLog(Base):
     prompt_version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Latency, in milliseconds. All three are nullable because each is
     # genuinely undefined in some cases, not merely unknown:
-    #   duration_ms: request start until just before log_request. On the
-    #     non-streaming path this excludes JSON serialization and the socket
-    #     write, so it is very slightly smaller than the full-ASGI figure in
-    #     gatekeep_request_duration_seconds. On the streaming path
-    #     log_request fires at StreamEnd, so it genuinely is time-to-last-token.
+    #   duration_ms: request start until just before log_request, so on every
+    #     path it is slightly smaller than the full-ASGI figure in
+    #     gatekeep_request_duration_seconds - it excludes JSON serialization
+    #     and the socket write on the non-streaming path, and the trailing
+    #     events plus body teardown on the streaming one. On the streaming path
+    #     log_request fires at StreamEnd, so it is time-to-last-token and
+    #     matches gatekeep_time_to_last_token_seconds.
     #   provider_ms: time in the upstream call. NULL on a cache hit (no call
     #     was made). A NULL alone cannot distinguish a cache hit from a row
     #     predating this migration - disambiguate on `cached`, never on

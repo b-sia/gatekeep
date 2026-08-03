@@ -776,9 +776,10 @@ async def _messages_sse(
     same reason `_sse` does (the request-scoped session dependency is
     already closed by the time this generator keeps running).
 
-    `started_at` is the middleware's start stamp, passed in because a
-    StreamingResponse is returned before the provider is ever called, so the
-    middleware cannot time this path itself.
+    `started_at` is the middleware's start stamp, passed in because the
+    generator runs after the endpoint has returned and can no longer reach
+    `request.state`. The middleware still records end-to-end for this request;
+    what the generator adds is TTFT, inter-token gaps, and time-to-last-token.
     """
     message_id = new_message_id()
     timer = StreamTimer(started_at, model=model)
@@ -859,10 +860,11 @@ async def _sse(
     this generator keeps running after the request-scoped session dependency
     has already been closed.
 
-    `started_at` is the middleware's start stamp, passed in because a
-    StreamingResponse is returned before the provider is ever called, so the
-    middleware cannot time this path itself. Timing is recorded via StreamTimer
-    and lands on the same RequestLog row.
+    `started_at` is the middleware's start stamp, passed in because the
+    generator runs after the endpoint has returned and can no longer reach
+    `request.state`. The middleware still records end-to-end for this request;
+    what the generator adds is TTFT, inter-token gaps, and time-to-last-token.
+    Timing is recorded via StreamTimer and lands on the same RequestLog row.
     """
     completion_id = new_completion_id()
     created = int(time.time())
