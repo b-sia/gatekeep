@@ -312,6 +312,23 @@ def test_request_duration_seconds_is_labeled_by_model_and_path():
     )
 
 
+def test_time_to_last_token_seconds_is_model_labeled_with_wide_buckets():
+    """Streamed generation length belongs on the wide bucket set, not the tight
+    per-token one, and takes no `path`: it exists only for streaming."""
+    from gatekeep.observability import metrics
+
+    assert metrics.time_to_last_token_seconds._labelnames == ("model",)
+    assert 120 in metrics.time_to_last_token_seconds._upper_bounds
+    metrics.time_to_last_token_seconds.labels(model="test-ttlt-model").observe(3.0)
+    samples = metrics.time_to_last_token_seconds.collect()[0].samples
+    assert any(
+        s.name.endswith("_sum")
+        and s.labels == {"model": "test-ttlt-model"}
+        and s.value == pytest.approx(3.0)
+        for s in samples
+    )
+
+
 def test_latency_histograms_are_not_labeled_by_key_id():
     """key_id is unbounded; per-key latency comes from Postgres instead."""
     from gatekeep.observability import metrics
@@ -322,6 +339,7 @@ def test_latency_histograms_are_not_labeled_by_key_id():
         metrics.gateway_overhead_seconds,
         metrics.ttft_seconds,
         metrics.inter_token_seconds,
+        metrics.time_to_last_token_seconds,
     ):
         assert "key_id" not in histogram._labelnames
 

@@ -153,3 +153,16 @@ inter_token_seconds = Histogram(
     ["model"],
     buckets=LATENCY_BUCKETS_TIGHT,
 )
+
+# Streaming-only, and deliberately separate from request_duration_seconds: the
+# span from request start to the last token is a different quantity from the
+# full ASGI span, and folding both into one metric under different label values
+# makes any unpinned aggregation meaningless. Wide buckets, because this scales
+# with generation length. Pairs with ttft_seconds and inter_token_seconds, which
+# are likewise (model,)-labeled and streaming-only.
+time_to_last_token_seconds = Histogram(
+    "gatekeep_time_to_last_token_seconds",
+    "Request start until the last streamed token, in seconds.",
+    ["model"],
+    buckets=LATENCY_BUCKETS_WIDE,
+)
