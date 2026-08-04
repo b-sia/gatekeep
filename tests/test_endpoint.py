@@ -23,6 +23,15 @@ from gatekeep.prompts import (
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
 
 
+def sample_for(histogram, suffix, labels):
+    """Return a histogram's `_sum`/`_count` sample value for an exact label
+    set, or 0.0 if that label combination hasn't been observed yet."""
+    for sample in histogram.collect()[0].samples:
+        if sample.name.endswith(suffix) and sample.labels == labels:
+            return sample.value
+    return 0.0
+
+
 @pytest.fixture(autouse=True)
 async def _clean_cache():
     """Flush exact-cache, rate-limit, and budget keys so tests in this file
@@ -52,6 +61,18 @@ class FakeProvider:
         yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
 
 
+class BrokenProvider:
+    """Raises before ever completing, so provider_ms never gets published -
+    `mark(request, path="provider")` still runs first (app.py:487)."""
+
+    async def complete(self, payload):
+        raise RuntimeError("upstream exploded")
+
+    async def stream(self, payload):
+        raise RuntimeError("upstream exploded")
+        yield  # pragma: no cover - unreachable, makes this an async generator
+
+
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
@@ -67,6 +88,18 @@ async def client(monkeypatch):
     monkeypatch.setitem(app_module._providers, "ollama", fake)
     monkeypatch.setitem(app_module._providers, "openai", fake)
     monkeypatch.setitem(app_module._providers, "google", fake)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def broken_client(monkeypatch):
+    broken = BrokenProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", broken)
+    monkeypatch.setitem(app_module._providers, "ollama", broken)
+    monkeypatch.setitem(app_module._providers, "openai", broken)
+    monkeypatch.setitem(app_module._providers, "google", broken)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -703,12 +736,6 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     ASGI span necessarily contains the token span it is compared against."""
     from gatekeep.observability import metrics
 
-    def sample_for(histogram, suffix, labels):
-        for sample in histogram.collect()[0].samples:
-            if sample.name.endswith(suffix) and sample.labels == labels:
-                return sample.value
-        return 0.0
-
     e2e_labels = {"model": "claude-sonnet-5", "path": "stream"}
     ttlt_labels = {"model": "claude-sonnet-5"}
     overhead_labels = {"model": "claude-sonnet-5", "path": "stream"}
@@ -775,4 +802,92 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     assert overhead_delta == pytest.approx(e2e_delta - provider_delta, rel=1e-3), (
         "overhead is derived from the same E2E span as request_duration_seconds, "
         "so it must equal duration minus provider exactly on the stream path"
+    )
+
+
+async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
+    client, raw_key
+):
+    """The non-streaming path went through the same refactor as streaming -
+    observe_non_streaming now only publishes provider_ms, the middleware
+    derives overhead - but only the streaming path had an equivalent exact-
+    equality check. This closes that gap for the plain provider path."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5", "path": "provider"}
+    before_duration_sum = sample_for(metrics.request_duration_seconds, "_sum", labels)
+    before_overhead_sum = sample_for(metrics.gateway_overhead_seconds, "_sum", labels)
+    before_provider_sum = sample_for(
+        metrics.provider_duration_seconds, "_sum", {"model": "claude-sonnet-5"}
+    )
+
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "non-streaming-exactness"}],
+        },
+    )
+    assert r.status_code == 200
+
+    duration_delta = (
+        sample_for(metrics.request_duration_seconds, "_sum", labels)
+        - before_duration_sum
+    )
+    overhead_delta = (
+        sample_for(metrics.gateway_overhead_seconds, "_sum", labels)
+        - before_overhead_sum
+    )
+    provider_delta = (
+        sample_for(
+            metrics.provider_duration_seconds, "_sum", {"model": "claude-sonnet-5"}
+        )
+        - before_provider_sum
+    )
+    assert overhead_delta == pytest.approx(duration_delta - provider_delta, rel=1e-3), (
+        "overhead must equal duration minus provider exactly on the non-streaming "
+        "provider path too, not just on the stream path"
+    )
+
+
+async def test_provider_error_does_not_count_whole_span_as_overhead(
+    broken_client, raw_key
+):
+    """`mark(request, path="provider")` runs before `provider.complete(...)` so
+    a failed call still carries labels - but that also means provider_ms is
+    never published when the call raises. The middleware must not fall back to
+    treating the unpublished value as "no provider call" (a cache hit) and
+    counting the whole elapsed span as gateway overhead: it genuinely doesn't
+    know how that time split, so it must skip the observation entirely rather
+    than record a misleading one."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5", "path": "provider"}
+    before_duration_count = sample_for(
+        metrics.request_duration_seconds, "_count", labels
+    )
+    before_overhead_count = sample_for(
+        metrics.gateway_overhead_seconds, "_count", labels
+    )
+
+    r = await broken_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "provider-error"}],
+        },
+    )
+    assert r.status_code == 502
+
+    assert (
+        sample_for(metrics.request_duration_seconds, "_count", labels)
+        == before_duration_count + 1
+    ), "the middleware still knows end-to-end for a failed request"
+    assert (
+        sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+        == before_overhead_count
+    ), (
+        "provider_ms was never published, so overhead for this request must be skipped, not guessed"
     )

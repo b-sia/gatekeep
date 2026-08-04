@@ -92,7 +92,14 @@ class LatencyMiddleware:
         e2e_seconds = time.perf_counter() - state["started_at"]
         request_duration_seconds.labels(model=model, path=path).observe(e2e_seconds)
 
-        provider_ms = state.get("provider_ms")
+        provider_ms = state.get("provider_ms", _UNSET)
+        if provider_ms is _UNSET:
+            # path was marked (so model/path are set) but nothing ever
+            # published provider_ms - e.g. the provider call raised before
+            # observe_non_streaming/StreamTimer.finish() ran. We can't tell
+            # how much of e2e_seconds was provider time, so skip rather than
+            # miscount the whole span as gateway overhead.
+            return
         overhead_seconds = (
             e2e_seconds if provider_ms is None else e2e_seconds - provider_ms / 1000
         )
