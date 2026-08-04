@@ -51,30 +51,40 @@ def test_observe_non_streaming_without_started_at_is_a_no_op():
     assert timings == LatencyTimings(duration_ms=None, provider_ms=None, ttft_ms=None)
 
 
-def test_cache_hit_overhead_is_the_whole_duration():
-    """No provider call means all elapsed time is gateway time."""
-    before = (
-        _sum_for(
-            metrics.gateway_overhead_seconds,
-            {"model": "m-cache-hit", "path": "cache_exact"},
-        )
-        or 0.0
-    )
+def test_observe_non_streaming_cache_hit_publishes_provider_ms_none():
+    """No provider call: provider_ms is published as None (not left unset),
+    so the middleware treats the whole span as overhead rather than skipping
+    the observation."""
     request = _FakeRequest(started_at=0.0)
     timings = observe_non_streaming(
         request, model="m-cache-hit", path="cache_exact", provider_ms=None
     )
+    assert timings.provider_ms is None
+    assert request.state.provider_ms is None
+
+
+def test_observe_non_streaming_publishes_provider_ms_for_middleware():
+    """Overhead is no longer observed here: the middleware derives it from
+    its own end-to-end span, fed by provider_ms published onto request.state."""
+    before = _sum_for(
+        metrics.gateway_overhead_seconds,
+        {"model": "m-obs-1", "path": "provider"},
+    )
+    request = _FakeRequest(started_at=0.0)
+    timings = observe_non_streaming(
+        request, model="m-obs-1", path="provider", provider_ms=50.0
+    )
     after = _sum_for(
         metrics.gateway_overhead_seconds,
-        {"model": "m-cache-hit", "path": "cache_exact"},
+        {"model": "m-obs-1", "path": "provider"},
     )
-    assert timings.provider_ms is None
-    assert after > before
-    assert after - before == pytest.approx(timings.duration_ms / 1000, rel=1e-3)
+    assert request.state.provider_ms == pytest.approx(50.0)
+    assert after == before, "observe_non_streaming must not write this histogram itself"
+    assert timings.provider_ms == pytest.approx(50.0)
 
 
 def test_stream_timer_records_ttft_then_inter_token_gaps():
-    timer = StreamTimer(0.0, model="m-stream")
+    timer = StreamTimer({"started_at": 0.0}, model="m-stream")
     timer.provider_started()
     timer.delta()
     first_ttft = timer.ttft_ms
@@ -95,7 +105,8 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
         _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"}) or 0.0
     )
 
-    timer = StreamTimer(0.0, model="m-ttlt")
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-ttlt")
     timer.provider_started()
     timer.delta()
     timings = timer.finish()
@@ -105,6 +116,26 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
     assert after_ttlt - before_ttlt == pytest.approx(
         timings.duration_ms / 1000, rel=1e-3
     )
+
+
+def test_stream_timer_publishes_provider_ms_onto_state_for_the_middleware():
+    """finish() writes provider_ms back onto the shared scope-state dict rather
+    than observing gateway_overhead_seconds itself: the generator has no
+    request to call mark() on."""
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-ttlt-state")
+    timer.provider_started()
+    timings = timer.finish()
+
+    assert timings.provider_ms is not None
+    assert state["provider_ms"] == pytest.approx(timings.provider_ms)
+    assert (
+        _sum_for(
+            metrics.gateway_overhead_seconds,
+            {"model": "m-ttlt-state", "path": "stream"},
+        )
+        is None
+    ), "StreamTimer must not write this histogram itself anymore"
 
 
 def test_stream_timer_without_started_at_is_a_no_op():
@@ -118,7 +149,7 @@ def test_stream_timer_without_started_at_is_a_no_op():
 
 def test_stream_timer_with_no_deltas_leaves_ttft_none():
     """An empty completion still finishes cleanly."""
-    timer = StreamTimer(0.0, model="m-stream-empty")
+    timer = StreamTimer({"started_at": 0.0}, model="m-stream-empty")
     timer.provider_started()
     timings = timer.finish()
     assert timings.ttft_ms is None
@@ -130,6 +161,20 @@ def test_mark_sets_model_and_path_on_request_state():
     mark(request, model="m-mark", path="provider")
     assert request.state.model == "m-mark"
     assert request.state.path == "provider"
+
+
+def test_mark_provider_ms_none_is_distinct_from_unset():
+    """Passing provider_ms=None must still publish it (a cache hit), while
+    leaving it out entirely must not touch state at all."""
+    request = _FakeRequest(started_at=0.0)
+    mark(request, model="m-mark-2")
+    assert not hasattr(request.state, "provider_ms")
+
+    mark(request, provider_ms=None)
+    assert request.state.provider_ms is None
+
+    mark(request, provider_ms=42.0)
+    assert request.state.provider_ms == pytest.approx(42.0)
 
 
 # -- derived mean inter-token latency ----------------------------------
