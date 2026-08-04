@@ -30,6 +30,7 @@ class LatencyTimings:
 
 _NO_TIMINGS = LatencyTimings(duration_ms=None, provider_ms=None, ttft_ms=None)
 
+
 # Sentinel distinguishing "provider_ms not published" (mark() leaves the state
 # key untouched) from "published as None" (a cache hit: no provider call, so
 # the entire span counts as overhead). Both read back as None from
@@ -113,7 +114,7 @@ def mark(
     *,
     model: str | None = None,
     path: str | None = None,
-    provider_ms: float | None = _UNSET,
+    provider_ms: float | None | object = _UNSET,
 ) -> None:
     """Publish the histogram labels the middleware cannot resolve on its own.
 
