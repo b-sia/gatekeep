@@ -166,7 +166,9 @@ Latency metrics:
   loop is pull-based, so it is not comparable like-for-like with the
   non-streaming figure.
 - `gatekeep_gateway_overhead_seconds{model,path}` - request time not spent
-  upstream. On a cache hit this is the entire duration.
+  upstream, computed by the same middleware as `request_duration_seconds`
+  from the same span, so `overhead = duration - provider` holds exactly on
+  every path. On a cache hit this is the entire duration.
 - `gatekeep_ttft_seconds{model}` - time to first token, streaming only.
 - `gatekeep_inter_token_seconds{model}` - gap between streamed deltas. This is
   really inter-*chunk* latency: providers do not guarantee one token per delta.
