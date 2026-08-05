@@ -204,12 +204,12 @@ Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt crea
 Once the gateway is running, the first-party dashboard is served at
 `http://localhost:8100/dashboard`. It is the **analytics surface**: cost,
 usage, cache savings, latency (end-to-end, provider, gateway overhead, and
-TTFT, broken down by path, model, key, and prompt), prompt version history,
-and eval history - all read from `request_logs` and the prompt/eval tables,
-filterable by model and time window. Per-key and per-prompt latency
-attribution lives here rather than in Prometheus because `key_id` is
-deliberately not a metric label: the wide latency bucket set would put the
-per-key series count around 108,000 against 1,100 without it.
+TTFT, with end-to-end broken down by path, model, key, and prompt), prompt
+version history, and eval history - all read from `request_logs` and the
+prompt/eval tables, filterable by model and time window. Per-key and
+per-prompt latency attribution lives here rather than in Prometheus because
+`key_id` is deliberately not a metric label: the wide latency bucket set
+would put the per-key series count around 108,000 against 1,100 without it.
 
 On first load it prompts for an API key (the same kind used for
 `/v1/chat/completions`); the key is stored in the browser's `localStorage`
