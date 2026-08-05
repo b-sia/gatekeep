@@ -154,7 +154,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       <SpendSavingsPanel timeseries={timeseries} />
       <LatencyPanel timeseries={latencySeries} summary={latency} />
       <LatencyByPathPanel summary={latency} />
-      <BreakdownPanels summary={summary} />
+      <BreakdownPanels summary={summary} latency={latency} />
       <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
       <EvalHistoryPanel runs={runs} />
     </div>
