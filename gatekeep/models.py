@@ -88,11 +88,24 @@ class RequestLog(Base):
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     provider_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     ttft_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which branch served the request: "cache_exact", "cache_semantic",
+    # "provider", or "stream". Carries exactly the values the Prometheus
+    # `path` label carries (observability/metrics.py), written from the same
+    # parameter that feeds mark(), so the two stores cannot drift.
+    #
+    # NULL only on rows written before migration 0012. Nothing after the fact
+    # can tell a streamed pre-0012 row from a non-streamed one, so latency
+    # queries filter `path IS NOT NULL` rather than guessing.
+    path: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         # Speeds up budget.get_period_spend's DB-fallback aggregate, which
         # filters by key_id and created_at >= period_start.
         Index("ix_request_logs_key_id_created_at", "key_id", "created_at"),
+        # The composite above cannot serve the dashboard's time-only window
+        # scans (key_id is the leading column), and percentile_cont sorts
+        # every row it is handed, so narrowing the window cheaply matters.
+        Index("ix_request_logs_created_at", "created_at"),
     )
 
 

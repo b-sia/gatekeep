@@ -205,7 +205,9 @@ async def _finish_request(
         request: The Starlette request carrying `state.started_at`.
         session: DB session to persist the `RequestLog` row through.
         model: Resolved model id, used as the metric label.
-        path: One of "cache_exact", "cache_semantic", "provider".
+        path: One of "cache_exact", "cache_semantic", "provider". Published
+            as the metric label and stored on the RequestLog row from this
+            one parameter, so the histogram and the column cannot diverge.
         provider_ms: Upstream call duration, or None on a cache hit.
         key_id: The requesting API key's id.
         prompt_tokens: Input token count to record.
@@ -242,6 +244,7 @@ async def _finish_request(
         prompt_name=prompt_name,
         prompt_version_num=prompt_version_num,
         routed_from=routed_from,
+        path=path,
         duration_ms=timings.duration_ms,
         provider_ms=timings.provider_ms,
         ttft_ms=timings.ttft_ms,
@@ -820,6 +823,7 @@ async def _messages_sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        path="stream",
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,
@@ -902,6 +906,7 @@ async def _sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        path="stream",
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,

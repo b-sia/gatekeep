@@ -59,6 +59,7 @@ async def log_request(
     duration_ms: float | None = None,
     provider_ms: float | None = None,
     ttft_ms: float | None = None,
+    path: str | None = None,
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
@@ -70,7 +71,6 @@ async def log_request(
     metadata, defaulting to None. `prompt_version_num` records which
     PromptVersion (active or A/B candidate) actually served the request, so
     cost/eval/quality can later be compared active-vs-candidate by version.
-    `cache_key` default to a non-cache-hit request.
 
     Also best-effort increments the key's current-period Redis spend counter
     (`budget.record_spend`) so `require_budget` can enforce a monthly cap
@@ -91,6 +91,11 @@ async def log_request(
     `provider_ms` is None on a cache hit (no upstream call was made) and
     `ttft_ms` is None on any non-streamed request (the concept does not
     exist there). See gatekeep/observability/latency.py.
+
+    `path` records which branch served the request ("cache_exact",
+    "cache_semantic", "provider", or "stream"), matching the Prometheus
+    `path` label one-for-one. It defaults to None so a caller without one
+    can still log; pre-0012 rows are NULL and latency queries exclude them.
     """
     cost_usd = (
         cost_usd_override
@@ -113,6 +118,7 @@ async def log_request(
         duration_ms=duration_ms,
         provider_ms=provider_ms,
         ttft_ms=ttft_ms,
+        path=path,
     )
     session.add(log)
     await session.commit()

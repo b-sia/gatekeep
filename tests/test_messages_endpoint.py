@@ -300,3 +300,39 @@ async def test_messages_streaming_records_ttft(client, raw_key, session):
     assert log.ttft_ms is not None
     assert log.duration_ms is not None
     assert log.ttft_ms <= log.duration_ms
+
+
+async def test_messages_non_streaming_records_provider_path(
+    client, raw_key, session
+):
+    response = await client.post(
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert response.status_code == 200
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.path == "provider"
+
+
+async def test_messages_streaming_records_stream_path(client, raw_key, session):
+    async with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        async for _ in response.aiter_lines():
+            pass
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.path == "stream"

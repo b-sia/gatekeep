@@ -164,3 +164,39 @@ async def test_log_request_latency_columns_default_to_none(session):
     assert untimed.duration_ms is None
     assert untimed.provider_ms is None
     assert untimed.ttft_ms is None
+
+
+async def test_log_request_persists_path(session):
+    key = ApiKey(name="path-key", key_hash="hash-path")
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    log = await log_request(
+        session,
+        key_id=key.id,
+        model="gpt-4o",
+        prompt_tokens=10,
+        completion_tokens=5,
+        response_id="resp-path",
+        path="cache_semantic",
+    )
+    assert log.path == "cache_semantic"
+
+
+async def test_log_request_path_defaults_to_none(session):
+    """A caller with no path available must still be able to log."""
+    key = ApiKey(name="no-path-key", key_hash="hash-no-path")
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    log = await log_request(
+        session,
+        key_id=key.id,
+        model="gpt-4o",
+        prompt_tokens=10,
+        completion_tokens=5,
+        response_id="resp-no-path",
+    )
+    assert log.path is None
