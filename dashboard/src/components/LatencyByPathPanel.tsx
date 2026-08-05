@@ -52,7 +52,7 @@ export default function LatencyByPathPanel({ summary }: LatencyByPathPanelProps)
               <XAxis
                 type="number"
                 tick={{ fill: "#94a3b8", fontSize: 12 }}
-                tickFormatter={(value: number) => formatMs(value)}
+                tickFormatter={(value: number | null) => formatMs(value)}
               />
               <YAxis
                 type="category"

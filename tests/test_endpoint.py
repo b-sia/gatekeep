@@ -896,8 +896,8 @@ async def test_provider_error_does_not_count_whole_span_as_overhead(
 async def test_non_streaming_records_path_matching_the_metric_label(
     client, raw_key, session
 ):
-    """The DB column and the Prometheus label come from one parameter, so a
-    provider-served request must land under "provider" in both."""
+    """A provider-served non-streaming request must record `path ==
+    "provider"` on the `RequestLog` row `_finish_request` writes."""
     response = await client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {raw_key}"},
@@ -929,6 +929,19 @@ async def test_cache_hit_records_cache_exact_path(client, raw_key, session):
 
 
 async def test_streaming_records_stream_path(client, raw_key, session):
+    """A streamed request must record `path == "stream"` on the `RequestLog`
+    row `_messages_sse`/`_sse` write, and the Prometheus histogram must
+    record an observation under that same label - the two sinks are written
+    from separate functions on this path, so both sides of the invariant
+    need checking."""
+    from gatekeep.observability import metrics
+
+    before_count = sample_for(
+        metrics.request_duration_seconds,
+        "_count",
+        {"model": "claude-sonnet-5", "path": app_module._STREAM_PATH},
+    )
+
     async with client.stream(
         "POST",
         "/v1/chat/completions",
@@ -944,3 +957,10 @@ async def test_streaming_records_stream_path(client, raw_key, session):
             pass
     log = (await session.execute(select(RequestLog))).scalars().one()
     assert log.path == "stream"
+
+    after_count = sample_for(
+        metrics.request_duration_seconds,
+        "_count",
+        {"model": "claude-sonnet-5", "path": log.path},
+    )
+    assert after_count > before_count

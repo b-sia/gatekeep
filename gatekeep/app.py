@@ -97,6 +97,14 @@ from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
 
+# The `path` label/column value for streamed completions. Unlike the
+# non-streaming branches, which route one `_finish_request` parameter into both
+# `mark()` and `log_request()`, the streaming path publishes its label from the
+# endpoint and writes its column from inside the SSE generator - two different
+# functions, and the generator holds `state` rather than `request`. This
+# constant is what keeps those sites from drifting apart.
+_STREAM_PATH = "stream"
+
 app = FastAPI(title="gatekeep")
 # Added first so it wraps everything: the start stamp must land before any
 # FastAPI dependency (auth, rate limit, budget) runs.
@@ -399,7 +407,7 @@ async def chat_completions(
     mark(request, model=model)
 
     if req.stream:
-        mark(request, path="stream")
+        mark(request, path=_STREAM_PATH)
         return StreamingResponse(
             _sse(
                 provider,
@@ -609,7 +617,7 @@ async def messages(
     mark(request, model=model)
 
     if req.stream:
-        mark(request, path="stream")
+        mark(request, path=_STREAM_PATH)
         return StreamingResponse(
             _messages_sse(
                 provider,
@@ -823,7 +831,7 @@ async def _messages_sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
-                        path="stream",
+                        path=_STREAM_PATH,
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,
@@ -906,7 +914,7 @@ async def _sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
-                        path="stream",
+                        path=_STREAM_PATH,
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,

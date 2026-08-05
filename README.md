@@ -189,9 +189,11 @@ Per-request latency is also stored on `request_logs` as `duration_ms`,
 `ttft_ms` is NULL on any non-streamed request. A NULL `provider_ms` alone
 cannot distinguish a cache hit from a row predating the migration - filter on
 `cached`. `path` carries the same four values as the Prometheus `path` label
-(`cache_exact`, `cache_semantic`, `provider`, `stream`) and is written from
-the same parameter, so the two stores cannot drift; it is NULL only on rows
-predating migration `0012`, which every latency query excludes.
+(`cache_exact`, `cache_semantic`, `provider`, `stream`) and both stores write
+it from a single shared definition (a `_finish_request` parameter on the
+non-streaming paths, the `_STREAM_PATH` constant on `stream`), so the two
+cannot drift; it is NULL only on rows predating migration `0012`, which every
+latency query excludes.
 
 `duration_ms` means two different things depending on `path`: end-to-end on
 the non-streaming paths, and time-to-last-token on `stream`. Percentiles are
@@ -209,7 +211,8 @@ version history, and eval history - all read from `request_logs` and the
 prompt/eval tables, filterable by model and time window. Per-key and
 per-prompt latency attribution lives here rather than in Prometheus because
 `key_id` is deliberately not a metric label: the wide latency bucket set
-would put the per-key series count around 108,000 against 1,100 without it.
+means adding it would push the per-key series count roughly two orders of
+magnitude higher.
 
 On first load it prompts for an API key (the same kind used for
 `/v1/chat/completions`); the key is stored in the browser's `localStorage`

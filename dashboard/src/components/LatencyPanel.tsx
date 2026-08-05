@@ -104,7 +104,7 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
               <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 12 }} />
               <YAxis
                 tick={{ fill: "#94a3b8", fontSize: 12 }}
-                tickFormatter={(value: number) => formatMs(value)}
+                tickFormatter={(value: number | null) => formatMs(value)}
               />
               <Tooltip
                 contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", fontSize: 12 }}
@@ -118,8 +118,7 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
                 stroke="#6366f1"
                 name="p50"
                 strokeWidth={2}
-                dot={false}
-                connectNulls
+                dot={{ r: 2 }}
               />
               <Line
                 type="monotone"
@@ -127,8 +126,7 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
                 stroke="#f97316"
                 name="p95"
                 strokeWidth={2}
-                dot={false}
-                connectNulls
+                dot={{ r: 2 }}
               />
             </ComposedChart>
           </ResponsiveContainer>
