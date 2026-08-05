@@ -1,5 +1,7 @@
 import type {
   EvalHistoryResponse,
+  LatencySummaryResponse,
+  LatencyTimeseriesResponse,
   PromptListResponse,
   PromptVersionTimelineResponse,
   TimeseriesResponse,
@@ -110,6 +112,34 @@ export function getUsageTimeseriesByModel(
   filters: UsageFilters & { interval: "minute" | "hour" | "day" },
 ): Promise<UsageByModelTimeseriesResponse> {
   return request<UsageByModelTimeseriesResponse>("usage/timeseries/by-model", {
+    start: filters.start,
+    end: filters.end,
+    interval: filters.interval,
+    model: filters.model,
+    key_id: filters.keyId,
+    prompt_name: filters.promptName,
+  });
+}
+
+/** Fetches latency percentiles and breakdowns for the given filters. */
+export function getLatencySummary(
+  filters: UsageFilters,
+): Promise<LatencySummaryResponse> {
+  return request<LatencySummaryResponse>("latency/summary", {
+    start: filters.start,
+    end: filters.end,
+    model: filters.model,
+    key_id: filters.keyId,
+    prompt_name: filters.promptName,
+  });
+}
+
+/** Fetches latency percentiles bucketed into minute, hourly, or daily
+ * intervals, for charting over time. */
+export function getLatencyTimeseries(
+  filters: UsageFilters & { interval: "minute" | "hour" | "day" },
+): Promise<LatencyTimeseriesResponse> {
+  return request<LatencyTimeseriesResponse>("latency/timeseries", {
     start: filters.start,
     end: filters.end,
     interval: filters.interval,

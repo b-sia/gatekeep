@@ -112,3 +112,67 @@ export interface PromptVersionTimelineResponse {
   name: string;
   versions: PromptVersionOut[];
 }
+
+/** p50/p95/p99 of one latency quantity, in milliseconds. */
+export interface Percentiles {
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+}
+
+/** One row of a latency breakdown (by path, model, API key, or prompt).
+ * `p50_ms`/`p95_ms` are null when the group has no qualifying samples, so
+ * render "-" rather than 0ms. */
+export interface LatencyBreakdownRow {
+  key: string;
+  label?: string | null;
+  sample_count: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+}
+
+/** Latency percentiles for a time window, plus breakdowns.
+ *
+ * `e2e_ms`, `provider_ms`, and `overhead_ms` cover the non-streaming paths
+ * only; `stream_ttlt_ms` and `ttft_ms` cover the streaming one. `duration_ms`
+ * in the database means end-to-end on one side and time-to-last-token on the
+ * other, so the two are never blended. `sample_count` counts every
+ * latency-eligible row regardless of path. */
+export interface LatencySummaryResponse {
+  start: string;
+  end: string;
+  sample_count: number;
+  e2e_ms: Percentiles | null;
+  provider_ms: Percentiles | null;
+  overhead_ms: Percentiles | null;
+  stream_ttlt_ms: Percentiles | null;
+  ttft_ms: Percentiles | null;
+  by_path: LatencyBreakdownRow[];
+  by_model: LatencyBreakdownRow[];
+  by_key: LatencyBreakdownRow[];
+  by_prompt: LatencyBreakdownRow[];
+}
+
+/** One bucket of latency percentiles. The `e2e`/`provider`/`overhead`
+ * fields are non-streaming; `ttft` is streaming. Any field is null when
+ * that bucket had no qualifying rows. */
+export interface LatencyTimeseriesBucket {
+  bucket_start: string;
+  sample_count: number;
+  e2e_p50_ms: number | null;
+  e2e_p95_ms: number | null;
+  provider_p50_ms: number | null;
+  provider_p95_ms: number | null;
+  overhead_p50_ms: number | null;
+  overhead_p95_ms: number | null;
+  ttft_p50_ms: number | null;
+  ttft_p95_ms: number | null;
+}
+
+/** Latency percentiles bucketed over a window, for charting. */
+export interface LatencyTimeseriesResponse {
+  start: string;
+  end: string;
+  interval: "minute" | "hour" | "day";
+  buckets: LatencyTimeseriesBucket[];
+}

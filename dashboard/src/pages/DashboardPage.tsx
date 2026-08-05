@@ -6,12 +6,16 @@ import UsageChart from "../components/UsageChart";
 import ModelUsagePanel from "../components/ModelUsagePanel";
 import TokenTypePanel from "../components/TokenTypePanel";
 import SpendSavingsPanel from "../components/SpendSavingsPanel";
+import LatencyPanel from "../components/LatencyPanel";
+import LatencyByPathPanel from "../components/LatencyByPathPanel";
 import BreakdownPanels from "../components/BreakdownPanels";
 import PromptsPanel from "../components/PromptsPanel";
 import EvalHistoryPanel from "../components/EvalHistoryPanel";
 import {
   UnauthorizedError,
   getEvalHistory,
+  getLatencySummary,
+  getLatencyTimeseries,
   getPrompts,
   getUsageSummary,
   getUsageTimeseries,
@@ -19,6 +23,8 @@ import {
 } from "../api/client";
 import type {
   EvalRunOut,
+  LatencySummaryResponse,
+  LatencyTimeseriesResponse,
   PromptOut,
   TimeseriesResponse,
   UsageByModelTimeseriesResponse,
@@ -47,6 +53,8 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   const [allModels, setAllModels] = useState<string[]>([]);
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
   const [byModel, setByModel] = useState<UsageByModelTimeseriesResponse | null>(null);
+  const [latency, setLatency] = useState<LatencySummaryResponse | null>(null);
+  const [latencySeries, setLatencySeries] = useState<LatencyTimeseriesResponse | null>(null);
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
   const [prompts, setPrompts] = useState<PromptOut[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -57,24 +65,33 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
     const start = new Date(end.getTime() - filters.rangeDays * 24 * 60 * 60 * 1000);
     const windowParams = { start: start.toISOString(), end: end.toISOString() };
     try {
-      const [summaryRes, timeseriesRes, byModelRes, evalsRes, promptsRes] = await Promise.all([
-        getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
-        getUsageTimeseries({
-          ...windowParams,
-          interval: filters.interval,
-          model: filters.model ?? undefined,
-        }),
-        getUsageTimeseriesByModel({
-          ...windowParams,
-          interval: filters.interval,
-          model: filters.model ?? undefined,
-        }),
-        getEvalHistory(),
-        getPrompts(),
-      ]);
+      const [summaryRes, timeseriesRes, byModelRes, latencyRes, latencySeriesRes, evalsRes, promptsRes] =
+        await Promise.all([
+          getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
+          getUsageTimeseries({
+            ...windowParams,
+            interval: filters.interval,
+            model: filters.model ?? undefined,
+          }),
+          getUsageTimeseriesByModel({
+            ...windowParams,
+            interval: filters.interval,
+            model: filters.model ?? undefined,
+          }),
+          getLatencySummary({ ...windowParams, model: filters.model ?? undefined }),
+          getLatencyTimeseries({
+            ...windowParams,
+            interval: filters.interval,
+            model: filters.model ?? undefined,
+          }),
+          getEvalHistory(),
+          getPrompts(),
+        ]);
       setSummary(summaryRes);
       setTimeseries(timeseriesRes);
       setByModel(byModelRes);
+      setLatency(latencyRes);
+      setLatencySeries(latencySeriesRes);
       setRuns(evalsRes.runs);
       setPrompts(promptsRes.prompts);
     } catch (err) {
@@ -135,6 +152,8 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       <ModelUsagePanel data={byModel} interval={filters.interval} />
       <TokenTypePanel timeseries={timeseries} />
       <SpendSavingsPanel timeseries={timeseries} />
+      <LatencyPanel timeseries={latencySeries} summary={latency} />
+      <LatencyByPathPanel summary={latency} />
       <BreakdownPanels summary={summary} />
       <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
       <EvalHistoryPanel runs={runs} />
