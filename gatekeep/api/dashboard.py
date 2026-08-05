@@ -727,6 +727,163 @@ async def latency_summary(
     )
 
 
+class LatencyTimeseriesBucket(BaseModel):
+    """One time bucket of latency percentiles, in the flat field style the
+    other timeseries buckets use.
+
+    The same streaming split as `LatencySummaryResponse` holds per bucket:
+    the `e2e`/`provider`/`overhead` fields cover non-streaming paths and
+    `ttft` covers the streaming one. Any field is None when that bucket had
+    no qualifying rows.
+
+    Time-to-last-token is deliberately absent: a series whose height tracks
+    generation length says more about prompt mix than about gateway
+    performance, so it stays a summary-level figure.
+    """
+
+    bucket_start: datetime
+    sample_count: int
+    e2e_p50_ms: float | None
+    e2e_p95_ms: float | None
+    provider_p50_ms: float | None
+    provider_p95_ms: float | None
+    overhead_p50_ms: float | None
+    overhead_p95_ms: float | None
+    ttft_p50_ms: float | None
+    ttft_p95_ms: float | None
+
+
+class LatencyTimeseriesResponse(BaseModel):
+    """Latency percentiles bucketed over a time range, for charting."""
+
+    start: datetime
+    end: datetime
+    interval: str
+    buckets: list[LatencyTimeseriesBucket]
+
+
+def _optional_ms(value) -> float | None:
+    """Coerce one raw percentile aggregate to a float, preserving NULL.
+
+    Parameters:
+        value: The raw aggregate value from the query result, or None.
+
+    Returns:
+        The value as a float, or None if the input was None.
+    """
+    return None if value is None else float(value)
+
+
+@router.get("/latency/timeseries", response_model=LatencyTimeseriesResponse)
+async def latency_timeseries(
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    interval: Literal["minute", "hour", "day"] = Query(default="day"),
+    model: str | None = Query(default=None),
+    key_id: int | None = Query(default=None),
+    prompt_name: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _caller: ApiKey = Depends(require_api_key),
+) -> LatencyTimeseriesResponse:
+    """Return end-to-end, provider, gateway-overhead, and TTFT percentiles
+    bucketed by minute, hour, or day.
+
+    Same filters and defaults as `usage_timeseries`; `interval` selects the
+    bucket width via Postgres `date_trunc`. There is deliberately no
+    per-path series: `by_path` on the summary answers "how fast is a cache
+    hit" without multiplying the response size. Requires a valid API key
+    (`require_api_key`).
+
+    Parameters:
+        start: Window start; defaults to the trailing 7-day window's start.
+        end: Window end; defaults to the trailing 7-day window's end.
+        interval: Bucket width, one of "minute", "hour", or "day".
+        model: Optional equality filter on `RequestLog.model`.
+        key_id: Optional equality filter on `RequestLog.key_id`.
+        prompt_name: Optional equality filter on `RequestLog.prompt_name`.
+        session: Database session, injected.
+        _caller: The authenticated caller, injected; unused beyond auth.
+
+    Returns:
+        A `LatencyTimeseriesResponse` with one bucket per distinct
+        `date_trunc(interval, created_at)` value in range, ordered
+        ascending.
+    """
+    default_start, default_end = _default_window()
+    start = start or default_start
+    end = end or default_end
+    filters = _latency_filters(
+        start, end, model=model, key_id=key_id, prompt_name=prompt_name
+    )
+
+    bucket = func.date_trunc(interval, RequestLog.created_at)
+    rows = (
+        await session.execute(
+            select(
+                bucket,
+                func.count(RequestLog.id),
+                func.percentile_cont(0.5)
+                .within_group(RequestLog.duration_ms.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.95)
+                .within_group(RequestLog.duration_ms.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.5)
+                .within_group(RequestLog.provider_ms.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.95)
+                .within_group(RequestLog.provider_ms.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.5)
+                .within_group(_OVERHEAD_MS.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.95)
+                .within_group(_OVERHEAD_MS.asc())
+                .filter(_NON_STREAMING),
+                func.percentile_cont(0.5)
+                .within_group(RequestLog.ttft_ms.asc())
+                .filter(_STREAMING),
+                func.percentile_cont(0.95)
+                .within_group(RequestLog.ttft_ms.asc())
+                .filter(_STREAMING),
+            )
+            .where(*filters)
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+    ).all()
+
+    buckets = [
+        LatencyTimeseriesBucket(
+            bucket_start=bucket_start,
+            sample_count=int(count),
+            e2e_p50_ms=_optional_ms(e2e_p50),
+            e2e_p95_ms=_optional_ms(e2e_p95),
+            provider_p50_ms=_optional_ms(provider_p50),
+            provider_p95_ms=_optional_ms(provider_p95),
+            overhead_p50_ms=_optional_ms(overhead_p50),
+            overhead_p95_ms=_optional_ms(overhead_p95),
+            ttft_p50_ms=_optional_ms(ttft_p50),
+            ttft_p95_ms=_optional_ms(ttft_p95),
+        )
+        for (
+            bucket_start,
+            count,
+            e2e_p50,
+            e2e_p95,
+            provider_p50,
+            provider_p95,
+            overhead_p50,
+            overhead_p95,
+            ttft_p50,
+            ttft_p95,
+        ) in rows
+    ]
+    return LatencyTimeseriesResponse(
+        start=start, end=end, interval=interval, buckets=buckets
+    )
+
+
 class EvalRunOut(BaseModel):
     """One eval run, joined with its suite's prompt name and the prompt
     version number it evaluated."""

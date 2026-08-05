@@ -789,3 +789,114 @@ async def test_latency_summary_filters_by_model(client, raw_key, session):
     assert body["sample_count"] == 1
     assert body["e2e_ms"]["p50_ms"] == 300.0
     assert [row["key"] for row in body["by_path"]] == ["cache_exact"]
+
+
+# -- latency timeseries -----------------------------------------------------
+
+
+async def test_latency_timeseries_requires_auth(client):
+    r = await client.get("/dashboard/api/latency/timeseries")
+    assert r.status_code == 401
+
+
+async def test_latency_timeseries_buckets_by_day(client, raw_key, session):
+    key_id = await _key_id(session, raw_key)
+    now = datetime.now(timezone.utc)
+    yesterday = now - timedelta(days=1)
+
+    # Yesterday: two non-streaming rows only.
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        path="provider",
+        duration_ms=100.0,
+        provider_ms=60.0,
+        created_at=yesterday,
+    )
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        path="provider",
+        duration_ms=200.0,
+        provider_ms=160.0,
+        created_at=yesterday,
+    )
+    # Today: one streaming row only.
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        path="stream",
+        duration_ms=1000.0,
+        provider_ms=900.0,
+        ttft_ms=250.0,
+        created_at=now,
+    )
+
+    r = await client.get(
+        "/dashboard/api/latency/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={"interval": "day"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["interval"] == "day"
+    assert len(body["buckets"]) == 2
+
+    first, second = body["buckets"]
+    assert first["sample_count"] == 2
+    assert first["e2e_p50_ms"] == 150.0
+    assert first["provider_p50_ms"] == 110.0
+    # Overhead: {40, 40}.
+    assert first["overhead_p50_ms"] == 40.0
+    # No streamed rows yesterday.
+    assert first["ttft_p50_ms"] is None
+
+    assert second["sample_count"] == 1
+    # The only row today is streamed, so every non-streaming field is null -
+    # never 0, which would read as an instantaneous response.
+    assert second["e2e_p50_ms"] is None
+    assert second["provider_p50_ms"] is None
+    assert second["overhead_p50_ms"] is None
+    assert second["ttft_p50_ms"] == 250.0
+
+
+async def test_latency_timeseries_excludes_rows_with_no_path(
+    client, raw_key, session
+):
+    key_id = await _key_id(session, raw_key)
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        duration_ms=500.0,
+        provider_ms=400.0,
+    )
+
+    r = await client.get(
+        "/dashboard/api/latency/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["buckets"] == []
+
+
+async def test_latency_timeseries_empty_window_is_not_an_error(
+    client, raw_key, session
+):
+    key_id = await _key_id(session, raw_key)
+    await _seed_latency_fixture(session, key_id)
+
+    now = datetime.now(timezone.utc)
+    r = await client.get(
+        "/dashboard/api/latency/timeseries",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        params={
+            "start": (now - timedelta(days=40)).isoformat(),
+            "end": (now - timedelta(days=30)).isoformat(),
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["buckets"] == []
