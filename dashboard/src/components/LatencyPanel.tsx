@@ -1,9 +1,9 @@
 import { useState } from "react";
 import {
   CartesianGrid,
-  ComposedChart,
   Legend,
   Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -86,6 +86,8 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
           {(Object.keys(METRIC_LABELS) as Metric[]).map((m) => (
             <button
               key={m}
+              type="button"
+              aria-pressed={metric === m}
               onClick={() => setMetric(m)}
               className={`rounded px-2 py-1 text-xs ${
                 metric === m ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
@@ -99,7 +101,7 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
       <div className="h-72">
         {hasSamples ? (
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={data}>
+            <LineChart data={data}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
               <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 12 }} />
               <YAxis
@@ -128,7 +130,7 @@ export default function LatencyPanel({ timeseries, summary }: LatencyPanelProps)
                 strokeWidth={2}
                 dot={{ r: 2 }}
               />
-            </ComposedChart>
+            </LineChart>
           </ResponsiveContainer>
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-slate-500">
