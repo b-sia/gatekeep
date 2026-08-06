@@ -97,12 +97,22 @@ from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
 
-# The `path` label/column value for streamed completions. Unlike the
-# non-streaming branches, which route one `_finish_request` parameter into both
-# `mark()` and `log_request()`, the streaming path publishes its label from the
-# endpoint and writes its column from inside the SSE generator - two different
-# functions, and the generator holds `state` rather than `request`. This
-# constant is what keeps those sites from drifting apart.
+# The four values the `path` label/column can take, matching the Prometheus
+# `path` label one-for-one (observability/metrics.py) and RequestLog.path
+# (models.py). Every call site below sources its value from one of these
+# rather than a bare string literal, so the metric and the DB column cannot
+# drift apart from a typo in either.
+#
+# `_STREAM_PATH` in particular is unlike the other three: the non-streaming
+# branches route one `_finish_request` parameter into both `mark()` and
+# `log_request()`, but the streaming path publishes its label from the
+# endpoint and writes its column from inside the SSE generator - two
+# different functions, and the generator holds `state` rather than
+# `request`. Using the shared constant on both sides is what keeps those
+# sites from drifting apart.
+_CACHE_EXACT_PATH = "cache_exact"
+_CACHE_SEMANTIC_PATH = "cache_semantic"
+_PROVIDER_PATH = "provider"
 _STREAM_PATH = "stream"
 
 app = FastAPI(title="gatekeep")
@@ -441,7 +451,7 @@ async def chat_completions(
             request,
             session,
             model=model,
-            path="cache_exact",
+            path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
@@ -478,7 +488,7 @@ async def chat_completions(
                 request,
                 session,
                 model=model,
-                path="cache_semantic",
+                path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
@@ -495,7 +505,7 @@ async def chat_completions(
         cache_semantic_misses.labels(model=model).inc()
 
     # Marked before the call so a provider error still carries labels.
-    mark(request, path="provider")
+    mark(request, path=_PROVIDER_PATH)
     provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
@@ -540,7 +550,7 @@ async def chat_completions(
         request,
         session,
         model=model,
-        path="provider",
+        path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
         prompt_tokens=result.input_tokens,
@@ -651,7 +661,7 @@ async def messages(
             request,
             session,
             model=model,
-            path="cache_exact",
+            path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
@@ -688,7 +698,7 @@ async def messages(
                 request,
                 session,
                 model=model,
-                path="cache_semantic",
+                path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
@@ -707,7 +717,7 @@ async def messages(
         cache_semantic_misses.labels(model=model).inc()
 
     # Marked before the call so a provider error still carries labels.
-    mark(request, path="provider")
+    mark(request, path=_PROVIDER_PATH)
     provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
@@ -753,7 +763,7 @@ async def messages(
         request,
         session,
         model=model,
-        path="provider",
+        path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
         prompt_tokens=result.input_tokens,

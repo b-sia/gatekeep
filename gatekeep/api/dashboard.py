@@ -564,11 +564,17 @@ async def _latency_breakdown(
 
     `condition` restricts which rows feed the count and the percentiles
     (typically `_NON_STREAMING`, or `true()` for the by-path breakdown,
-    which is the one place both sides are shown side by side). Groups with
-    no qualifying rows still appear, with `sample_count` 0 and NULL
-    percentiles, so a caller joining against a usage breakdown finds every
-    key. Ordered by sample count descending. NULL group values render as
-    `_NO_PROMPT_LABEL`, matching `_breakdown`.
+    which is the one place both sides are shown side by side); `filters`
+    (the `path IS NOT NULL` / time-window / model-key-prompt clauses)
+    restricts which rows the GROUP BY sees at all. A group with at least one
+    row passing `filters` but none passing `condition` - a model queried
+    only over its streaming rows, say - still appears, with `sample_count`
+    0 and NULL percentiles. A group with no rows passing `filters` at all -
+    e.g. a model whose every row predates migration 0012 - is absent from
+    the result entirely, so a caller joining against a usage breakdown is
+    not guaranteed to find every key there. Ordered by sample count
+    descending. NULL group values render as `_NO_PROMPT_LABEL`, matching
+    `_breakdown`.
     """
     sample_count = func.count(RequestLog.id).filter(condition)
     rows = (

@@ -189,11 +189,15 @@ Per-request latency is also stored on `request_logs` as `duration_ms`,
 `ttft_ms` is NULL on any non-streamed request. A NULL `provider_ms` alone
 cannot distinguish a cache hit from a row predating the migration - filter on
 `cached`. `path` carries the same four values as the Prometheus `path` label
-(`cache_exact`, `cache_semantic`, `provider`, `stream`) and both stores write
-it from a single shared definition (a `_finish_request` parameter on the
-non-streaming paths, the `_STREAM_PATH` constant on `stream`), so the two
-cannot drift; it is NULL only on rows predating migration `0012`, which every
-latency query excludes.
+(`cache_exact`, `cache_semantic`, `provider`, `stream`), each sourced from
+its own module-level constant in `gatekeep/app.py` rather than a repeated
+string literal - a `_finish_request` parameter carries the constant into
+both `mark()` and `log_request()` on the non-streaming paths, and the
+streaming path's `mark()` call and SSE-generator `log_request()` call both
+read `_STREAM_PATH` directly, since they run in two different functions
+with no shared parameter to carry it through. Either way the metric label
+and the DB column cannot drift apart from a typo in either. It is NULL only
+on rows predating migration `0012`, which every latency query excludes.
 
 `duration_ms` means two different things depending on `path`: end-to-end on
 the non-streaming paths, and time-to-last-token on `stream`. Percentiles are
