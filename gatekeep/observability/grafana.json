@@ -1,87 +1,22 @@
 {
-  "title": "Gatekeep",
-  "uid": "gatekeep-overview",
+  "title": "Gatekeep - Ops",
+  "uid": "gatekeep-ops",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
   "timezone": "browser",
   "time": {
-    "from": "now-7d",
+    "from": "now-6h",
     "to": "now"
   },
   "refresh": "30s",
   "panels": [
     {
       "id": 1,
-      "title": "Cost per model (last 7 days)",
-      "description": "Per-key cost is unbounded cardinality and not tracked in Prometheus; see GET /dashboard/api/usage/summary?key_id=... for a per-key breakdown.",
-      "type": "barchart",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "fieldConfig": {
-        "defaults": { "unit": "currencyUSD" },
-        "overrides": []
-      },
-      "options": {
-        "stacking": "normal",
-        "legend": { "displayMode": "list", "placement": "bottom" }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(increase(gatekeep_request_cost_usd_sum[7d])) by (model)",
-          "legendFormat": "{{model}}"
-        }
-      ]
-    },
-    {
-      "id": 2,
-      "title": "Cache hit rate: exact vs semantic",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "fieldConfig": {
-        "defaults": { "unit": "percentunit" },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(increase(gatekeep_cache_exact_hits_total[1h])) / (sum(increase(gatekeep_cache_exact_hits_total[1h])) + sum(increase(gatekeep_cache_exact_misses_total[1h])))",
-          "legendFormat": "exact hit rate"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(increase(gatekeep_cache_semantic_hits_total[1h])) / (sum(increase(gatekeep_cache_semantic_hits_total[1h])) + sum(increase(gatekeep_cache_semantic_misses_total[1h])))",
-          "legendFormat": "semantic hit rate"
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Avg tokens per request",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "short" },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(gatekeep_request_tokens_sum[5m])) by (model) / sum(rate(gatekeep_request_tokens_count[5m])) by (model)",
-          "legendFormat": "{{model}} avg tokens"
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum(rate(gatekeep_request_tokens_bucket[5m])) by (le, model))",
-          "legendFormat": "{{model}} p95 tokens"
-        }
-      ]
-    },
-    {
-      "id": 4,
       "title": "Rate limit rejections",
+      "description": "429s never reach request_logs, so this signal exists only here.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "fieldConfig": {
         "defaults": { "unit": "short" },
         "overrides": []
@@ -95,19 +30,92 @@
       ]
     },
     {
-      "id": 5,
-      "title": "Cumulative cost savings from caching",
+      "id": 2,
+      "title": "Budget alerts by threshold",
+      "description": "A budget rejection writes no request_logs row either. Alert on 'exceeded'.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "fieldConfig": {
-        "defaults": { "unit": "currencyUSD" },
+        "defaults": { "unit": "short" },
         "overrides": []
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "gatekeep_cache_cost_saved_usd_total",
-          "legendFormat": "cumulative savings"
+          "expr": "sum(increase(gatekeep_budget_alerts_total[5m])) by (threshold)",
+          "legendFormat": "{{threshold}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Request rate by model and path",
+      "description": "Live throughput. Cost, savings, cache hit rate, and token averages live on /dashboard, computed exactly from request_logs rather than extrapolated by increase().",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(gatekeep_request_duration_seconds_count[5m])) by (model, path)",
+          "legendFormat": "{{model}} / {{path}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "End-to-end p95 by path",
+      "description": "The full ASGI span, so slightly higher than /dashboard's figure, which stops before response serialization.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(gatekeep_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Gateway overhead p95 by path",
+      "description": "Request time not spent upstream, from the same span as end-to-end. On a cache hit this is the entire duration.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(gatekeep_gateway_overhead_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Time to first token p95",
+      "description": "Streamed requests only. Per-key and per-prompt TTFT attribution lives on /dashboard: key_id is deliberately not a metric label.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(gatekeep_ttft_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "{{model}}"
         }
       ]
     }

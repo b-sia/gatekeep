@@ -65,8 +65,8 @@ Project layout, in more detail than the summary at the bottom of this file:
 | `gatekeep/middleware/` | Rate limiting, exact/semantic caching |
 | `gatekeep/prompts.py`, `evals.py`, `curation.py`, `fixtures.py` | Prompt versioning, eval suites, real-traffic curation, CI fixtures - see the "Eval gate" section below |
 | `gatekeep/cli.py` | The `gatekeep prompt ...` / `gatekeep eval ...` commands, run via `python -m gatekeep.cli` or the installed `gatekeep` console script |
-| `gatekeep/observability/` | Prometheus/Grafana config used by `docker-compose.yml` |
-| `dashboard/` | First-party React/TypeScript dashboard SPA, served by the gateway at `/dashboard` - see "Dashboard" below |
+| `gatekeep/observability/` | Prometheus metric definitions, plus the ops Grafana dashboard `docker-compose.yml` provisions |
+| `dashboard/` | First-party React/TypeScript dashboard SPA, served by the gateway at `/dashboard` - the analytics surface for cost, usage, and latency; see "Dashboard" below |
 | `demo/` | Standalone chat app exercising the gateway as a real client would |
 | `tests/` | Pytest suite, one file per module; `conftest.py` resets the DB schema per test |
 
@@ -148,7 +148,15 @@ Every request - cached or not - is logged to `request_logs` with token counts an
 curl http://localhost:8100/metrics | grep gatekeep_cache_exact_hits
 ```
 
-`/metrics` is a Prometheus-format endpoint (unauthenticated, like `/healthz`); `docker-compose.yml` also runs Prometheus and a Grafana dashboard at `http://localhost:3000` for cost, usage, and cache-hit-rate visualization.
+`/metrics` is a Prometheus-format endpoint (unauthenticated, like `/healthz`)
+and is the **integration surface**: scrape it into whatever Prometheus you
+already run. `docker-compose.yml` also brings up Prometheus and a small
+"Gatekeep - Ops" Grafana dashboard at `http://localhost:3000` as a
+local-development convenience, scoped to the signals Postgres structurally
+cannot serve - rate-limit rejections, budget alerts, and real-time latency
+tails. Cost, savings, cache-hit rate, and latency attribution live on
+`/dashboard`, which computes them exactly from `request_logs` rather than
+extrapolating from histogram buckets.
 
 Latency metrics:
 
@@ -177,22 +185,49 @@ Latency metrics:
   undefined below two completion tokens.
 
 Per-request latency is also stored on `request_logs` as `duration_ms`,
-`provider_ms`, and `ttft_ms`. `provider_ms` is NULL on a cache hit and
+`provider_ms`, `ttft_ms`, and `path`. `provider_ms` is NULL on a cache hit and
 `ttft_ms` is NULL on any non-streamed request. A NULL `provider_ms` alone
 cannot distinguish a cache hit from a row predating the migration - filter on
-`cached`.
+`cached`. `path` carries the same four values as the Prometheus `path` label
+(`cache_exact`, `cache_semantic`, `provider`, `stream`), each sourced from
+its own module-level constant in `gatekeep/app.py` rather than a repeated
+string literal - a `_finish_request` parameter carries the constant into
+both `mark()` and `log_request()` on the non-streaming paths, and the
+streaming path's `mark()` call and SSE-generator `log_request()` call both
+read `_STREAM_PATH` directly, since they run in two different functions
+with no shared parameter to carry it through. Either way the metric label
+and the DB column cannot drift apart from a typo in either. It is NULL only
+on rows predating migration `0012`, which every latency query excludes.
+
+`duration_ms` means two different things depending on `path`: end-to-end on
+the non-streaming paths, and time-to-last-token on `stream`. Percentiles are
+never blended across the two.
 
 Prompt templates registered via the `gatekeep prompt` CLI (`gatekeep prompt create/promote/rollback ...`) are cache-aware: promoting a new prompt version automatically invalidates any cached responses that were built using the old version, so clients never see a stale answer generated from a prompt that's no longer active.
 
 ## Dashboard
 
 Once the gateway is running, the first-party dashboard is served at
-`http://localhost:8100/dashboard` - a cost/usage/eval-history view over the
-same data as the Grafana dashboard above, plus prompt version history. On
-first load it prompts for an API key (the same kind used for
+`http://localhost:8100/dashboard`. It is the **analytics surface**: cost,
+usage, cache savings, latency (end-to-end, provider, gateway overhead, and
+TTFT, with end-to-end broken down by path, model, key, and prompt), prompt
+version history, and eval history - all read from `request_logs` and the
+prompt/eval tables, filterable by model and time window. Per-key and
+per-prompt latency attribution lives here rather than in Prometheus because
+`key_id` is deliberately not a metric label: the wide latency bucket set
+means adding it would push the per-key series count roughly two orders of
+magnitude higher.
+
+On first load it prompts for an API key (the same kind used for
 `/v1/chat/completions`); the key is stored in the browser's `localStorage`
 and sent as a bearer token to the dashboard's own read-only API under
 `/dashboard/api/*`.
+
+One caveat worth knowing before comparing the two surfaces: `/dashboard`
+reads slightly lower than Grafana for identical traffic. `request_logs.duration_ms`
+stops just before the accounting write, so it excludes JSON serialization and
+the socket write, where `gatekeep_request_duration_seconds` covers the full
+ASGI span.
 
 For local frontend development, run the dev server separately from the
 gateway:

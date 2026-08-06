@@ -466,6 +466,38 @@ async def test_semantic_hit_logs_cached_true_with_semantic_key(
     assert log.cached is True
 
 
+async def test_semantic_hit_records_cache_semantic_path(client, raw_key, session):
+    """A semantic-cache hit must land under `path == "cache_semantic"` on the
+    `RequestLog` row it writes - the only one of the four `path` values with
+    no prior end-to-end coverage of that write."""
+    body1 = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "What is the capital of Austria?"}],
+    }
+    body2 = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "What's the capital city of Austria?"}
+        ],
+    }
+    await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body1,
+    )
+    await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json=body2,
+    )
+    log = (
+        await session.execute(
+            select(RequestLog).where(RequestLog.cache_key == "semantic")
+        )
+    ).scalar_one()
+    assert log.path == "cache_semantic"
+
+
 async def test_dissimilar_requests_both_call_provider(
     client, raw_key, counting_provider
 ):

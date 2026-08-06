@@ -891,3 +891,76 @@ async def test_provider_error_does_not_count_whole_span_as_overhead(
     ), (
         "provider_ms was never published, so overhead for this request must be skipped, not guessed"
     )
+
+
+async def test_non_streaming_records_path_matching_the_metric_label(
+    client, raw_key, session
+):
+    """A provider-served non-streaming request must record `path ==
+    "provider"` on the `RequestLog` row `_finish_request` writes."""
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert response.status_code == 200
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.path == "provider"
+
+
+async def test_cache_hit_records_cache_exact_path(client, raw_key, session):
+    body = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "path-cache-me"}],
+    }
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    await client.post("/v1/chat/completions", headers=headers, json=body)
+    await client.post("/v1/chat/completions", headers=headers, json=body)
+
+    logs = (
+        (await session.execute(select(RequestLog).order_by(RequestLog.id)))
+        .scalars()
+        .all()
+    )
+    assert [log.path for log in logs] == ["provider", "cache_exact"]
+
+
+async def test_streaming_records_stream_path(client, raw_key, session):
+    """A streamed request must record `path == "stream"` on the `RequestLog`
+    row `_messages_sse`/`_sse` write, and the Prometheus histogram must
+    record an observation under that same label - the two sinks are written
+    from separate functions on this path, so both sides of the invariant
+    need checking."""
+    from gatekeep.observability import metrics
+
+    before_count = sample_for(
+        metrics.request_duration_seconds,
+        "_count",
+        {"model": "claude-sonnet-5", "path": app_module._STREAM_PATH},
+    )
+
+    async with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        async for _ in response.aiter_lines():
+            pass
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.path == "stream"
+
+    after_count = sample_for(
+        metrics.request_duration_seconds,
+        "_count",
+        {"model": "claude-sonnet-5", "path": log.path},
+    )
+    assert after_count > before_count

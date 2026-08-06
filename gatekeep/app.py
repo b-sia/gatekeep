@@ -97,6 +97,24 @@ from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
 
+# The four values the `path` label/column can take, matching the Prometheus
+# `path` label one-for-one (observability/metrics.py) and RequestLog.path
+# (models.py). Every call site below sources its value from one of these
+# rather than a bare string literal, so the metric and the DB column cannot
+# drift apart from a typo in either.
+#
+# `_STREAM_PATH` in particular is unlike the other three: the non-streaming
+# branches route one `_finish_request` parameter into both `mark()` and
+# `log_request()`, but the streaming path publishes its label from the
+# endpoint and writes its column from inside the SSE generator - two
+# different functions, and the generator holds `state` rather than
+# `request`. Using the shared constant on both sides is what keeps those
+# sites from drifting apart.
+_CACHE_EXACT_PATH = "cache_exact"
+_CACHE_SEMANTIC_PATH = "cache_semantic"
+_PROVIDER_PATH = "provider"
+_STREAM_PATH = "stream"
+
 app = FastAPI(title="gatekeep")
 # Added first so it wraps everything: the start stamp must land before any
 # FastAPI dependency (auth, rate limit, budget) runs.
@@ -205,7 +223,9 @@ async def _finish_request(
         request: The Starlette request carrying `state.started_at`.
         session: DB session to persist the `RequestLog` row through.
         model: Resolved model id, used as the metric label.
-        path: One of "cache_exact", "cache_semantic", "provider".
+        path: One of "cache_exact", "cache_semantic", "provider". Published
+            as the metric label and stored on the RequestLog row from this
+            one parameter, so the histogram and the column cannot diverge.
         provider_ms: Upstream call duration, or None on a cache hit.
         key_id: The requesting API key's id.
         prompt_tokens: Input token count to record.
@@ -242,6 +262,7 @@ async def _finish_request(
         prompt_name=prompt_name,
         prompt_version_num=prompt_version_num,
         routed_from=routed_from,
+        path=path,
         duration_ms=timings.duration_ms,
         provider_ms=timings.provider_ms,
         ttft_ms=timings.ttft_ms,
@@ -396,7 +417,7 @@ async def chat_completions(
     mark(request, model=model)
 
     if req.stream:
-        mark(request, path="stream")
+        mark(request, path=_STREAM_PATH)
         return StreamingResponse(
             _sse(
                 provider,
@@ -430,7 +451,7 @@ async def chat_completions(
             request,
             session,
             model=model,
-            path="cache_exact",
+            path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
@@ -467,7 +488,7 @@ async def chat_completions(
                 request,
                 session,
                 model=model,
-                path="cache_semantic",
+                path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
@@ -484,7 +505,7 @@ async def chat_completions(
         cache_semantic_misses.labels(model=model).inc()
 
     # Marked before the call so a provider error still carries labels.
-    mark(request, path="provider")
+    mark(request, path=_PROVIDER_PATH)
     provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
@@ -529,7 +550,7 @@ async def chat_completions(
         request,
         session,
         model=model,
-        path="provider",
+        path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
         prompt_tokens=result.input_tokens,
@@ -606,7 +627,7 @@ async def messages(
     mark(request, model=model)
 
     if req.stream:
-        mark(request, path="stream")
+        mark(request, path=_STREAM_PATH)
         return StreamingResponse(
             _messages_sse(
                 provider,
@@ -640,7 +661,7 @@ async def messages(
             request,
             session,
             model=model,
-            path="cache_exact",
+            path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
             prompt_tokens=cached.usage.prompt_tokens,
@@ -677,7 +698,7 @@ async def messages(
                 request,
                 session,
                 model=model,
-                path="cache_semantic",
+                path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
@@ -696,7 +717,7 @@ async def messages(
         cache_semantic_misses.labels(model=model).inc()
 
     # Marked before the call so a provider error still carries labels.
-    mark(request, path="provider")
+    mark(request, path=_PROVIDER_PATH)
     provider_started = time.perf_counter()
     try:
         result = await provider.complete(payload)
@@ -742,7 +763,7 @@ async def messages(
         request,
         session,
         model=model,
-        path="provider",
+        path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
         prompt_tokens=result.input_tokens,
@@ -820,6 +841,7 @@ async def _messages_sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        path=_STREAM_PATH,
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,
@@ -902,6 +924,7 @@ async def _sse(
                         prompt_name=prompt_name,
                         routed_from=routed_from,
                         prompt_version_num=prompt_version_num,
+                        path=_STREAM_PATH,
                         duration_ms=timings.duration_ms,
                         provider_ms=timings.provider_ms,
                         ttft_ms=timings.ttft_ms,
