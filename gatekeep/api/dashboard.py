@@ -464,7 +464,19 @@ _STREAMING = RequestLog.path == "stream"
 # On a cache hit no provider call was made, so the entire duration is
 # gatekeep's own time. This matches the middleware's treatment of the same
 # case (gatekeep/observability/latency.py).
-_OVERHEAD_MS = RequestLog.duration_ms - func.coalesce(RequestLog.provider_ms, 0.0)
+#
+# Gated on `cached` rather than `COALESCE(provider_ms, 0)`: a NULL
+# `provider_ms` on a *non*-cached row means the upstream call never
+# completed (see `test_provider_error_does_not_count_whole_span_as_overhead`
+# on the Prometheus side), and today such rows are never logged at all - but
+# that is a fact about the caller, not something this expression should rely
+# on. If a failed request is ever logged (#17), `CASE` still returns NULL for
+# it here, which drops it from the percentile set instead of silently
+# attributing the whole span to gateway overhead.
+_OVERHEAD_MS = case(
+    (RequestLog.cached.is_(True), RequestLog.duration_ms),
+    else_=RequestLog.duration_ms - RequestLog.provider_ms,
+)
 
 _QUANTILES = (0.5, 0.95, 0.99)
 

@@ -676,8 +676,9 @@ async def test_latency_summary_percentiles(client, raw_key, session):
     assert body["provider_ms"]["p50_ms"] == 110.0
     assert body["provider_ms"]["p95_ms"] == pytest.approx(155.0)
 
-    # Overhead = duration - COALESCE(provider, 0): {40, 40, 300}. The cache
-    # hit's entire 300ms is gatekeep's own time.
+    # Overhead = duration - provider on a non-cached row, duration alone on a
+    # cached one: {40, 40, 300}. The cache hit's entire 300ms is gatekeep's
+    # own time.
     assert body["overhead_ms"]["p50_ms"] == 40.0
     assert body["overhead_ms"]["p95_ms"] == pytest.approx(274.0)
 
@@ -685,6 +686,53 @@ async def test_latency_summary_percentiles(client, raw_key, session):
     assert body["stream_ttlt_ms"]["p50_ms"] == 1500.0
     # Streaming TTFT: {100, 300}.
     assert body["ttft_ms"]["p50_ms"] == 200.0
+
+
+async def test_latency_overhead_excludes_uncached_row_with_no_provider_ms(
+    client, raw_key, session
+):
+    """A non-cached row with a NULL `provider_ms` means the upstream call
+    never completed (see `test_provider_error_does_not_count_whole_span_as_
+    overhead` on the Prometheus side); the gateway never logs such a row
+    today, but the overhead expression must not infer "no provider call" the
+    way it correctly does for an actual cache hit. If it ever is logged, the
+    row must drop out of the overhead percentile set, not get counted as if
+    its whole duration were gateway time."""
+    key_id = await _key_id(session, raw_key)
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        path="provider",
+        cached=False,
+        duration_ms=500.0,
+        provider_ms=None,
+    )
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        path="provider",
+        cached=False,
+        duration_ms=100.0,
+        provider_ms=80.0,
+    )
+
+    r = await client.get(
+        "/dashboard/api/latency/summary",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    body = r.json()
+
+    # Both rows are latency-eligible (path set, duration_ms set) and count
+    # toward e2e and the sample total...
+    assert body["sample_count"] == 2
+    assert body["e2e_ms"]["p50_ms"] == 300.0
+
+    # ...but only the row with a real provider_ms feeds overhead. If the
+    # uncached-NULL row leaked in as duration-minus-zero, p50 would be
+    # (20 + 500) / 2 = 260 instead.
+    assert body["overhead_ms"]["p50_ms"] == 20.0
 
 
 async def test_latency_summary_breakdowns(client, raw_key, session):
