@@ -924,16 +924,17 @@ async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
     )
 
 
-async def test_provider_error_does_not_count_whole_span_as_overhead(
-    broken_client, raw_key
+async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
+    broken_client, raw_key, session
 ):
-    """`mark(request, path="provider")` runs before `provider.complete(...)` so
-    a failed call still carries labels - but that also means provider_ms is
-    never published when the call raises. The middleware must not fall back to
-    treating the unpublished value as "no provider call" (a cache hit) and
-    counting the whole elapsed span as gateway overhead: it genuinely doesn't
-    know how that time split, so it must skip the observation entirely rather
-    than record a misleading one."""
+    """Companion fix to issue #17's milder non-streaming case: `mark(request,
+    path="provider")` already ran before `provider.complete(...)` so a failed
+    call carries labels, but provider_ms was never published, so the
+    middleware skipped the overhead observation entirely (see
+    test_provider_error_does_not_count_whole_span_as_overhead in git history
+    for the old, now-superseded behavior). The fix publishes provider_ms even
+    on failure and logs a RequestLog row, so overhead is now observed and a
+    row exists with outcome='provider_error'."""
     from gatekeep.observability import metrics
 
     labels = {"model": "claude-sonnet-5", "path": "provider"}
@@ -957,13 +958,19 @@ async def test_provider_error_does_not_count_whole_span_as_overhead(
     assert (
         sample_for(metrics.request_duration_seconds, "_count", labels)
         == before_duration_count + 1
-    ), "the middleware still knows end-to-end for a failed request"
+    )
     assert (
         sample_for(metrics.gateway_overhead_seconds, "_count", labels)
-        == before_overhead_count
-    ), (
-        "provider_ms was never published, so overhead for this request must be skipped, not guessed"
-    )
+        == before_overhead_count + 1
+    ), "provider_ms is now published even on failure, so overhead must be observed"
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    assert log.prompt_tokens == 0
+    assert log.completion_tokens == 0
+    assert log.cost_usd == 0
+    assert log.provider_ms is not None
+    assert log.path == "provider"
 
 
 async def test_non_streaming_records_path_matching_the_metric_label(

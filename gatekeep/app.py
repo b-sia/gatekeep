@@ -511,6 +511,26 @@ async def chat_completions(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+        error_provider_ms = (time.perf_counter() - provider_started) * 1000
+        error_timings = observe_non_streaming(
+            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
+        )
+        await log_request(
+            session,
+            key_id=key_id,
+            model=model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            response_id=new_completion_id(),
+            prompt_name=req.prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=served_prompt_version,
+            path=_PROVIDER_PATH,
+            outcome="provider_error",
+            duration_ms=error_timings.duration_ms,
+            provider_ms=error_timings.provider_ms,
+            ttft_ms=error_timings.ttft_ms,
+        )
         return map_provider_error(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
     response = result_to_openai(result, model=model)
@@ -723,6 +743,26 @@ async def messages(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+        error_provider_ms = (time.perf_counter() - provider_started) * 1000
+        error_timings = observe_non_streaming(
+            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
+        )
+        await log_request(
+            session,
+            key_id=key_id,
+            model=model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            response_id=new_message_id(),
+            prompt_name=req.prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=served_prompt_version,
+            path=_PROVIDER_PATH,
+            outcome="provider_error",
+            duration_ms=error_timings.duration_ms,
+            provider_ms=error_timings.provider_ms,
+            ttft_ms=error_timings.ttft_ms,
+        )
         return map_provider_error_anthropic(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
     openai_shaped = result_to_openai(result, model=model)

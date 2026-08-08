@@ -446,3 +446,35 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
     assert log.outcome == "client_disconnect"
     assert log.completion_tokens == 0
     assert log.duration_ms is None
+
+
+async def test_non_streaming_provider_error_logs_outcome_and_overhead(
+    client, raw_key, session, monkeypatch
+):
+    """A non-streaming `/v1/messages` call whose provider raises must publish
+    provider_ms and log a RequestLog row with outcome='provider_error', the
+    same accounting fix as Task 7's chat/completions companion test."""
+
+    class FailingProvider:
+        async def complete(self, payload):
+            raise RuntimeError("boom")
+
+    monkeypatch.setitem(app_module._providers, "anthropic", FailingProvider())
+
+    r = await client.post(
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 50,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 502
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    assert log.prompt_tokens == 0
+    assert log.completion_tokens == 0
+    assert log.provider_ms is not None
+    assert log.path == "provider"
