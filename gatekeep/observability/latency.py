@@ -238,27 +238,51 @@ class StreamTimer:
             )
         self._last_delta_at = now
 
-    def finish(self) -> LatencyTimings:
+    def finish(self, *, succeeded: bool = True) -> LatencyTimings:
         """Close out the stream, observe the remaining histograms, return timings.
+
+        `succeeded=False` (a mid-stream provider error or client disconnect)
+        changes which reference point `duration_ms` uses: the last delta
+        actually emitted, not the failure moment, so a hung failed stream
+        doesn't inflate `duration_ms` with dead wait time it spent doing
+        nothing useful. `duration_ms` is None on a failed stream if no delta
+        ever arrived. `time_to_last_token_seconds` is only observed on a
+        clean finish, matching the DB-side exclusion of failed rows from
+        percentiles (see gatekeep/api/dashboard.py's `_latency_filters`).
+        `provider_ms` is measured to the failure moment either way (real
+        upstream time spent, including the failed wait) and is always
+        published onto `state` so the middleware's overhead calculation
+        still runs.
+
+        Args:
+            succeeded: Whether the stream reached a clean StreamEnd. Defaults
+                to True, preserving the pre-existing behavior for any
+                positional `finish()` call.
 
         Returns:
             A LatencyTimings for log_request, all-None if no start stamp was
-            available. `duration_ms` here is time-to-last-token, matching both
-            the `request_logs.duration_ms` column and
-            `time_to_last_token_seconds`, and is slightly smaller than the
-            middleware's `request_duration_seconds` for the same request.
+            available.
         """
         if self._started_at is None:
             return _NO_TIMINGS
 
         now = time.perf_counter()
-        duration_ms = (now - self._started_at) * 1000
         provider_ms = (
             None
             if self._provider_started_at is None
             else (now - self._provider_started_at) * 1000
         )
-        time_to_last_token_seconds.labels(model=self._model).observe(duration_ms / 1000)
+        if succeeded:
+            duration_ms = (now - self._started_at) * 1000
+            time_to_last_token_seconds.labels(model=self._model).observe(
+                duration_ms / 1000
+            )
+        else:
+            duration_ms = (
+                None
+                if self._last_delta_at is None
+                else (self._last_delta_at - self._started_at) * 1000
+            )
         # self._state is never None here: self._started_at is only set from
         # state.get(...), so a non-None started_at implies a non-None state.
         self._state["provider_ms"] = provider_ms
