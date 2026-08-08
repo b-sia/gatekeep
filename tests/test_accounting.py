@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import pytest
 from sqlalchemy import select
 
-from gatekeep.accounting import calculate_cost, log_request
+from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.models import ApiKey, RequestLog
 
@@ -200,3 +202,19 @@ async def test_log_request_path_defaults_to_none(session):
         response_id="resp-no-path",
     )
     assert log.path is None
+
+
+def test_estimate_tokens_empty_string_is_zero():
+    assert estimate_tokens("") == 0
+
+
+def test_estimate_tokens_rounds_up_to_at_least_one_token():
+    assert estimate_tokens("hi") == 1
+
+
+def test_estimate_tokens_matches_four_chars_per_token_on_exact_multiples():
+    assert estimate_tokens("a" * 8) == 2
+
+
+def test_estimate_tokens_rounds_up_on_a_partial_final_token():
+    assert estimate_tokens("a" * 9) == 3

@@ -30,6 +30,29 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+def estimate_tokens(text: str) -> int:
+    """Estimate a token count for `text` using the ~4-characters-per-token
+    heuristic, matching the proxy limit `gatekeep.embeddings` already uses
+    for the same reason: this codebase has no real tokenizer.
+
+    Used only where an authoritative provider-reported token count is
+    unavailable - a mid-stream provider error or client disconnect never
+    reaches `StreamEnd`, so the failed row's tokens/cost are approximate.
+
+    Rounds up so any non-empty text counts as at least one token; empty
+    text is zero tokens.
+
+    Args:
+        text: The text to estimate a token count for.
+
+    Returns:
+        The estimated token count, always >= 0, and >= 1 for any non-empty text.
+    """
+    if not text:
+        return 0
+    return -(-len(text) // 4)
+
+
 def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Calculate the USD cost of a completion from its model and token counts.
 
