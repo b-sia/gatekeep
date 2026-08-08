@@ -227,6 +227,31 @@ async def test_usage_summary_filters_by_model(client, raw_key, session):
     assert body["cost_usd"] == 1.0
 
 
+async def test_usage_summary_includes_cost_of_failed_rows(client, raw_key, session):
+    """Cost/spend aggregates are unchanged by #17: a failed row's estimated
+    cost still counts (the money was spent), unlike the latency percentiles
+    Task 8 excludes it from."""
+    key_id = await _key_id(session, raw_key)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", cost_usd=0.5, outcome="ok")
+    await _seed_log(
+        session,
+        key_id=key_id,
+        model="gpt-4o",
+        cost_usd=0.25,
+        outcome="provider_error",
+    )
+
+    r = await client.get(
+        "/dashboard/api/usage/summary",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    body = r.json()
+
+    assert body["request_count"] == 2
+    assert body["cost_usd"] == pytest.approx(0.75)
+    assert body["spend_usd"] == pytest.approx(0.75)
+
+
 # -- usage timeseries ---------------------------------------------------
 
 
