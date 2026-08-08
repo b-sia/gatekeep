@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Integer, case, func, select, true
+from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.db import get_session
@@ -201,15 +201,11 @@ async def usage_summary(
                 func.coalesce(func.sum(RequestLog.completion_tokens), 0),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
-                    ),
+                    func.sum(case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)),
                     0.0,
                 ),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
-                    ),
+                    func.sum(case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)),
                     0.0,
                 ),
                 func.coalesce(
@@ -323,15 +319,11 @@ async def usage_timeseries(
                     0,
                 ),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
-                    ),
+                    func.sum(case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)),
                     0.0,
                 ),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
-                    ),
+                    func.sum(case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)),
                     0.0,
                 ),
             )
@@ -392,9 +384,7 @@ class UsageByModelTimeseriesResponse(BaseModel):
     rows: list[UsageByModelBucket]
 
 
-@router.get(
-    "/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse
-)
+@router.get("/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse)
 async def usage_timeseries_by_model(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
@@ -513,20 +503,30 @@ def _latency_filters(
     prompt_name: str | None,
 ) -> list:
     """Build the WHERE clauses for a latency query: the usual usage filters
-    plus the two latency-eligibility conditions.
+    plus the latency-eligibility conditions.
 
     `path IS NOT NULL` excludes rows written between migrations 0011 and
     0012, which carry timings but no path - nothing after the fact can tell
     a streamed one from a non-streamed one, so they cannot be assigned to
     either side of the streaming split. This self-heals as those rows age
     out of the reporting window.
+
+    The `outcome` condition excludes failed rows (`provider_error` /
+    `client_disconnect`, #17): their `duration_ms` is real (see
+    StreamTimer.finish(succeeded=False)), but a percentile blending "how
+    long a normal request takes" with "how long a request took before it
+    failed" would describe neither quantity. NULL passes through (a
+    pre-0013 row, or any row logged without an explicit outcome), matching
+    how NULL `path` predates migration 0012.
     """
     return [
-        *_base_filters(
-            start, end, model=model, key_id=key_id, prompt_name=prompt_name
-        ),
+        *_base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name),
         RequestLog.path.isnot(None),
         RequestLog.duration_ms.isnot(None),
+        or_(
+            RequestLog.outcome.is_(None),
+            RequestLog.outcome == "ok",
+        ),
     ]
 
 
@@ -722,9 +722,7 @@ async def latency_summary(
     by_model = await _latency_breakdown(
         session, RequestLog.model, filters, condition=_NON_STREAMING
     )
-    by_key = await _latency_key_breakdown(
-        session, filters, condition=_NON_STREAMING
-    )
+    by_key = await _latency_key_breakdown(session, filters, condition=_NON_STREAMING)
     by_prompt = await _latency_breakdown(
         session, RequestLog.prompt_name, filters, condition=_NON_STREAMING
     )
