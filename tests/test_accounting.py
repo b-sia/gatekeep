@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
@@ -218,3 +219,42 @@ def test_estimate_tokens_matches_four_chars_per_token_on_exact_multiples():
 
 def test_estimate_tokens_rounds_up_on_a_partial_final_token():
     assert estimate_tokens("a" * 9) == 3
+
+
+@pytest_asyncio.fixture
+async def key_id(session):
+    raw = generate_key()
+    key = ApiKey(name="accounting-test", key_hash=hash_key(raw))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+    return key.id
+
+
+async def test_log_request_defaults_outcome_to_ok(session, key_id):
+    log = await log_request(
+        session,
+        key_id=key_id,
+        model="claude-sonnet-5",
+        prompt_tokens=1,
+        completion_tokens=1,
+        response_id="resp-outcome-default",
+    )
+    assert log.outcome == "ok"
+
+
+async def test_log_request_persists_explicit_outcome(session, key_id):
+    log = await log_request(
+        session,
+        key_id=key_id,
+        model="claude-sonnet-5",
+        prompt_tokens=1,
+        completion_tokens=1,
+        response_id="resp-outcome-explicit",
+        outcome="provider_error",
+    )
+    await session.refresh(log)
+    fetched = (
+        await session.execute(select(RequestLog).where(RequestLog.id == log.id))
+    ).scalar_one()
+    assert fetched.outcome == "provider_error"

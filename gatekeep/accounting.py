@@ -83,6 +83,7 @@ async def log_request(
     provider_ms: float | None = None,
     ttft_ms: float | None = None,
     path: str | None = None,
+    outcome: str = "ok",
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
@@ -119,6 +120,13 @@ async def log_request(
     "cache_semantic", "provider", or "stream"), matching the Prometheus
     `path` label one-for-one. It defaults to None so a caller without one
     can still log; pre-0012 rows are NULL and latency queries exclude them.
+
+    `outcome` is one of "ok" (default), "provider_error", or
+    "client_disconnect", recording how the request ended. A mid-stream
+    provider failure or client disconnect still gets a row (see #17) with
+    estimated tokens/cost instead of no row at all; `outcome` is what lets
+    any consumer (the dashboard latency queries, a success-rate stat)
+    distinguish those estimated rows from authoritative clean ones.
     """
     cost_usd = (
         cost_usd_override
@@ -142,6 +150,7 @@ async def log_request(
         provider_ms=provider_ms,
         ttft_ms=ttft_ms,
         path=path,
+        outcome=outcome,
     )
     session.add(log)
     await session.commit()
