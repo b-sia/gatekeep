@@ -23,6 +23,7 @@ from gatekeep.prompts import PromptNotFoundError, _get_prompt_row
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
 _NO_PROMPT_LABEL = "(none)"
+_FAILED_OUTCOMES = ("provider_error", "client_disconnect")
 
 
 def _default_window() -> tuple[datetime, datetime]:
@@ -62,6 +63,8 @@ class UsageSummaryResponse(BaseModel):
     savings_usd: float
     cache_hit_count: int
     cache_hit_rate: float
+    failed_count: int
+    success_rate: float
     by_model: list[UsageBreakdownRow]
     by_key: list[UsageBreakdownRow]
     by_prompt: list[UsageBreakdownRow]
@@ -212,6 +215,12 @@ async def usage_summary(
                     func.sum(func.cast(RequestLog.cached, Integer)),
                     0,
                 ),
+                func.coalesce(
+                    func.sum(
+                        case((RequestLog.outcome.in_(_FAILED_OUTCOMES), 1), else_=0)
+                    ),
+                    0,
+                ),
             ).where(*filters)
         )
     ).one()
@@ -224,10 +233,15 @@ async def usage_summary(
         spend_usd,
         savings_usd,
         cache_hit_count,
+        failed_count,
     ) = totals_row
     request_count = int(request_count)
     cache_hit_count = int(cache_hit_count)
+    failed_count = int(failed_count)
     cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
+    success_rate = (
+        (request_count - failed_count) / request_count if request_count else 0.0
+    )
 
     by_model = await _breakdown(session, RequestLog.model, filters)
     by_key = await _key_breakdown(session, filters)
@@ -245,6 +259,8 @@ async def usage_summary(
         savings_usd=float(savings_usd),
         cache_hit_count=cache_hit_count,
         cache_hit_rate=cache_hit_rate,
+        failed_count=failed_count,
+        success_rate=success_rate,
         by_model=by_model,
         by_key=by_key,
         by_prompt=by_prompt,

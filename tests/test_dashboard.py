@@ -252,6 +252,37 @@ async def test_usage_summary_includes_cost_of_failed_rows(client, raw_key, sessi
     assert body["spend_usd"] == pytest.approx(0.75)
 
 
+async def test_usage_summary_includes_failed_count_and_success_rate(
+    client, raw_key, session
+):
+    key_id = await _key_id(session, raw_key)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="ok")
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome=None)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="provider_error")
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="client_disconnect")
+
+    r = await client.get(
+        "/dashboard/api/usage/summary",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    body = r.json()
+
+    assert body["request_count"] == 4
+    assert body["failed_count"] == 2
+    assert body["success_rate"] == pytest.approx(0.5)
+
+
+async def test_usage_summary_success_rate_is_zero_for_an_empty_window(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/usage/summary",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    body = r.json()
+    assert body["request_count"] == 0
+    assert body["failed_count"] == 0
+    assert body["success_rate"] == 0.0
+
+
 # -- usage timeseries ---------------------------------------------------
 
 
