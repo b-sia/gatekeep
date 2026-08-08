@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -21,6 +22,52 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+
+
+async def test_run_shielded_completes_the_coroutine_despite_repeated_cancellation():
+    """A disconnecting client can inject cancellation into the SSE generator's
+    `finally` block more than once (e.g. a persistent cancel scope). The
+    accounting write there must run to completion regardless.
+
+    `_run_shielded` absorbs the outer cancellations rather than letting them
+    cut the DB commit short - it does NOT re-raise CancelledError to its
+    caller for an outer cancellation (only if the wrapped coroutine's own
+    task is itself done/cancelled, which never happens here). In the real
+    generator, the CancelledError the client disconnect caused is already
+    propagating via the `except ... raise` clause that ran before `finally`;
+    this helper's job is only to keep the write from being cut short while
+    that propagation is paused, not to re-signal the cancellation itself.
+    So `runner()` below completes normally even though its task was
+    cancelled twice - that is the correct, intended behavior."""
+    completed = False
+
+    async def slow_write():
+        nonlocal completed
+        await asyncio.sleep(0.05)
+        completed = True
+
+    async def runner():
+        await app_module._run_shielded(slow_write())
+
+    task = asyncio.ensure_future(runner())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    task.cancel()  # cancel again while the shielded write is still in flight
+    await (
+        task
+    )  # must NOT raise: both cancellations are absorbed until the write finishes
+    assert completed, (
+        "the shielded write must run to completion despite repeated cancellation"
+    )
+
+
+async def test_run_shielded_returns_the_coroutines_result_when_not_cancelled():
+    async def compute():
+        return 42
+
+    result = await app_module._run_shielded(compute())
+    assert result == 42
 
 
 def sample_for(histogram, suffix, labels):

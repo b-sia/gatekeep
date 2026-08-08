@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
@@ -863,6 +864,42 @@ async def _messages_sse(
 def _anthropic_event(event_type: str, data: dict) -> str:
     """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+async def _run_shielded(coro):
+    """Await `coro` to completion, even if the calling task is cancelled one
+    or more times while doing so.
+
+    Used for the streaming generators' failure-path accounting: their
+    `finally` block runs during `GeneratorExit`/`asyncio.CancelledError`
+    (a client disconnecting mid-stream), and a real disconnect can inject
+    cancellation more than once - e.g. a persistent cancel scope keeps
+    re-raising it at every `await` until the scope itself exits. A bare
+    `await coro` there would let a second cancellation cut the DB commit
+    short and drop the row. `asyncio.shield` protects the wrapped task from
+    the *outer* cancellation, but the outer `await` still raises
+    CancelledError immediately when cancelled - so this loops, re-awaiting
+    the same underlying task, until that task has actually finished.
+
+    Args:
+        coro: The coroutine to run to completion.
+
+    Returns:
+        Whatever `coro` returns.
+
+    Raises:
+        asyncio.CancelledError: only once the wrapped task itself is done
+            (either with a result or, in principle, its own cancellation -
+            which nothing here ever triggers).
+        BaseException: whatever `coro` itself raises.
+    """
+    task = asyncio.ensure_future(coro)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
 
 
 async def _sse(
