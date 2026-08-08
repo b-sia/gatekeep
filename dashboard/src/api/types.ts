@@ -22,6 +22,8 @@ export interface UsageSummaryResponse {
   savings_usd: number;
   cache_hit_count: number;
   cache_hit_rate: number;
+  failed_count: number;
+  success_rate: number;
   by_model: UsageBreakdownRow[];
   by_key: UsageBreakdownRow[];
   by_prompt: UsageBreakdownRow[];
