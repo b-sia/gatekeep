@@ -120,6 +120,20 @@ class BrokenProvider:
         yield  # pragma: no cover - unreachable, makes this an async generator
 
 
+class MidStreamFailureProvider:
+    """Yields some deltas, then raises - reproduces issue #17's "provider
+    raises mid-stream" case, as opposed to BrokenProvider which never
+    yields anything."""
+
+    async def complete(self, payload):
+        raise RuntimeError("upstream exploded mid non-stream")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield TextDelta(text="ng")
+        raise RuntimeError("upstream exploded mid-stream")
+
+
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
@@ -147,6 +161,18 @@ async def broken_client(monkeypatch):
     monkeypatch.setitem(app_module._providers, "ollama", broken)
     monkeypatch.setitem(app_module._providers, "openai", broken)
     monkeypatch.setitem(app_module._providers, "google", broken)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def mid_stream_failure_client(monkeypatch):
+    failing = MidStreamFailureProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", failing)
+    monkeypatch.setitem(app_module._providers, "ollama", failing)
+    monkeypatch.setitem(app_module._providers, "openai", failing)
+    monkeypatch.setitem(app_module._providers, "google", failing)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -1011,3 +1037,145 @@ async def test_streaming_records_stream_path(client, raw_key, session):
         {"model": "claude-sonnet-5", "path": log.path},
     )
     assert after_count > before_count
+
+
+async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+    mid_stream_failure_client, raw_key, session
+):
+    """Reproduces issue #17's first case: a provider that raises after
+    yielding some text. Before the fix, no RequestLog row is written at all
+    and the budget counter never decrements."""
+    from gatekeep.middleware.budget import _current_period, _spend_redis_key
+    from gatekeep.middleware.ratelimit import get_redis
+
+    async with mid_stream_failure_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" in body
+    assert "[DONE]" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    # "po" + "ng" = "pong", 4 chars -> ceil(4/4) = 1 estimated completion token.
+    assert log.completion_tokens == 1
+    assert log.prompt_tokens > 0
+    assert log.cost_usd > 0
+    # duration_ms is time-to-last-token (the "po"/"ng" deltas), not the
+    # failure moment - see StreamTimer.finish(succeeded=False).
+    assert log.duration_ms is not None
+    assert log.provider_ms is not None
+
+    key_id_row = (
+        await session.execute(select(ApiKey.id).where(ApiKey.name == "c"))
+    ).scalar_one()
+    redis = get_redis()
+    spend_key = _spend_redis_key(key_id_row, _current_period())
+    spent = await redis.get(spend_key)
+    assert spent is not None and float(spent) > 0, (
+        "record_spend must have run for the failed row, decrementing the budget"
+    )
+
+
+async def test_provider_error_mid_stream_observes_gateway_overhead(
+    mid_stream_failure_client, raw_key
+):
+    """A failed stream must still publish provider_ms so the middleware's
+    gateway_overhead_seconds observation isn't skipped (the observability
+    drift half of issue #17)."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5", "path": "stream"}
+    before = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+
+    async with mid_stream_failure_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        async for _ in r.aiter_lines():
+            pass
+
+    after = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+    assert after == before + 1
+
+
+async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+    """Reproduces issue #17's second case: the generator receives
+    CancelledError, not an Exception subclass, so the pre-fix `except
+    Exception` handler never runs. Drives _sse directly rather than through
+    an HTTP client: simulating a genuine client disconnect through
+    httpx's ASGITransport is not reliable, and the design spec's own
+    reproduction sketch calls for driving the generator directly."""
+    import time as time_module
+
+    key = ApiKey(name="disconnect-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk
+    await gen.__anext__()  # first text delta, "po"
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    # Only "po" was accumulated before the cancellation.
+    assert log.completion_tokens == 1
+    assert log.prompt_tokens > 0
+    assert log.duration_ms is not None
+    assert log.provider_ms is not None
+
+
+async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
+    """Spec item 3: a failure before any delta arrives leaves duration_ms
+    and ttft_ms null, but the row still gets written with the right
+    outcome."""
+    import time as time_module
+
+    key = ApiKey(name="disconnect-early-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk only - no delta consumed yet
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 0
+    assert log.duration_ms is None
+    assert log.ttft_ms is None
