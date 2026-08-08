@@ -24,8 +24,8 @@ function StatCard({ label, value, context }: { label: string; value: string; con
   );
 }
 
-/** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate) for
- * the current filter selection. Renders loading placeholders until
+/** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate,
+ * success rate) for the current filter selection. Renders loading placeholders until
  * `summary` is available. */
 export default function StatRow({ summary }: StatRowProps) {
   if (!summary) {

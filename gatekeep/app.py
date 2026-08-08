@@ -5,6 +5,8 @@ import json
 import logging
 import pathlib
 import time
+from collections.abc import Coroutine
+from typing import Any
 
 import ollama
 from redis.exceptions import RedisError
@@ -277,6 +279,68 @@ async def _finish_request(
     return timings
 
 
+async def _finish_failed_request(
+    request: Request,
+    session: AsyncSession,
+    *,
+    model: str,
+    provider_started: float,
+    key_id: int,
+    response_id: str,
+    prompt_name: str | None,
+    routed_from: str | None,
+    prompt_version_num: int | None,
+) -> None:
+    """Publish latency labels and record accounting for a non-streaming
+    request whose provider call raised.
+
+    Mirrors `_finish_request`'s bundling of `observe_non_streaming` +
+    `log_request` for the success path, but for the `provider.complete(...)`
+    exception branch of `chat_completions`/`messages`: zero tokens and zero
+    cost (no partial output exists on this path, unlike the streaming
+    generators which can estimate from accumulated delta text), and
+    `outcome="provider_error"` unconditionally. Deliberately does not call
+    `observe_request` (the token/cost histograms): a 0-token/`$0` observation
+    would drag those histograms down with no informative signal, unlike the
+    streaming failure paths, which have real (estimated) tokens/cost to
+    contribute.
+
+    Args:
+        request: The Starlette request carrying `state.started_at`.
+        session: DB session to persist the `RequestLog` row through.
+        model: Resolved model id, used as the metric label.
+        provider_started: `time.perf_counter()` value captured just before
+            the provider call, used to compute `provider_ms`.
+        key_id: The requesting API key's id.
+        response_id: A freshly generated id - no real response exists on
+            this path.
+        prompt_name: The prompt template requested, if any.
+        routed_from: The originally requested model, if cost-routing chose
+            a cheaper substitute.
+        prompt_version_num: Which `PromptVersion` was resolved, if any.
+    """
+    provider_ms = (time.perf_counter() - provider_started) * 1000
+    timings = observe_non_streaming(
+        request, model=model, path=_PROVIDER_PATH, provider_ms=provider_ms
+    )
+    await log_request(
+        session,
+        key_id=key_id,
+        model=model,
+        prompt_tokens=0,
+        completion_tokens=0,
+        response_id=response_id,
+        prompt_name=prompt_name,
+        routed_from=routed_from,
+        prompt_version_num=prompt_version_num,
+        path=_PROVIDER_PATH,
+        outcome="provider_error",
+        duration_ms=timings.duration_ms,
+        provider_ms=timings.provider_ms,
+        ttft_ms=timings.ttft_ms,
+    )
+
+
 @app.exception_handler(FastAPIHTTPException)
 async def _http_exception_handler(
     request: Request, exc: FastAPIHTTPException
@@ -511,25 +575,16 @@ async def chat_completions(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
-        error_provider_ms = (time.perf_counter() - provider_started) * 1000
-        error_timings = observe_non_streaming(
-            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
-        )
-        await log_request(
+        await _finish_failed_request(
+            request,
             session,
-            key_id=key_id,
             model=model,
-            prompt_tokens=0,
-            completion_tokens=0,
+            provider_started=provider_started,
+            key_id=key_id,
             response_id=new_completion_id(),
             prompt_name=req.prompt_name,
             routed_from=routed_from,
             prompt_version_num=served_prompt_version,
-            path=_PROVIDER_PATH,
-            outcome="provider_error",
-            duration_ms=error_timings.duration_ms,
-            provider_ms=error_timings.provider_ms,
-            ttft_ms=error_timings.ttft_ms,
         )
         return map_provider_error(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
@@ -743,25 +798,16 @@ async def messages(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
-        error_provider_ms = (time.perf_counter() - provider_started) * 1000
-        error_timings = observe_non_streaming(
-            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
-        )
-        await log_request(
+        await _finish_failed_request(
+            request,
             session,
-            key_id=key_id,
             model=model,
-            prompt_tokens=0,
-            completion_tokens=0,
+            provider_started=provider_started,
+            key_id=key_id,
             response_id=new_message_id(),
             prompt_name=req.prompt_name,
             routed_from=routed_from,
             prompt_version_num=served_prompt_version,
-            path=_PROVIDER_PATH,
-            outcome="provider_error",
-            duration_ms=error_timings.duration_ms,
-            provider_ms=error_timings.provider_ms,
-            ttft_ms=error_timings.ttft_ms,
         )
         return map_provider_error_anthropic(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
@@ -836,7 +882,11 @@ async def _messages_sse(
     final usage and stop_reason on a clean finish), then message_stop.
     Accounting runs in a `finally` block so it fires on every exit path -
     see `_sse`'s docstring for the full outcome-tagging rationale (`ok` /
-    `provider_error` / `client_disconnect`), which applies identically here.
+    `provider_error` / `client_disconnect`), which applies identically here,
+    including its fourth case: a stream whose iteration ends without ever
+    reaching `StreamEnd` raises `RuntimeError` and so is tagged
+    `provider_error` with estimated tokens, rather than logged as a $0 `ok`
+    row it has no authoritative counts to justify.
 
     Uses its own DB session for the same reason `_sse` does (the
     request-scoped session dependency is already closed by the time this
@@ -858,6 +908,7 @@ async def _messages_sse(
     outcome = "ok"
     input_tokens = output_tokens = 0
     accumulated: list[str] = []
+    stream_ended = False
     try:
         yield _anthropic_event(
             "message_start", message_start_event(id=message_id, model=model)
@@ -872,6 +923,7 @@ async def _messages_sse(
                     "content_block_delta", content_block_delta_event(ev.text)
                 )
             elif isinstance(ev, StreamEnd):
+                stream_ended = True
                 outcome = "ok"
                 input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _anthropic_event("content_block_stop", content_block_stop_event())
@@ -883,6 +935,11 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
+        if not stream_ended:
+            raise RuntimeError(
+                "provider stream ended without a StreamEnd event; no "
+                "authoritative token counts are available"
+            )
     except (GeneratorExit, asyncio.CancelledError):
         outcome = "client_disconnect"
         input_tokens = estimate_tokens(_payload_text(payload))
@@ -936,7 +993,7 @@ def _anthropic_event(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _run_shielded(coro):
+async def _run_shielded(coro: Coroutine[Any, Any, Any]) -> Any:
     """Await `coro` to completion, even if the calling task is cancelled one
     or more times while doing so.
 
@@ -950,6 +1007,12 @@ async def _run_shielded(coro):
     the *outer* cancellation, but the outer `await` still raises
     CancelledError immediately when cancelled - so this loops, re-awaiting
     the same underlying task, until that task has actually finished.
+
+    Scoped to callers in a `finally` block that either already have an
+    exception in flight (which resumes propagating once this returns) or are
+    about to end the generator; it is not a general-purpose "run to
+    completion no matter what" utility, since it silently discards the
+    caller's OWN cancellation once the wrapped coroutine completes.
 
     Args:
         coro: The coroutine to run to completion.
@@ -1025,6 +1088,13 @@ async def _sse(
       estimated way, then re-raises - a disconnected client cannot receive
       the closing chunk or an error event either way, so the fix records the
       row without attempting to resurrect the connection.
+    - A stream whose iteration ends without ever reaching `StreamEnd` (the
+      openai/google/ollama providers all emit it conditionally, so their
+      generators can finish without it) is treated identically to a provider
+      error - it raises `RuntimeError` here so the handler above tags it
+      `provider_error` with estimated tokens, for the same reason: no
+      authoritative count exists. Logging it as a $0 `ok` row instead would
+      be exactly the silent under-accounting this design set out to remove.
 
     Uses its own DB session (`SessionLocal`) since this generator keeps
     running after the request-scoped session dependency has already been
@@ -1050,6 +1120,7 @@ async def _sse(
     outcome = "ok"
     input_tokens = output_tokens = 0
     accumulated: list[str] = []
+    stream_ended = False
     try:
         yield _event(role_chunk(id=completion_id, created=created, model=model))
         timer.provider_started()
@@ -1061,6 +1132,7 @@ async def _sse(
                     text_chunk(ev.text, id=completion_id, created=created, model=model)
                 )
             elif isinstance(ev, StreamEnd):
+                stream_ended = True
                 outcome = "ok"
                 input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _event(
@@ -1068,6 +1140,11 @@ async def _sse(
                         ev.stop_reason, id=completion_id, created=created, model=model
                     )
                 )
+        if not stream_ended:
+            raise RuntimeError(
+                "provider stream ended without a StreamEnd event; no "
+                "authoritative token counts are available"
+            )
     except (GeneratorExit, asyncio.CancelledError):
         outcome = "client_disconnect"
         input_tokens = estimate_tokens(_payload_text(payload))

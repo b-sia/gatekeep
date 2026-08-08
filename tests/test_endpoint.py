@@ -134,6 +134,21 @@ class MidStreamFailureProvider:
         raise RuntimeError("upstream exploded mid-stream")
 
 
+class StreamEndsWithoutMarkerProvider:
+    """Yields deltas then simply stops, without ever yielding StreamEnd -
+    reproduces some providers' conditional StreamEnd emission (openai.py's
+    usage-chunk gate, google.py's finish_reason gate, ollama.py's done-flag
+    gate), where the async generator can complete its iteration without
+    ever reaching StreamEnd."""
+
+    async def complete(self, payload):
+        raise RuntimeError("not used")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield TextDelta(text="ng")
+
+
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
@@ -173,6 +188,18 @@ async def mid_stream_failure_client(monkeypatch):
     monkeypatch.setitem(app_module._providers, "ollama", failing)
     monkeypatch.setitem(app_module._providers, "openai", failing)
     monkeypatch.setitem(app_module._providers, "google", failing)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def stream_ends_without_marker_client(monkeypatch):
+    stubbed = StreamEndsWithoutMarkerProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
+    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
+    monkeypatch.setitem(app_module._providers, "openai", stubbed)
+    monkeypatch.setitem(app_module._providers, "google", stubbed)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -1037,6 +1064,7 @@ async def test_streaming_records_stream_path(client, raw_key, session):
             pass
     log = (await session.execute(select(RequestLog))).scalars().one()
     assert log.path == "stream"
+    assert log.outcome == "ok"
 
     after_count = sample_for(
         metrics.request_duration_seconds,
@@ -1120,6 +1148,32 @@ async def test_provider_error_mid_stream_observes_gateway_overhead(
     assert after == before + 1
 
 
+async def test_stream_ending_without_streamend_marker_logs_failed_row(
+    stream_ends_without_marker_client, raw_key, session
+):
+    """A provider whose stream() completes without ever yielding StreamEnd
+    must not be silently logged as a $0 'ok' success - it has no
+    authoritative token count either, exactly like a mid-stream exception."""
+    async with stream_ends_without_marker_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    assert log.completion_tokens == 1
+    assert log.cost_usd > 0
+
+
 async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
     """Reproduces issue #17's second case: the generator receives
     CancelledError, not an Exception subclass, so the pre-fix `except
@@ -1155,6 +1209,39 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
     assert log.prompt_tokens > 0
     assert log.duration_ms is not None
     assert log.provider_ms is not None
+
+
+async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
+    """Real client disconnects are delivered via Starlette's aclose() -
+    GeneratorExit thrown at the generator's suspended yield - not a
+    directly-injected CancelledError. The athrow-based tests above cover
+    the exception TYPE handling but not this delivery MECHANISM. aclose()
+    must return normally (the generator catches and re-raises GeneratorExit,
+    which is the successful-close case per the async generator protocol,
+    not an error) and the row must still be written."""
+    import time as time_module
+
+    key = ApiKey(name="aclose-disconnect-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk
+    await gen.__anext__()  # first text delta, "po"
+
+    await gen.aclose()  # must return normally, not raise
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 1
 
 
 async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
