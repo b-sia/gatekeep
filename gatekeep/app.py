@@ -793,34 +793,47 @@ async def _messages_sse(
 
     Emits message_start, content_block_start, a content_block_delta per text
     delta, content_block_stop, message_delta (carrying the authoritative
-    final usage and stop_reason), then message_stop. Logs the request via
-    `log_request` once the stream ends, using its own DB session for the
-    same reason `_sse` does (the request-scoped session dependency is
-    already closed by the time this generator keeps running).
+    final usage and stop_reason on a clean finish), then message_stop.
+    Accounting runs in a `finally` block so it fires on every exit path -
+    see `_sse`'s docstring for the full outcome-tagging rationale (`ok` /
+    `provider_error` / `client_disconnect`), which applies identically here.
+
+    Uses its own DB session for the same reason `_sse` does (the
+    request-scoped session dependency is already closed by the time this
+    generator keeps running), and wraps the accounting write in
+    `_run_shielded` for the same cancellation-safety reason.
 
     `state` is `request.scope["state"]`, passed in because the generator runs
     after the endpoint has returned and can no longer reach the `request`
     object itself. It doubles as the channel back to the middleware:
     `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
-    derive `gateway_overhead_seconds` once the stream closes. The middleware
-    still records end-to-end for this request; what the generator adds is
-    TTFT, inter-token gaps, and time-to-last-token.
+    derive `gateway_overhead_seconds` once the stream closes, on every exit
+    path including a failed one. The middleware still records end-to-end for
+    this request; what the generator adds is TTFT, inter-token gaps, and
+    time-to-last-token.
     """
     message_id = new_message_id()
     timer = StreamTimer(state, model=model)
-    yield _anthropic_event(
-        "message_start", message_start_event(id=message_id, model=model)
-    )
-    yield _anthropic_event("content_block_start", content_block_start_event())
+
+    outcome = "ok"
+    input_tokens = output_tokens = 0
+    accumulated: list[str] = []
     try:
+        yield _anthropic_event(
+            "message_start", message_start_event(id=message_id, model=model)
+        )
+        yield _anthropic_event("content_block_start", content_block_start_event())
         timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
                 timer.delta()
+                accumulated.append(ev.text)
                 yield _anthropic_event(
                     "content_block_delta", content_block_delta_event(ev.text)
                 )
             elif isinstance(ev, StreamEnd):
+                outcome = "ok"
+                input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _anthropic_event("content_block_stop", content_block_stop_event())
                 yield _anthropic_event(
                     "message_delta",
@@ -830,34 +843,51 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
-                timings = timer.finish()
-                async with SessionLocal() as session:
-                    await log_request(
-                        session,
-                        key_id=key_id,
-                        model=model,
-                        prompt_tokens=ev.input_tokens,
-                        completion_tokens=ev.output_tokens,
-                        response_id=message_id,
-                        prompt_name=prompt_name,
-                        routed_from=routed_from,
-                        prompt_version_num=prompt_version_num,
-                        path=_STREAM_PATH,
-                        duration_ms=timings.duration_ms,
-                        provider_ms=timings.provider_ms,
-                        ttft_ms=timings.ttft_ms,
-                    )
-                observe_request(
-                    model=model,
-                    prompt_tokens=ev.input_tokens,
-                    completion_tokens=ev.output_tokens,
-                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
-                )
+    except (GeneratorExit, asyncio.CancelledError):
+        outcome = "client_disconnect"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
+        raise
     except Exception as exc:  # surface upstream errors inside the stream
+        outcome = "provider_error"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
         yield _anthropic_event(
             "error",
             {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
         )
+    finally:
+        # NEVER yield here - illegal during GeneratorExit.
+        timings = timer.finish(succeeded=(outcome == "ok"))
+        cost_usd = calculate_cost(model, input_tokens, output_tokens)
+
+        async def _record() -> None:
+            async with SessionLocal() as session:
+                await log_request(
+                    session,
+                    key_id=key_id,
+                    model=model,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    response_id=message_id,
+                    prompt_name=prompt_name,
+                    routed_from=routed_from,
+                    prompt_version_num=prompt_version_num,
+                    path=_STREAM_PATH,
+                    outcome=outcome,
+                    duration_ms=timings.duration_ms,
+                    provider_ms=timings.provider_ms,
+                    ttft_ms=timings.ttft_ms,
+                )
+            observe_request(
+                model=model,
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                cost_usd=cost_usd,
+            )
+
+        await _run_shielded(_record())
+    # Unreachable on the client-disconnect path, same as _sse.
     yield _anthropic_event("message_stop", message_stop_event())
 
 

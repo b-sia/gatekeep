@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -52,6 +55,29 @@ async def client(monkeypatch):
     fake = FakeProvider()
     monkeypatch.setitem(app_module._providers, "anthropic", fake)
     monkeypatch.setitem(app_module._providers, "ollama", fake)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+class MidStreamFailureProvider:
+    """Yields some deltas, then raises - mirrors test_endpoint.py's provider
+    of the same name for the Anthropic-shaped streaming path."""
+
+    async def complete(self, payload):
+        raise RuntimeError("upstream exploded mid non-stream")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield TextDelta(text="ng")
+        raise RuntimeError("upstream exploded mid-stream")
+
+
+@pytest_asyncio.fixture
+async def mid_stream_failure_client(monkeypatch):
+    failing = MidStreamFailureProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", failing)
+    monkeypatch.setitem(app_module._providers, "ollama", failing)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -302,9 +328,7 @@ async def test_messages_streaming_records_ttft(client, raw_key, session):
     assert log.ttft_ms <= log.duration_ms
 
 
-async def test_messages_non_streaming_records_provider_path(
-    client, raw_key, session
-):
+async def test_messages_non_streaming_records_provider_path(client, raw_key, session):
     response = await client.post(
         "/v1/messages",
         headers={"Authorization": f"Bearer {raw_key}"},
@@ -336,3 +360,89 @@ async def test_messages_streaming_records_stream_path(client, raw_key, session):
             pass
     log = (await session.execute(select(RequestLog))).scalars().one()
     assert log.path == "stream"
+
+
+async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+    mid_stream_failure_client, raw_key, session
+):
+    async with mid_stream_failure_client.stream(
+        "POST",
+        "/v1/messages",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "max_tokens": 50,
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = b"".join([chunk async for chunk in r.aiter_bytes()]).decode()
+    assert "event: error" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    assert log.completion_tokens == 1  # "po" + "ng" -> ceil(4/4)
+    assert log.prompt_tokens > 0
+    assert log.cost_usd > 0
+    assert log.duration_ms is not None
+    assert log.provider_ms is not None
+
+
+async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+    key = ApiKey(name="messages-disconnect-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time.perf_counter()}
+    gen = app_module._messages_sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # message_start
+    await gen.__anext__()  # content_block_start
+    await gen.__anext__()  # first content_block_delta, "po"
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 1
+    assert log.prompt_tokens > 0
+    assert log.duration_ms is not None
+
+
+async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
+    """Cancelling right after the very first yield (message_start, before
+    content_block_start or any delta) must still be caught by the try block
+    and log a row - this is the same boundary condition Task 5 found a bug
+    at for _sse, fixed the same way here."""
+    key = ApiKey(
+        name="messages-disconnect-early-test", key_hash=hash_key(generate_key())
+    )
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time.perf_counter()}
+    gen = app_module._messages_sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # message_start only - no content_block_start yet
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 0
+    assert log.duration_ms is None
