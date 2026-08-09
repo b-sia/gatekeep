@@ -30,6 +30,29 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+def estimate_tokens(text: str) -> int:
+    """Estimate a token count for `text` using the ~4-characters-per-token
+    heuristic, matching the proxy limit `gatekeep.embeddings` already uses
+    for the same reason: this codebase has no real tokenizer.
+
+    Used only where an authoritative provider-reported token count is
+    unavailable - a mid-stream provider error or client disconnect never
+    reaches `StreamEnd`, so the failed row's tokens/cost are approximate.
+
+    Rounds up so any non-empty text counts as at least one token; empty
+    text is zero tokens.
+
+    Args:
+        text: The text to estimate a token count for.
+
+    Returns:
+        The estimated token count, always >= 0, and >= 1 for any non-empty text.
+    """
+    if not text:
+        return 0
+    return -(-len(text) // 4)
+
+
 def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Calculate the USD cost of a completion from its model and token counts.
 
@@ -60,6 +83,7 @@ async def log_request(
     provider_ms: float | None = None,
     ttft_ms: float | None = None,
     path: str | None = None,
+    outcome: str = "ok",
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
@@ -96,6 +120,13 @@ async def log_request(
     "cache_semantic", "provider", or "stream"), matching the Prometheus
     `path` label one-for-one. It defaults to None so a caller without one
     can still log; pre-0012 rows are NULL and latency queries exclude them.
+
+    `outcome` is one of "ok" (default), "provider_error", or
+    "client_disconnect", recording how the request ended. A mid-stream
+    provider failure or client disconnect still gets a row (see #17) with
+    estimated tokens/cost instead of no row at all; `outcome` is what lets
+    any consumer (the dashboard latency queries, a success-rate stat)
+    distinguish those estimated rows from authoritative clean ones.
     """
     cost_usd = (
         cost_usd_override
@@ -119,6 +150,7 @@ async def log_request(
         provider_ms=provider_ms,
         ttft_ms=ttft_ms,
         path=path,
+        outcome=outcome,
     )
     session.add(log)
     await session.commit()

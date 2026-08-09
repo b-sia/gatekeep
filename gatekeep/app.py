@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
 import time
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
+from typing import Any
 
 import ollama
 from redis.exceptions import RedisError
@@ -19,7 +23,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from gatekeep.accounting import calculate_cost, log_request
+from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
 from gatekeep.api.anthropic_schemas import MessagesRequest
 from gatekeep.api.dashboard import router as dashboard_router
 from gatekeep.api.anthropic_translation import (
@@ -55,7 +59,8 @@ from gatekeep.api.translation import (
 )
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
-from gatekeep.embeddings import embed_text
+from gatekeep.embeddings import embed_text_async
+from gatekeep.embeddings import warm as warm_embedding_model
 from gatekeep.middleware.budget import require_budget
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
@@ -115,7 +120,23 @@ _CACHE_SEMANTIC_PATH = "cache_semantic"
 _PROVIDER_PATH = "provider"
 _STREAM_PATH = "stream"
 
-app = FastAPI(title="gatekeep")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Warm the semantic-cache embedding model before serving traffic.
+
+    `embed_text`'s underlying model loads lazily on first use, and on a
+    container with no baked-in weights that first load downloads them from
+    the HF Hub - tens of seconds of blocking work. Doing it here means the
+    process doesn't report ready until it's paid, instead of stalling
+    whichever request happens to arrive first (and every other request
+    queued behind it on the event loop).
+    """
+    await asyncio.to_thread(warm_embedding_model)
+    yield
+
+
+app = FastAPI(title="gatekeep", lifespan=_lifespan)
 # Added first so it wraps everything: the start stamp must land before any
 # FastAPI dependency (auth, rate limit, budget) runs.
 app.add_middleware(LatencyMiddleware)
@@ -274,6 +295,88 @@ async def _finish_request(
         cost_usd=cost_usd,
     )
     return timings
+
+
+async def _finish_failed_request(
+    request: Request,
+    session: AsyncSession,
+    *,
+    model: str,
+    provider_started: float,
+    key_id: int,
+    response_id: str,
+    prompt_name: str | None,
+    routed_from: str | None,
+    prompt_version_num: int | None,
+) -> None:
+    """Publish latency labels and record accounting for a non-streaming
+    request whose provider call raised.
+
+    Mirrors `_finish_request`'s bundling of `observe_non_streaming` +
+    `log_request` for the success path, but for the `provider.complete(...)`
+    exception branch of `chat_completions`/`messages`: zero tokens and zero
+    cost (no partial output exists on this path, unlike the streaming
+    generators which can estimate from accumulated delta text), and
+    `outcome="provider_error"` unconditionally. Deliberately does not call
+    `observe_request` (the token/cost histograms): a 0-token/`$0` observation
+    would drag those histograms down with no informative signal, unlike the
+    streaming failure paths, which have real (estimated) tokens/cost to
+    contribute. Passes `count_latency=False` to `observe_non_streaming` for the
+    same reason the DB latency percentiles exclude failed rows: `provider_ms`
+    is still published so the middleware attributes gateway overhead, but a
+    failed call's duration must not skew the provider-latency histogram.
+
+    Args:
+        request: The Starlette request carrying `state.started_at`.
+        session: DB session to persist the `RequestLog` row through.
+        model: Resolved model id, used as the metric label.
+        provider_started: `time.perf_counter()` value captured just before
+            the provider call, used to compute `provider_ms`.
+        key_id: The requesting API key's id.
+        response_id: A freshly generated id - no real response exists on
+            this path.
+        prompt_name: The prompt template requested, if any.
+        routed_from: The originally requested model, if cost-routing chose
+            a cheaper substitute.
+        prompt_version_num: Which `PromptVersion` was resolved, if any.
+    """
+    provider_ms = (time.perf_counter() - provider_started) * 1000
+    timings = observe_non_streaming(
+        request,
+        model=model,
+        path=_PROVIDER_PATH,
+        provider_ms=provider_ms,
+        count_latency=False,
+    )
+    # Best-effort accounting: this runs inside the caller's `except` branch,
+    # right before it returns the mapped provider error. If the DB write itself
+    # fails (connection reset, pool exhausted - often the very outage that made
+    # the provider call fail), that failure must not propagate and mask the
+    # real provider error as an uncaught 500. Log and swallow so the caller
+    # still returns the mapped error to the client; a dropped accounting row is
+    # the lesser harm.
+    try:
+        await log_request(
+            session,
+            key_id=key_id,
+            model=model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            response_id=response_id,
+            prompt_name=prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=prompt_version_num,
+            path=_PROVIDER_PATH,
+            outcome="provider_error",
+            duration_ms=timings.duration_ms,
+            provider_ms=timings.provider_ms,
+            ttft_ms=timings.ttft_ms,
+        )
+    except Exception:
+        logger.exception(
+            "failed to record accounting for provider_error on the non-streaming "
+            "path; returning the mapped provider error anyway"
+        )
 
 
 @app.exception_handler(FastAPIHTTPException)
@@ -467,7 +570,7 @@ async def chat_completions(
     cache_exact_misses.labels(model=model).inc()
 
     embeddable_text = extract_embeddable_text(payload)
-    embedding = embed_text(embeddable_text)
+    embedding = await embed_text_async(embeddable_text)
     if embedding is not None:
         semantic_match = await find_semantic_match(
             session,
@@ -510,6 +613,17 @@ async def chat_completions(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+        await _finish_failed_request(
+            request,
+            session,
+            model=model,
+            provider_started=provider_started,
+            key_id=key_id,
+            response_id=new_completion_id(),
+            prompt_name=req.prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=served_prompt_version,
+        )
         return map_provider_error(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
     response = result_to_openai(result, model=model)
@@ -677,7 +791,7 @@ async def messages(
     cache_exact_misses.labels(model=model).inc()
 
     embeddable_text = extract_embeddable_text(payload)
-    embedding = embed_text(embeddable_text)
+    embedding = await embed_text_async(embeddable_text)
     if embedding is not None:
         semantic_match = await find_semantic_match(
             session,
@@ -722,6 +836,17 @@ async def messages(
     try:
         result = await provider.complete(payload)
     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+        await _finish_failed_request(
+            request,
+            session,
+            model=model,
+            provider_started=provider_started,
+            key_id=key_id,
+            response_id=new_message_id(),
+            prompt_name=req.prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=served_prompt_version,
+        )
         return map_provider_error_anthropic(exc)
     provider_ms = (time.perf_counter() - provider_started) * 1000
     openai_shaped = result_to_openai(result, model=model)
@@ -792,34 +917,53 @@ async def _messages_sse(
 
     Emits message_start, content_block_start, a content_block_delta per text
     delta, content_block_stop, message_delta (carrying the authoritative
-    final usage and stop_reason), then message_stop. Logs the request via
-    `log_request` once the stream ends, using its own DB session for the
-    same reason `_sse` does (the request-scoped session dependency is
-    already closed by the time this generator keeps running).
+    final usage and stop_reason on a clean finish), then message_stop.
+    Accounting runs in a `finally` block so it fires on every exit path -
+    see `_sse`'s docstring for the full outcome-tagging rationale (`ok` /
+    `provider_error` / `client_disconnect`), which applies identically here,
+    including its fourth case: a stream whose iteration ends without ever
+    reaching `StreamEnd` raises `RuntimeError` and so is tagged
+    `provider_error` with estimated tokens, rather than logged as a $0 `ok`
+    row it has no authoritative counts to justify.
+
+    Uses its own DB session for the same reason `_sse` does (the
+    request-scoped session dependency is already closed by the time this
+    generator keeps running), and wraps the accounting write in
+    `_run_shielded` for the same cancellation-safety reason.
 
     `state` is `request.scope["state"]`, passed in because the generator runs
     after the endpoint has returned and can no longer reach the `request`
     object itself. It doubles as the channel back to the middleware:
     `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
-    derive `gateway_overhead_seconds` once the stream closes. The middleware
-    still records end-to-end for this request; what the generator adds is
-    TTFT, inter-token gaps, and time-to-last-token.
+    derive `gateway_overhead_seconds` once the stream closes, on every exit
+    path including a failed one. The middleware still records end-to-end for
+    this request; what the generator adds is TTFT, inter-token gaps, and
+    time-to-last-token.
     """
     message_id = new_message_id()
     timer = StreamTimer(state, model=model)
-    yield _anthropic_event(
-        "message_start", message_start_event(id=message_id, model=model)
-    )
-    yield _anthropic_event("content_block_start", content_block_start_event())
+
+    outcome = "ok"
+    input_tokens = output_tokens = 0
+    accumulated: list[str] = []
+    stream_ended = False
     try:
+        yield _anthropic_event(
+            "message_start", message_start_event(id=message_id, model=model)
+        )
+        yield _anthropic_event("content_block_start", content_block_start_event())
         timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
                 timer.delta()
+                accumulated.append(ev.text)
                 yield _anthropic_event(
                     "content_block_delta", content_block_delta_event(ev.text)
                 )
             elif isinstance(ev, StreamEnd):
+                stream_ended = True
+                outcome = "ok"
+                input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _anthropic_event("content_block_stop", content_block_stop_event())
                 yield _anthropic_event(
                     "message_delta",
@@ -829,40 +973,144 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
-                timings = timer.finish()
-                async with SessionLocal() as session:
-                    await log_request(
-                        session,
-                        key_id=key_id,
-                        model=model,
-                        prompt_tokens=ev.input_tokens,
-                        completion_tokens=ev.output_tokens,
-                        response_id=message_id,
-                        prompt_name=prompt_name,
-                        routed_from=routed_from,
-                        prompt_version_num=prompt_version_num,
-                        path=_STREAM_PATH,
-                        duration_ms=timings.duration_ms,
-                        provider_ms=timings.provider_ms,
-                        ttft_ms=timings.ttft_ms,
-                    )
-                observe_request(
-                    model=model,
-                    prompt_tokens=ev.input_tokens,
-                    completion_tokens=ev.output_tokens,
-                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
-                )
+                break
+        if not stream_ended:
+            # The provider finished a complete stream without emitting a
+            # StreamEnd - the openai/google/ollama providers all gate it
+            # conditionally, so their generators legitimately end without it.
+            # The client received the full completion, so this is a success;
+            # we only lack authoritative token counts and fall back to
+            # estimates, then synthesize the terminal events the provider
+            # never sent so the client still sees a well-formed stream.
+            outcome = "ok"
+            input_tokens = estimate_tokens(_payload_text(payload))
+            output_tokens = estimate_tokens("".join(accumulated))
+            yield _anthropic_event("content_block_stop", content_block_stop_event())
+            yield _anthropic_event(
+                "message_delta",
+                message_delta_event(
+                    stop_reason=reverse_finish_reason(None),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                ),
+            )
+    except (GeneratorExit, asyncio.CancelledError):
+        outcome = "client_disconnect"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
+        raise
     except Exception as exc:  # surface upstream errors inside the stream
+        outcome = "provider_error"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
         yield _anthropic_event(
             "error",
             {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
         )
+    finally:
+        # NEVER yield here - illegal during GeneratorExit.
+        timings = timer.finish(succeeded=(outcome == "ok"))
+        cost_usd = calculate_cost(model, input_tokens, output_tokens)
+
+        async def _record() -> None:
+            async with SessionLocal() as session:
+                await log_request(
+                    session,
+                    key_id=key_id,
+                    model=model,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    response_id=message_id,
+                    prompt_name=prompt_name,
+                    routed_from=routed_from,
+                    prompt_version_num=prompt_version_num,
+                    path=_STREAM_PATH,
+                    outcome=outcome,
+                    duration_ms=timings.duration_ms,
+                    provider_ms=timings.provider_ms,
+                    ttft_ms=timings.ttft_ms,
+                )
+            observe_request(
+                model=model,
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                cost_usd=cost_usd,
+            )
+
+        await _run_shielded(_record())
+    # Unreachable on the client-disconnect path, same as _sse.
     yield _anthropic_event("message_stop", message_stop_event())
 
 
 def _anthropic_event(event_type: str, data: dict) -> str:
     """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+async def _run_shielded(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Await `coro` to completion, even if the calling task is cancelled one
+    or more times while doing so.
+
+    Used for the streaming generators' failure-path accounting: their
+    `finally` block runs during `GeneratorExit`/`asyncio.CancelledError`
+    (a client disconnecting mid-stream), and a real disconnect can inject
+    cancellation more than once - e.g. a persistent cancel scope keeps
+    re-raising it at every `await` until the scope itself exits. A bare
+    `await coro` there would let a second cancellation cut the DB commit
+    short and drop the row. `asyncio.shield` protects the wrapped task from
+    the *outer* cancellation, but the outer `await` still raises
+    CancelledError immediately when cancelled - so this loops, re-awaiting
+    the same underlying task, until that task has actually finished.
+
+    Scoped to callers in a `finally` block that either already have an
+    exception in flight (which resumes propagating once this returns) or are
+    about to end the generator; it is not a general-purpose "run to
+    completion no matter what" utility, since it silently discards the
+    caller's OWN cancellation once the wrapped coroutine completes.
+
+    Args:
+        coro: The coroutine to run to completion.
+
+    Returns:
+        Whatever `coro` returns.
+
+    Raises:
+        asyncio.CancelledError: only once the wrapped task itself is done
+            (either with a result or, in principle, its own cancellation -
+            which nothing here ever triggers).
+        BaseException: whatever `coro` itself raises.
+    """
+    task = asyncio.ensure_future(coro)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+
+
+def _payload_text(payload: dict) -> str:
+    """Concatenate a provider-neutral payload's system and message text.
+
+    Used to estimate input tokens on a failed/aborted stream, where no
+    authoritative provider-reported count exists (see `estimate_tokens`).
+    `payload["messages"]` entries are always `{"role": ..., "content": str}`
+    by the time they reach here (openai_to_payload/messages_to_payload have
+    already flattened multimodal content to plain text).
+
+    Args:
+        payload: The provider-neutral payload built by openai_to_payload or
+            messages_to_payload.
+
+    Returns:
+        Every message's text (and the system text, if present), joined by
+        blank lines.
+    """
+    parts: list[str] = []
+    if "system" in payload:
+        parts.append(payload["system"])
+    parts.extend(msg["content"] for msg in payload["messages"])
+    return "\n\n".join(parts)
 
 
 async def _sse(
@@ -879,63 +1127,101 @@ async def _sse(
     """Stream a chat completion as OpenAI-style Server-Sent Events.
 
     Emits a role chunk, then a text chunk per delta, then a final chunk
-    carrying the finish_reason. An upstream error mid-stream is surfaced
-    as an in-band error event before the closing [DONE]. Logs the request
-    via `log_request` once the stream ends, using its own DB session since
-    this generator keeps running after the request-scoped session dependency
-    has already been closed.
+    carrying the finish_reason. Accounting (`StreamTimer.finish`,
+    `log_request`, `observe_request`) runs in a `finally` block so it fires
+    on every exit path, not just a clean `StreamEnd`:
+
+    - A clean finish (`StreamEnd` reached) logs `outcome="ok"` with the
+      provider's authoritative token counts.
+    - A provider error mid-stream surfaces as an in-band SSE error event
+      (as before) and logs `outcome="provider_error"` with tokens estimated
+      from the accumulated delta text via `estimate_tokens`, since no
+      authoritative count exists without a `StreamEnd`.
+    - A client disconnect (`GeneratorExit`/`asyncio.CancelledError`, neither
+      an `Exception` subclass) logs `outcome="client_disconnect"` the same
+      estimated way, then re-raises - a disconnected client cannot receive
+      the closing chunk or an error event either way, so the fix records the
+      row without attempting to resurrect the connection.
+    - A stream whose iteration ends without ever reaching `StreamEnd` (the
+      openai/google/ollama providers all emit it conditionally, so their
+      generators can finish without it) is a *successful* completion: the
+      client received the full body, so the row is logged `outcome="ok"`.
+      Only the authoritative token count is missing, so tokens are estimated
+      from the accumulated delta text (the same `estimate_tokens` fallback the
+      failure paths use) rather than left at $0, and the terminal chunk the
+      provider never sent is synthesized so the client still sees a
+      well-formed stream. Tagging this `provider_error` instead would surface
+      a phantom error event to a client that received a correct response and
+      would deflate the success rate for a request that actually succeeded.
+
+    Uses its own DB session (`SessionLocal`) since this generator keeps
+    running after the request-scoped session dependency has already been
+    closed. The accounting write in `finally` is wrapped in `_run_shielded`
+    because a disconnecting client can inject cancellation more than once
+    while that write is in flight, and a bare `await` there could let a
+    second cancellation cut the DB commit short.
 
     `state` is `request.scope["state"]`, passed in because the generator runs
     after the endpoint has returned and can no longer reach the `request`
     object itself. It doubles as the channel back to the middleware:
     `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
-    derive `gateway_overhead_seconds` once the stream closes. The middleware
-    still records end-to-end for this request; what the generator adds is
-    TTFT, inter-token gaps, and time-to-last-token. Timing is recorded via
-    StreamTimer and lands on the same RequestLog row.
+    derive `gateway_overhead_seconds` once the stream closes, on every exit
+    path including a failed one. The middleware still records end-to-end for
+    this request; what the generator adds is TTFT, inter-token gaps, and
+    time-to-last-token. Timing is recorded via StreamTimer and lands on the
+    same RequestLog row.
     """
     completion_id = new_completion_id()
     created = int(time.time())
     timer = StreamTimer(state, model=model)
-    yield _event(role_chunk(id=completion_id, created=created, model=model))
+
+    outcome = "ok"
+    input_tokens = output_tokens = 0
+    accumulated: list[str] = []
+    stream_ended = False
     try:
+        yield _event(role_chunk(id=completion_id, created=created, model=model))
         timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
                 timer.delta()
+                accumulated.append(ev.text)
                 yield _event(
                     text_chunk(ev.text, id=completion_id, created=created, model=model)
                 )
             elif isinstance(ev, StreamEnd):
+                stream_ended = True
+                outcome = "ok"
+                input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _event(
                     final_chunk(
                         ev.stop_reason, id=completion_id, created=created, model=model
                     )
                 )
-                timings = timer.finish()
-                async with SessionLocal() as session:
-                    await log_request(
-                        session,
-                        key_id=key_id,
-                        model=model,
-                        prompt_tokens=ev.input_tokens,
-                        completion_tokens=ev.output_tokens,
-                        response_id=completion_id,
-                        prompt_name=prompt_name,
-                        routed_from=routed_from,
-                        prompt_version_num=prompt_version_num,
-                        path=_STREAM_PATH,
-                        duration_ms=timings.duration_ms,
-                        provider_ms=timings.provider_ms,
-                        ttft_ms=timings.ttft_ms,
-                    )
-                observe_request(
-                    model=model,
-                    prompt_tokens=ev.input_tokens,
-                    completion_tokens=ev.output_tokens,
-                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
-                )
+                break
+        if not stream_ended:
+            # The provider finished a complete stream without emitting a
+            # StreamEnd - the openai/google/ollama providers all gate it
+            # conditionally, so their generators legitimately end without it.
+            # The client received the full completion, so this is a success;
+            # we only lack authoritative token counts and fall back to
+            # estimates, then synthesize the terminal chunk the provider never
+            # sent so the client still sees a well-formed stream.
+            outcome = "ok"
+            input_tokens = estimate_tokens(_payload_text(payload))
+            output_tokens = estimate_tokens("".join(accumulated))
+            yield _event(
+                final_chunk(None, id=completion_id, created=created, model=model)
+            )
+    except (GeneratorExit, asyncio.CancelledError):
+        outcome = "client_disconnect"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
+        raise
     except Exception as exc:  # surface upstream errors inside the stream
+        outcome = "provider_error"
+        input_tokens = estimate_tokens(_payload_text(payload))
+        output_tokens = estimate_tokens("".join(accumulated))
         error_payload = {
             "error": {
                 "message": str(exc),
@@ -944,6 +1230,39 @@ async def _sse(
             }
         }
         yield f"data: {json.dumps(error_payload)}\n\n"
+    finally:
+        # NEVER yield here - illegal during GeneratorExit.
+        timings = timer.finish(succeeded=(outcome == "ok"))
+        cost_usd = calculate_cost(model, input_tokens, output_tokens)
+
+        async def _record() -> None:
+            async with SessionLocal() as session:
+                await log_request(
+                    session,
+                    key_id=key_id,
+                    model=model,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    response_id=completion_id,
+                    prompt_name=prompt_name,
+                    routed_from=routed_from,
+                    prompt_version_num=prompt_version_num,
+                    path=_STREAM_PATH,
+                    outcome=outcome,
+                    duration_ms=timings.duration_ms,
+                    provider_ms=timings.provider_ms,
+                    ttft_ms=timings.ttft_ms,
+                )
+            observe_request(
+                model=model,
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                cost_usd=cost_usd,
+            )
+
+        await _run_shielded(_record())
+    # Unreachable on the client-disconnect path: the `raise` above
+    # re-propagates once `finally` completes, so control never reaches here.
     yield "data: [DONE]\n\n"
 
 

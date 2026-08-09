@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -21,6 +22,52 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+
+
+async def test_run_shielded_completes_the_coroutine_despite_repeated_cancellation():
+    """A disconnecting client can inject cancellation into the SSE generator's
+    `finally` block more than once (e.g. a persistent cancel scope). The
+    accounting write there must run to completion regardless.
+
+    `_run_shielded` absorbs the outer cancellations rather than letting them
+    cut the DB commit short - it does NOT re-raise CancelledError to its
+    caller for an outer cancellation (only if the wrapped coroutine's own
+    task is itself done/cancelled, which never happens here). In the real
+    generator, the CancelledError the client disconnect caused is already
+    propagating via the `except ... raise` clause that ran before `finally`;
+    this helper's job is only to keep the write from being cut short while
+    that propagation is paused, not to re-signal the cancellation itself.
+    So `runner()` below completes normally even though its task was
+    cancelled twice - that is the correct, intended behavior."""
+    completed = False
+
+    async def slow_write():
+        nonlocal completed
+        await asyncio.sleep(0.05)
+        completed = True
+
+    async def runner():
+        await app_module._run_shielded(slow_write())
+
+    task = asyncio.ensure_future(runner())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    task.cancel()  # cancel again while the shielded write is still in flight
+    await (
+        task
+    )  # must NOT raise: both cancellations are absorbed until the write finishes
+    assert completed, (
+        "the shielded write must run to completion despite repeated cancellation"
+    )
+
+
+async def test_run_shielded_returns_the_coroutines_result_when_not_cancelled():
+    async def compute():
+        return 42
+
+    result = await app_module._run_shielded(compute())
+    assert result == 42
 
 
 def sample_for(histogram, suffix, labels):
@@ -73,6 +120,51 @@ class BrokenProvider:
         yield  # pragma: no cover - unreachable, makes this an async generator
 
 
+class MidStreamFailureProvider:
+    """Yields some deltas, then raises - reproduces issue #17's "provider
+    raises mid-stream" case, as opposed to BrokenProvider which never
+    yields anything."""
+
+    async def complete(self, payload):
+        raise RuntimeError("upstream exploded mid non-stream")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield TextDelta(text="ng")
+        raise RuntimeError("upstream exploded mid-stream")
+
+
+class StreamEndsWithoutMarkerProvider:
+    """Yields deltas then simply stops, without ever yielding StreamEnd -
+    reproduces some providers' conditional StreamEnd emission (openai.py's
+    usage-chunk gate, google.py's finish_reason gate, ollama.py's done-flag
+    gate), where the async generator can complete its iteration without
+    ever reaching StreamEnd."""
+
+    async def complete(self, payload):
+        raise RuntimeError("not used")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield TextDelta(text="ng")
+
+
+class StreamEndThenRaisesProvider:
+    """Yields a StreamEnd carrying authoritative token counts, then keeps
+    going and raises. Reproduces a provider whose generator emits more after
+    the terminal event; the _sse loop must stop at StreamEnd so the trailing
+    error cannot re-tag an already-completed stream as failed or clobber its
+    authoritative counts with estimates."""
+
+    async def complete(self, payload):
+        raise RuntimeError("not used")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
+        raise RuntimeError("provider yielded past StreamEnd")
+
+
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
@@ -100,6 +192,42 @@ async def broken_client(monkeypatch):
     monkeypatch.setitem(app_module._providers, "ollama", broken)
     monkeypatch.setitem(app_module._providers, "openai", broken)
     monkeypatch.setitem(app_module._providers, "google", broken)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def mid_stream_failure_client(monkeypatch):
+    failing = MidStreamFailureProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", failing)
+    monkeypatch.setitem(app_module._providers, "ollama", failing)
+    monkeypatch.setitem(app_module._providers, "openai", failing)
+    monkeypatch.setitem(app_module._providers, "google", failing)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def stream_ends_without_marker_client(monkeypatch):
+    stubbed = StreamEndsWithoutMarkerProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
+    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
+    monkeypatch.setitem(app_module._providers, "openai", stubbed)
+    monkeypatch.setitem(app_module._providers, "google", stubbed)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def stream_end_then_raises_client(monkeypatch):
+    stubbed = StreamEndThenRaisesProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
+    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
+    monkeypatch.setitem(app_module._providers, "openai", stubbed)
+    monkeypatch.setitem(app_module._providers, "google", stubbed)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -851,16 +979,17 @@ async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
     )
 
 
-async def test_provider_error_does_not_count_whole_span_as_overhead(
-    broken_client, raw_key
+async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
+    broken_client, raw_key, session
 ):
-    """`mark(request, path="provider")` runs before `provider.complete(...)` so
-    a failed call still carries labels - but that also means provider_ms is
-    never published when the call raises. The middleware must not fall back to
-    treating the unpublished value as "no provider call" (a cache hit) and
-    counting the whole elapsed span as gateway overhead: it genuinely doesn't
-    know how that time split, so it must skip the observation entirely rather
-    than record a misleading one."""
+    """Companion fix to issue #17's milder non-streaming case: `mark(request,
+    path="provider")` already ran before `provider.complete(...)` so a failed
+    call carries labels, but provider_ms was never published, so the
+    middleware skipped the overhead observation entirely (see
+    test_provider_error_does_not_count_whole_span_as_overhead in git history
+    for the old, now-superseded behavior). The fix publishes provider_ms even
+    on failure and logs a RequestLog row, so overhead is now observed and a
+    row exists with outcome='provider_error'."""
     from gatekeep.observability import metrics
 
     labels = {"model": "claude-sonnet-5", "path": "provider"}
@@ -884,13 +1013,71 @@ async def test_provider_error_does_not_count_whole_span_as_overhead(
     assert (
         sample_for(metrics.request_duration_seconds, "_count", labels)
         == before_duration_count + 1
-    ), "the middleware still knows end-to-end for a failed request"
+    )
     assert (
         sample_for(metrics.gateway_overhead_seconds, "_count", labels)
-        == before_overhead_count
-    ), (
-        "provider_ms was never published, so overhead for this request must be skipped, not guessed"
+        == before_overhead_count + 1
+    ), "provider_ms is now published even on failure, so overhead must be observed"
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    assert log.prompt_tokens == 0
+    assert log.completion_tokens == 0
+    assert log.cost_usd == 0
+    assert log.provider_ms is not None
+    assert log.path == "provider"
+
+
+async def test_provider_error_does_not_skew_provider_latency_histogram(
+    broken_client, raw_key, session
+):
+    """A failed non-streaming call publishes provider_ms for overhead
+    attribution but must not enter the provider_duration_seconds histogram:
+    a failed (fast-erroring or timing-out) call's duration is not 'how long a
+    normal request takes', matching the exclusion of failed rows from the DB
+    latency percentiles."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5"}
+    before = sample_for(metrics.provider_duration_seconds, "_count", labels)
+
+    r = await broken_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "provider-error"}],
+        },
     )
+    assert r.status_code == 502
+
+    assert sample_for(metrics.provider_duration_seconds, "_count", labels) == before, (
+        "failed provider call must not be observed into the provider-latency histogram"
+    )
+
+
+async def test_provider_error_survives_failing_accounting_write(
+    broken_client, raw_key, monkeypatch
+):
+    """If the accounting write in the failure path itself raises (DB down -
+    often the same outage that failed the provider call), the mapped provider
+    error must still reach the client. The accounting failure is logged and
+    swallowed, not allowed to surface as an uncaught 500."""
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db connection reset during accounting write")
+
+    monkeypatch.setattr(app_module, "log_request", _boom)
+
+    r = await broken_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "provider-error"}],
+        },
+    )
+    assert r.status_code == 502, "the mapped provider error, not a masked 500"
 
 
 async def test_non_streaming_records_path_matching_the_metric_label(
@@ -957,6 +1144,7 @@ async def test_streaming_records_stream_path(client, raw_key, session):
             pass
     log = (await session.execute(select(RequestLog))).scalars().one()
     assert log.path == "stream"
+    assert log.outcome == "ok"
 
     after_count = sample_for(
         metrics.request_duration_seconds,
@@ -964,3 +1152,240 @@ async def test_streaming_records_stream_path(client, raw_key, session):
         {"model": "claude-sonnet-5", "path": log.path},
     )
     assert after_count > before_count
+
+
+async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+    mid_stream_failure_client, raw_key, session
+):
+    """Reproduces issue #17's first case: a provider that raises after
+    yielding some text. Before the fix, no RequestLog row is written at all
+    and the budget counter never decrements."""
+    from gatekeep.middleware.budget import _current_period, _spend_redis_key
+    from gatekeep.middleware.ratelimit import get_redis
+
+    async with mid_stream_failure_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" in body
+    assert "[DONE]" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "provider_error"
+    # "po" + "ng" = "pong", 4 chars -> ceil(4/4) = 1 estimated completion token.
+    assert log.completion_tokens == 1
+    assert log.prompt_tokens > 0
+    assert log.cost_usd > 0
+    # duration_ms is time-to-last-token (the "po"/"ng" deltas), not the
+    # failure moment - see StreamTimer.finish(succeeded=False).
+    assert log.duration_ms is not None
+    assert log.provider_ms is not None
+
+    key_id_row = (
+        await session.execute(select(ApiKey.id).where(ApiKey.name == "c"))
+    ).scalar_one()
+    redis = get_redis()
+    spend_key = _spend_redis_key(key_id_row, _current_period())
+    spent = await redis.get(spend_key)
+    assert spent is not None and float(spent) > 0, (
+        "record_spend must have run for the failed row, decrementing the budget"
+    )
+
+
+async def test_provider_error_mid_stream_observes_gateway_overhead(
+    mid_stream_failure_client, raw_key
+):
+    """A failed stream must still publish provider_ms so the middleware's
+    gateway_overhead_seconds observation isn't skipped (the observability
+    drift half of issue #17)."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5", "path": "stream"}
+    before = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+
+    async with mid_stream_failure_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        async for _ in r.aiter_lines():
+            pass
+
+    after = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+    assert after == before + 1
+
+
+async def test_stream_ending_without_streamend_marker_logs_ok_with_estimates(
+    stream_ends_without_marker_client, raw_key, session
+):
+    """A provider whose stream() completes without ever yielding StreamEnd is
+    a success, not a failure: the client received the full body. The row is
+    logged outcome='ok' with estimated tokens (no authoritative count exists),
+    the stream ends cleanly with a synthesized terminal chunk and [DONE], and
+    no phantom error event is surfaced to the client."""
+    async with stream_ends_without_marker_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" not in body
+    # the full completion still reached the client (deltas "po" + "ng")
+    assert '"content":"po"' in body
+    assert '"content":"ng"' in body
+    assert '"finish_reason":"stop"' in body
+    assert "[DONE]" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "ok"
+    assert log.completion_tokens == 1
+    assert log.cost_usd > 0
+
+
+async def test_stream_error_after_streamend_does_not_overwrite_ok_row(
+    stream_end_then_raises_client, raw_key, session
+):
+    """A provider that raises *after* yielding StreamEnd must not have its
+    completed, authoritatively-counted row re-tagged provider_error: the _sse
+    loop breaks at StreamEnd, so the trailing error never reaches the handler.
+    The row keeps outcome='ok' and the provider's authoritative token counts
+    (3/2), not estimates, and no error event is surfaced to the client."""
+    async with stream_end_then_raises_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" not in body
+    assert "[DONE]" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "ok"
+    assert log.prompt_tokens == 3
+    assert log.completion_tokens == 2
+
+
+async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+    """Reproduces issue #17's second case: the generator receives
+    CancelledError, not an Exception subclass, so the pre-fix `except
+    Exception` handler never runs. Drives _sse directly rather than through
+    an HTTP client: simulating a genuine client disconnect through
+    httpx's ASGITransport is not reliable, and the design spec's own
+    reproduction sketch calls for driving the generator directly."""
+    import time as time_module
+
+    key = ApiKey(name="disconnect-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk
+    await gen.__anext__()  # first text delta, "po"
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    # Only "po" was accumulated before the cancellation.
+    assert log.completion_tokens == 1
+    assert log.prompt_tokens > 0
+    assert log.duration_ms is not None
+    assert log.provider_ms is not None
+
+
+async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
+    """Real client disconnects are delivered via Starlette's aclose() -
+    GeneratorExit thrown at the generator's suspended yield - not a
+    directly-injected CancelledError. The athrow-based tests above cover
+    the exception TYPE handling but not this delivery MECHANISM. aclose()
+    must return normally (the generator catches and re-raises GeneratorExit,
+    which is the successful-close case per the async generator protocol,
+    not an error) and the row must still be written."""
+    import time as time_module
+
+    key = ApiKey(name="aclose-disconnect-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk
+    await gen.__anext__()  # first text delta, "po"
+
+    await gen.aclose()  # must return normally, not raise
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 1
+
+
+async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
+    """Spec item 3: a failure before any delta arrives leaves duration_ms
+    and ttft_ms null, but the row still gets written with the right
+    outcome."""
+    import time as time_module
+
+    key = ApiKey(name="disconnect-early-test", key_hash=hash_key(generate_key()))
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
+
+    state = {"started_at": time_module.perf_counter()}
+    gen = app_module._sse(
+        FakeProvider(),
+        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+        "claude-sonnet-5",
+        key_id=key.id,
+        state=state,
+    )
+    await gen.__anext__()  # role chunk only - no delta consumed yet
+
+    with pytest.raises(asyncio.CancelledError):
+        await gen.athrow(asyncio.CancelledError())
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "client_disconnect"
+    assert log.completion_tokens == 0
+    assert log.duration_ms is None
+    assert log.ttft_ms is None

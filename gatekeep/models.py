@@ -97,6 +97,12 @@ class RequestLog(Base):
     # can tell a streamed pre-0012 row from a non-streamed one, so latency
     # queries filter `path IS NOT NULL` rather than guessing.
     path: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Which of "ok", "provider_error", "client_disconnect" this request
+    # ended as. NULL on any row written before this column existed (or by a
+    # caller that doesn't pass it) - treated as "ok"-equivalent everywhere
+    # this is read (dashboard.py's _latency_filters, the success-rate
+    # aggregate), since failed rows were never logged at all before #17.
+    outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         # Speeds up budget.get_period_spend's DB-fallback aggregate, which

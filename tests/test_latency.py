@@ -156,6 +156,65 @@ def test_stream_timer_with_no_deltas_leaves_ttft_none():
     assert timings.duration_ms is not None
 
 
+def test_stream_timer_finish_failed_uses_last_delta_as_duration_reference():
+    """A failed stream's duration_ms is time-to-last-token, not
+    time-to-failure: the gap between the last delta and the failure moment
+    must not inflate duration_ms."""
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-fail-1")
+    timer.provider_started()
+    timer.delta()
+    last_delta_at = timer._last_delta_at
+    timings = timer.finish(succeeded=False)
+    assert timings.duration_ms == pytest.approx((last_delta_at - 0.0) * 1000)
+
+
+def test_stream_timer_finish_failed_before_any_token_has_null_duration():
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-fail-2")
+    timer.provider_started()
+    timings = timer.finish(succeeded=False)
+    assert timings.duration_ms is None
+    assert timings.ttft_ms is None
+
+
+def test_stream_timer_finish_failed_still_publishes_provider_ms():
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-fail-3")
+    timer.provider_started()
+    timer.delta()
+    timings = timer.finish(succeeded=False)
+    assert timings.provider_ms is not None
+    assert state["provider_ms"] == pytest.approx(timings.provider_ms)
+
+
+def test_stream_timer_finish_failed_does_not_observe_time_to_last_token():
+    ttlt_labels = {"model": "m-fail-4"}
+    before = _sum_for(metrics.time_to_last_token_seconds, ttlt_labels) or 0.0
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-fail-4")
+    timer.provider_started()
+    timer.delta()
+    timer.finish(succeeded=False)
+    after = _sum_for(metrics.time_to_last_token_seconds, ttlt_labels) or 0.0
+    assert after == before
+
+
+def test_stream_timer_finish_succeeded_default_is_unchanged():
+    """succeeded defaults to True so every pre-existing call site
+    (positional `timer.finish()`) keeps its current behavior."""
+    ttlt_labels = {"model": "m-succeed-default"}
+    before = _sum_for(metrics.time_to_last_token_seconds, ttlt_labels) or 0.0
+    state = {"started_at": 0.0}
+    timer = StreamTimer(state, model="m-succeed-default")
+    timer.provider_started()
+    timer.delta()
+    timings = timer.finish()
+    after = _sum_for(metrics.time_to_last_token_seconds, ttlt_labels) or 0.0
+    assert after > before
+    assert timings.duration_ms is not None
+
+
 def test_mark_sets_model_and_path_on_request_state():
     request = _FakeRequest(started_at=0.0)
     mark(request, model="m-mark", path="provider")
