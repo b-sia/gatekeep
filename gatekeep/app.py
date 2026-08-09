@@ -303,7 +303,10 @@ async def _finish_failed_request(
     `observe_request` (the token/cost histograms): a 0-token/`$0` observation
     would drag those histograms down with no informative signal, unlike the
     streaming failure paths, which have real (estimated) tokens/cost to
-    contribute.
+    contribute. Passes `count_latency=False` to `observe_non_streaming` for the
+    same reason the DB latency percentiles exclude failed rows: `provider_ms`
+    is still published so the middleware attributes gateway overhead, but a
+    failed call's duration must not skew the provider-latency histogram.
 
     Args:
         request: The Starlette request carrying `state.started_at`.
@@ -321,24 +324,41 @@ async def _finish_failed_request(
     """
     provider_ms = (time.perf_counter() - provider_started) * 1000
     timings = observe_non_streaming(
-        request, model=model, path=_PROVIDER_PATH, provider_ms=provider_ms
-    )
-    await log_request(
-        session,
-        key_id=key_id,
+        request,
         model=model,
-        prompt_tokens=0,
-        completion_tokens=0,
-        response_id=response_id,
-        prompt_name=prompt_name,
-        routed_from=routed_from,
-        prompt_version_num=prompt_version_num,
         path=_PROVIDER_PATH,
-        outcome="provider_error",
-        duration_ms=timings.duration_ms,
-        provider_ms=timings.provider_ms,
-        ttft_ms=timings.ttft_ms,
+        provider_ms=provider_ms,
+        count_latency=False,
     )
+    # Best-effort accounting: this runs inside the caller's `except` branch,
+    # right before it returns the mapped provider error. If the DB write itself
+    # fails (connection reset, pool exhausted - often the very outage that made
+    # the provider call fail), that failure must not propagate and mask the
+    # real provider error as an uncaught 500. Log and swallow so the caller
+    # still returns the mapped error to the client; a dropped accounting row is
+    # the lesser harm.
+    try:
+        await log_request(
+            session,
+            key_id=key_id,
+            model=model,
+            prompt_tokens=0,
+            completion_tokens=0,
+            response_id=response_id,
+            prompt_name=prompt_name,
+            routed_from=routed_from,
+            prompt_version_num=prompt_version_num,
+            path=_PROVIDER_PATH,
+            outcome="provider_error",
+            duration_ms=timings.duration_ms,
+            provider_ms=timings.provider_ms,
+            ttft_ms=timings.ttft_ms,
+        )
+    except Exception:
+        logger.exception(
+            "failed to record accounting for provider_error on the non-streaming "
+            "path; returning the mapped provider error anyway"
+        )
 
 
 @app.exception_handler(FastAPIHTTPException)
@@ -935,10 +955,26 @@ async def _messages_sse(
                         output_tokens=ev.output_tokens,
                     ),
                 )
+                break
         if not stream_ended:
-            raise RuntimeError(
-                "provider stream ended without a StreamEnd event; no "
-                "authoritative token counts are available"
+            # The provider finished a complete stream without emitting a
+            # StreamEnd - the openai/google/ollama providers all gate it
+            # conditionally, so their generators legitimately end without it.
+            # The client received the full completion, so this is a success;
+            # we only lack authoritative token counts and fall back to
+            # estimates, then synthesize the terminal events the provider
+            # never sent so the client still sees a well-formed stream.
+            outcome = "ok"
+            input_tokens = estimate_tokens(_payload_text(payload))
+            output_tokens = estimate_tokens("".join(accumulated))
+            yield _anthropic_event("content_block_stop", content_block_stop_event())
+            yield _anthropic_event(
+                "message_delta",
+                message_delta_event(
+                    stop_reason=reverse_finish_reason(None),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                ),
             )
     except (GeneratorExit, asyncio.CancelledError):
         outcome = "client_disconnect"
@@ -1090,11 +1126,15 @@ async def _sse(
       row without attempting to resurrect the connection.
     - A stream whose iteration ends without ever reaching `StreamEnd` (the
       openai/google/ollama providers all emit it conditionally, so their
-      generators can finish without it) is treated identically to a provider
-      error - it raises `RuntimeError` here so the handler above tags it
-      `provider_error` with estimated tokens, for the same reason: no
-      authoritative count exists. Logging it as a $0 `ok` row instead would
-      be exactly the silent under-accounting this design set out to remove.
+      generators can finish without it) is a *successful* completion: the
+      client received the full body, so the row is logged `outcome="ok"`.
+      Only the authoritative token count is missing, so tokens are estimated
+      from the accumulated delta text (the same `estimate_tokens` fallback the
+      failure paths use) rather than left at $0, and the terminal chunk the
+      provider never sent is synthesized so the client still sees a
+      well-formed stream. Tagging this `provider_error` instead would surface
+      a phantom error event to a client that received a correct response and
+      would deflate the success rate for a request that actually succeeded.
 
     Uses its own DB session (`SessionLocal`) since this generator keeps
     running after the request-scoped session dependency has already been
@@ -1140,10 +1180,20 @@ async def _sse(
                         ev.stop_reason, id=completion_id, created=created, model=model
                     )
                 )
+                break
         if not stream_ended:
-            raise RuntimeError(
-                "provider stream ended without a StreamEnd event; no "
-                "authoritative token counts are available"
+            # The provider finished a complete stream without emitting a
+            # StreamEnd - the openai/google/ollama providers all gate it
+            # conditionally, so their generators legitimately end without it.
+            # The client received the full completion, so this is a success;
+            # we only lack authoritative token counts and fall back to
+            # estimates, then synthesize the terminal chunk the provider never
+            # sent so the client still sees a well-formed stream.
+            outcome = "ok"
+            input_tokens = estimate_tokens(_payload_text(payload))
+            output_tokens = estimate_tokens("".join(accumulated))
+            yield _event(
+                final_chunk(None, id=completion_id, created=created, model=model)
             )
     except (GeneratorExit, asyncio.CancelledError):
         outcome = "client_disconnect"

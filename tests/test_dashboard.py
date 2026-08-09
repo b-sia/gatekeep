@@ -272,6 +272,30 @@ async def test_usage_summary_includes_failed_count_and_success_rate(
     assert body["success_rate"] == pytest.approx(0.5)
 
 
+async def test_usage_summary_cache_hit_rate_ignores_failed_rows(
+    client, raw_key, session
+):
+    """cache_hit_rate is taken over successful requests, not the full count.
+    Since #17 logs failed rows, including them in the denominator would deflate
+    the rate whenever upstream failures rise, with no change in caching. Here
+    one hit + one miss + two failures must read 1/2, not 1/4."""
+    key_id = await _key_id(session, raw_key)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="ok", cached=True)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="ok", cached=False)
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="provider_error")
+    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="client_disconnect")
+
+    r = await client.get(
+        "/dashboard/api/usage/summary",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    body = r.json()
+
+    assert body["request_count"] == 4
+    assert body["cache_hit_count"] == 1
+    assert body["cache_hit_rate"] == pytest.approx(0.5)
+
+
 async def test_usage_summary_success_rate_is_zero_for_an_empty_window(client, raw_key):
     r = await client.get(
         "/dashboard/api/usage/summary",

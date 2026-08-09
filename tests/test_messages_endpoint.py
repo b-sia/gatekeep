@@ -415,12 +415,14 @@ async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
     assert log.provider_ms is not None
 
 
-async def test_stream_ending_without_streamend_marker_logs_failed_row(
+async def test_stream_ending_without_streamend_marker_logs_ok_with_estimates(
     stream_ends_without_marker_client, raw_key, session
 ):
-    """A provider whose stream() completes without ever yielding StreamEnd
-    must not be silently logged as a $0 'ok' success - it has no
-    authoritative token count either, exactly like a mid-stream exception."""
+    """A provider whose stream() completes without ever yielding StreamEnd is
+    a success, not a failure: the client received the full body. The row is
+    logged outcome='ok' with estimated tokens (no authoritative count exists),
+    the stream ends cleanly with synthesized content_block_stop/message_delta/
+    message_stop events, and no phantom error event is surfaced."""
     async with stream_ends_without_marker_client.stream(
         "POST",
         "/v1/messages",
@@ -434,10 +436,13 @@ async def test_stream_ending_without_streamend_marker_logs_failed_row(
     ) as r:
         assert r.status_code == 200
         body = b"".join([chunk async for chunk in r.aiter_bytes()]).decode()
-    assert "event: error" in body
+    assert "event: error" not in body
+    assert "event: content_block_stop" in body
+    assert "event: message_delta" in body
+    assert "event: message_stop" in body
 
     log = (await session.execute(select(RequestLog))).scalars().one()
-    assert log.outcome == "provider_error"
+    assert log.outcome == "ok"
     assert log.completion_tokens == 1
     assert log.cost_usd > 0
 

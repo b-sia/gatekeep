@@ -149,6 +149,22 @@ class StreamEndsWithoutMarkerProvider:
         yield TextDelta(text="ng")
 
 
+class StreamEndThenRaisesProvider:
+    """Yields a StreamEnd carrying authoritative token counts, then keeps
+    going and raises. Reproduces a provider whose generator emits more after
+    the terminal event; the _sse loop must stop at StreamEnd so the trailing
+    error cannot re-tag an already-completed stream as failed or clobber its
+    authoritative counts with estimates."""
+
+    async def complete(self, payload):
+        raise RuntimeError("not used")
+
+    async def stream(self, payload):
+        yield TextDelta(text="po")
+        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
+        raise RuntimeError("provider yielded past StreamEnd")
+
+
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
@@ -196,6 +212,18 @@ async def mid_stream_failure_client(monkeypatch):
 @pytest_asyncio.fixture
 async def stream_ends_without_marker_client(monkeypatch):
     stubbed = StreamEndsWithoutMarkerProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
+    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
+    monkeypatch.setitem(app_module._providers, "openai", stubbed)
+    monkeypatch.setitem(app_module._providers, "google", stubbed)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def stream_end_then_raises_client(monkeypatch):
+    stubbed = StreamEndThenRaisesProvider()
     monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
     monkeypatch.setitem(app_module._providers, "ollama", stubbed)
     monkeypatch.setitem(app_module._providers, "openai", stubbed)
@@ -1000,6 +1028,58 @@ async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
     assert log.path == "provider"
 
 
+async def test_provider_error_does_not_skew_provider_latency_histogram(
+    broken_client, raw_key, session
+):
+    """A failed non-streaming call publishes provider_ms for overhead
+    attribution but must not enter the provider_duration_seconds histogram:
+    a failed (fast-erroring or timing-out) call's duration is not 'how long a
+    normal request takes', matching the exclusion of failed rows from the DB
+    latency percentiles."""
+    from gatekeep.observability import metrics
+
+    labels = {"model": "claude-sonnet-5"}
+    before = sample_for(metrics.provider_duration_seconds, "_count", labels)
+
+    r = await broken_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "provider-error"}],
+        },
+    )
+    assert r.status_code == 502
+
+    assert sample_for(metrics.provider_duration_seconds, "_count", labels) == before, (
+        "failed provider call must not be observed into the provider-latency histogram"
+    )
+
+
+async def test_provider_error_survives_failing_accounting_write(
+    broken_client, raw_key, monkeypatch
+):
+    """If the accounting write in the failure path itself raises (DB down -
+    often the same outage that failed the provider call), the mapped provider
+    error must still reach the client. The accounting failure is logged and
+    swallowed, not allowed to surface as an uncaught 500."""
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db connection reset during accounting write")
+
+    monkeypatch.setattr(app_module, "log_request", _boom)
+
+    r = await broken_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "messages": [{"role": "user", "content": "provider-error"}],
+        },
+    )
+    assert r.status_code == 502, "the mapped provider error, not a masked 500"
+
+
 async def test_non_streaming_records_path_matching_the_metric_label(
     client, raw_key, session
 ):
@@ -1148,12 +1228,14 @@ async def test_provider_error_mid_stream_observes_gateway_overhead(
     assert after == before + 1
 
 
-async def test_stream_ending_without_streamend_marker_logs_failed_row(
+async def test_stream_ending_without_streamend_marker_logs_ok_with_estimates(
     stream_ends_without_marker_client, raw_key, session
 ):
-    """A provider whose stream() completes without ever yielding StreamEnd
-    must not be silently logged as a $0 'ok' success - it has no
-    authoritative token count either, exactly like a mid-stream exception."""
+    """A provider whose stream() completes without ever yielding StreamEnd is
+    a success, not a failure: the client received the full body. The row is
+    logged outcome='ok' with estimated tokens (no authoritative count exists),
+    the stream ends cleanly with a synthesized terminal chunk and [DONE], and
+    no phantom error event is surfaced to the client."""
     async with stream_ends_without_marker_client.stream(
         "POST",
         "/v1/chat/completions",
@@ -1166,12 +1248,46 @@ async def test_stream_ending_without_streamend_marker_logs_failed_row(
     ) as r:
         assert r.status_code == 200
         body = "".join([line async for line in r.aiter_lines()])
-    assert "upstream_error" in body
+    assert "upstream_error" not in body
+    # the full completion still reached the client (deltas "po" + "ng")
+    assert '"content":"po"' in body
+    assert '"content":"ng"' in body
+    assert '"finish_reason":"stop"' in body
+    assert "[DONE]" in body
 
     log = (await session.execute(select(RequestLog))).scalars().one()
-    assert log.outcome == "provider_error"
+    assert log.outcome == "ok"
     assert log.completion_tokens == 1
     assert log.cost_usd > 0
+
+
+async def test_stream_error_after_streamend_does_not_overwrite_ok_row(
+    stream_end_then_raises_client, raw_key, session
+):
+    """A provider that raises *after* yielding StreamEnd must not have its
+    completed, authoritatively-counted row re-tagged provider_error: the _sse
+    loop breaks at StreamEnd, so the trailing error never reaches the handler.
+    The row keeps outcome='ok' and the provider's authoritative token counts
+    (3/2), not estimates, and no error event is surfaced to the client."""
+    async with stream_end_then_raises_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "claude-sonnet-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    ) as r:
+        assert r.status_code == 200
+        body = "".join([line async for line in r.aiter_lines()])
+    assert "upstream_error" not in body
+    assert "[DONE]" in body
+
+    log = (await session.execute(select(RequestLog))).scalars().one()
+    assert log.outcome == "ok"
+    assert log.prompt_tokens == 3
+    assert log.completion_tokens == 2
 
 
 async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):

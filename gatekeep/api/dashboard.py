@@ -238,10 +238,13 @@ async def usage_summary(
     request_count = int(request_count)
     cache_hit_count = int(cache_hit_count)
     failed_count = int(failed_count)
-    cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
-    success_rate = (
-        (request_count - failed_count) / request_count if request_count else 0.0
-    )
+    # A cache hit is only ever served on a successful request, so the hit rate
+    # is taken over successful requests, not the full count. Since #17 began
+    # logging failed rows, dividing by request_count would silently deflate the
+    # rate whenever upstream failures rise, with no change in caching behavior.
+    successful_count = request_count - failed_count
+    cache_hit_rate = (cache_hit_count / successful_count) if successful_count else 0.0
+    success_rate = successful_count / request_count if request_count else 0.0
 
     by_model = await _breakdown(session, RequestLog.model, filters)
     by_key = await _key_breakdown(session, filters)

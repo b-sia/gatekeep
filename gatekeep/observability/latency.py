@@ -146,7 +146,12 @@ def mark(
 
 
 def observe_non_streaming(
-    request: Any, *, model: str, path: str, provider_ms: float | None = None
+    request: Any,
+    *,
+    model: str,
+    path: str,
+    provider_ms: float | None = None,
+    count_latency: bool = True,
 ) -> LatencyTimings:
     """Observe the provider-duration histogram and publish overhead inputs
     for a non-streamed request.
@@ -163,6 +168,12 @@ def observe_non_streaming(
         path: One of "cache_exact", "cache_semantic", "provider".
         provider_ms: Upstream call duration, or None on a cache hit, in which
             case the entire duration is counted as gateway overhead.
+        count_latency: Whether to observe the `provider_duration_seconds`
+            histogram. Failed requests set this False: `provider_ms` is still
+            marked so the middleware can attribute overhead, but a failed
+            call's duration must not enter the provider-latency histogram,
+            matching the exclusion of failed rows from the DB latency
+            percentiles.
 
     Returns:
         A LatencyTimings for log_request. All fields are None when the request
@@ -174,7 +185,7 @@ def observe_non_streaming(
 
     duration_ms = (time.perf_counter() - started_at) * 1000
     mark(request, provider_ms=provider_ms)
-    if provider_ms is not None:
+    if provider_ms is not None and count_latency:
         provider_duration_seconds.labels(model=model).observe(provider_ms / 1000)
     return LatencyTimings(
         duration_ms=duration_ms, provider_ms=provider_ms, ttft_ms=None
