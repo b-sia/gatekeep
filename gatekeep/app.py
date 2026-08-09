@@ -5,7 +5,8 @@ import json
 import logging
 import pathlib
 import time
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
 from typing import Any
 
 import ollama
@@ -58,7 +59,8 @@ from gatekeep.api.translation import (
 )
 from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
-from gatekeep.embeddings import embed_text
+from gatekeep.embeddings import embed_text_async
+from gatekeep.embeddings import warm as warm_embedding_model
 from gatekeep.middleware.budget import require_budget
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
@@ -118,7 +120,23 @@ _CACHE_SEMANTIC_PATH = "cache_semantic"
 _PROVIDER_PATH = "provider"
 _STREAM_PATH = "stream"
 
-app = FastAPI(title="gatekeep")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Warm the semantic-cache embedding model before serving traffic.
+
+    `embed_text`'s underlying model loads lazily on first use, and on a
+    container with no baked-in weights that first load downloads them from
+    the HF Hub - tens of seconds of blocking work. Doing it here means the
+    process doesn't report ready until it's paid, instead of stalling
+    whichever request happens to arrive first (and every other request
+    queued behind it on the event loop).
+    """
+    await asyncio.to_thread(warm_embedding_model)
+    yield
+
+
+app = FastAPI(title="gatekeep", lifespan=_lifespan)
 # Added first so it wraps everything: the start stamp must land before any
 # FastAPI dependency (auth, rate limit, budget) runs.
 app.add_middleware(LatencyMiddleware)
@@ -552,7 +570,7 @@ async def chat_completions(
     cache_exact_misses.labels(model=model).inc()
 
     embeddable_text = extract_embeddable_text(payload)
-    embedding = embed_text(embeddable_text)
+    embedding = await embed_text_async(embeddable_text)
     if embedding is not None:
         semantic_match = await find_semantic_match(
             session,
@@ -773,7 +791,7 @@ async def messages(
     cache_exact_misses.labels(model=model).inc()
 
     embeddable_text = extract_embeddable_text(payload)
-    embedding = embed_text(embeddable_text)
+    embedding = await embed_text_async(embeddable_text)
     if embedding is not None:
         semantic_match = await find_semantic_match(
             session,
