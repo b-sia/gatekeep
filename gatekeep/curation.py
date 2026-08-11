@@ -54,8 +54,7 @@ async def curate_cases(
             )
         except APIError:
             logger.warning(
-                "judge criteria generation failed for sample %s; falling back "
-                "to generic criteria",
+                "judge criteria generation failed for sample %s; falling back to generic criteria",
                 sample.id,
                 exc_info=True,
             )

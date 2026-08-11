@@ -42,9 +42,7 @@ async def test_load_fixture_file_creates_suite_and_cases(tmp_path, session):
     assert cases[0].check_type == "contains"
 
 
-async def test_load_fixture_file_updates_threshold_and_replaces_fixture_cases(
-    tmp_path, session
-):
+async def test_load_fixture_file_updates_threshold_and_replaces_fixture_cases(tmp_path, session):
     await create_suite("system-context", session, pass_threshold=0.5)
     path = _write_fixture(
         tmp_path,
@@ -85,9 +83,7 @@ async def test_load_fixture_file_updates_threshold_and_replaces_fixture_cases(
     assert cases[0].expected == "goodbye"
 
 
-async def test_load_fixture_file_never_touches_manual_or_curated_cases(
-    tmp_path, session
-):
+async def test_load_fixture_file_never_touches_manual_or_curated_cases(tmp_path, session):
     from gatekeep.evals import add_case
 
     suite = await create_suite("system-context", session, pass_threshold=0.9)

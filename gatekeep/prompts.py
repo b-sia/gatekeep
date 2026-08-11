@@ -25,9 +25,7 @@ class PromptVersionNotFoundError(ValueError):
 
 async def _get_prompt_row(name: str, session: AsyncSession) -> Prompt:
     """Fetch the Prompt row for `name`; raises PromptNotFoundError if unknown."""
-    prompt = (
-        await session.execute(select(Prompt).where(Prompt.name == name))
-    ).scalar_one_or_none()
+    prompt = (await session.execute(select(Prompt).where(Prompt.name == name))).scalar_one_or_none()
     if prompt is None:
         raise PromptNotFoundError(f"no prompt registered with name {name!r}")
     return prompt
@@ -90,9 +88,7 @@ async def add_prompt_version(
     prompt = await _get_prompt_row(name, session)
     max_version_num = (
         await session.execute(
-            select(func.max(PromptVersion.version_num)).where(
-                PromptVersion.prompt_id == prompt.id
-            )
+            select(func.max(PromptVersion.version_num)).where(PromptVersion.prompt_id == prompt.id)
         )
     ).scalar_one()
 
@@ -116,7 +112,7 @@ async def promote_prompt(
     session: AsyncSession,
     *,
     redis: Redis | None = None,
-    gate: "Gate | None" = None,
+    gate: Gate | None = None,
 ) -> PromptVersion:
     """Atomically repoint a prompt's active version to an existing version_num.
 
@@ -157,9 +153,7 @@ async def promote_prompt(
         )
     ).scalar_one_or_none()
     if target is None:
-        raise PromptVersionNotFoundError(
-            f"prompt {name!r} has no version {version_num}"
-        )
+        raise PromptVersionNotFoundError(f"prompt {name!r} has no version {version_num}")
 
     if gate is not None:
         await gate(name, target, session)
@@ -269,9 +263,7 @@ async def set_candidate_version(
         )
     ).scalar_one_or_none()
     if target is None:
-        raise PromptVersionNotFoundError(
-            f"prompt {name!r} has no version {version_num}"
-        )
+        raise PromptVersionNotFoundError(f"prompt {name!r} has no version {version_num}")
 
     prompt.candidate_version_id = target.id
     prompt.candidate_traffic_pct = traffic_pct
@@ -296,9 +288,7 @@ async def clear_candidate_version(name: str, session: AsyncSession) -> Prompt:
     return prompt
 
 
-async def resolve_prompt_version_for_request(
-    name: str, session: AsyncSession
-) -> PromptVersion:
+async def resolve_prompt_version_for_request(name: str, session: AsyncSession) -> PromptVersion:
     """Resolve which PromptVersion should serve one incoming request.
 
     This is the request-time A/B split: when a prompt has no candidate
@@ -359,9 +349,7 @@ async def list_prompts(session: AsyncSession) -> list[Prompt]:
     return list(result.scalars().all())
 
 
-async def sync_prompt_from_text(
-    name: str, template: str, session: AsyncSession
-) -> PromptVersion:
+async def sync_prompt_from_text(name: str, template: str, session: AsyncSession) -> PromptVersion:
     """Idempotently reconcile a prompt with in-repo template text.
 
     Creates the prompt (version 1, active) if it does not exist; adds a new

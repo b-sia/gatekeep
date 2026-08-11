@@ -26,9 +26,7 @@ def _patch_provider(monkeypatch, texts):
     This keeps `_eval_run`-level tests from making real Anthropic API calls, without
     needing to touch the DB session/event-loop plumbing that `main()` sets up.
     """
-    monkeypatch.setattr(
-        "gatekeep.cli.AnthropicProvider", lambda client: _FakeProvider(texts)
-    )
+    monkeypatch.setattr("gatekeep.cli.AnthropicProvider", lambda client: _FakeProvider(texts))
 
 
 # --- _eval_run: does it correctly report pass/fail? -------------------------------
@@ -147,9 +145,7 @@ async def test_clear_candidate_removes_configured_candidate(session):
 def test_build_parser_accepts_set_candidate_and_clear_candidate():
     parser = build_parser()
 
-    args = parser.parse_args(
-        ["prompt", "set-candidate", "system-context", "2", "--pct", "25"]
-    )
+    args = parser.parse_args(["prompt", "set-candidate", "system-context", "2", "--pct", "25"])
     assert args.prompt_command == "set-candidate"
     assert args.name == "system-context"
     assert args.version == 2
@@ -177,9 +173,7 @@ def test_main_set_candidate_rejects_out_of_range_pct(monkeypatch):
 # --- _eval_review: does the edit path handle quit correctly? ----------------------
 
 
-async def test_eval_review_edit_then_quit_does_not_delete_the_case(
-    session, monkeypatch
-):
+async def test_eval_review_edit_then_quit_does_not_delete_the_case(session, monkeypatch):
     """Regression test: typing `q` at the post-edit "approve?" prompt used to fall
     through to `approve=(answer == "y")` (False), which deletes the case instead of
     quitting the review loop. Editing then quitting must leave the case in place,
@@ -224,9 +218,7 @@ async def test_set_budget_sets_amount_on_existing_key(session):
 
 async def test_set_budget_unlimited_clears_amount(session):
     raw = generate_key()
-    session.add(
-        ApiKey(name="budget-key", key_hash=hash_key(raw), monthly_budget_usd=10.0)
-    )
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), monthly_budget_usd=10.0))
     await session.commit()
 
     await _set_budget("budget-key", None, unlimited=True)
@@ -302,9 +294,7 @@ async def test_show_reports_candidate_paused_at_zero_pct_distinctly(session, cap
     assert "candidate: v2 @ 0.0% (paused)" in out
 
 
-async def test_show_reports_candidate_at_nonzero_pct_without_paused_label(
-    session, capsys
-):
+async def test_show_reports_candidate_at_nonzero_pct_without_paused_label(session, capsys):
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
     await _set_candidate("system-context", 2, 25.0)

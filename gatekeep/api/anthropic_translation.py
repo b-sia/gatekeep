@@ -49,9 +49,7 @@ def messages_to_payload(
     content-block list collapses to plain text, matching v1's text-only
     scope) and provider/model resolution via the shared `resolve_route`.
     """
-    messages = [
-        {"role": m.role, "content": extract_text(m.content)} for m in req.messages
-    ]
+    messages = [{"role": m.role, "content": extract_text(m.content)} for m in req.messages]
     provider, model = resolve_route(req.model, aliases=model_aliases)
     payload: dict[str, Any] = {
         "model": model,
@@ -73,9 +71,7 @@ def result_to_messages(result: Any, *, model: str) -> MessagesResponse:
         model=model,
         content=[ContentBlock(text=result.text)],
         stop_reason=reverse_finish_reason(result.stop_reason),
-        usage=MessagesUsage(
-            input_tokens=result.input_tokens, output_tokens=result.output_tokens
-        ),
+        usage=MessagesUsage(input_tokens=result.input_tokens, output_tokens=result.output_tokens),
     )
 
 

@@ -18,7 +18,7 @@ def extract_bearer(authorization: str | None, x_api_key: str | None) -> str | No
     if authorization:
         prefix = "Bearer "
         if authorization.startswith(prefix):
-            return authorization[len(prefix):].strip()
+            return authorization[len(prefix) :].strip()
         return authorization.strip()
     if x_api_key:
         return x_api_key.strip()

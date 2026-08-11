@@ -106,9 +106,7 @@ async def test_cache_miss_records_sample_on_chat_completions(
     assert samples[0].input_messages == [{"role": "user", "content": "ping"}]
 
 
-async def test_cache_miss_records_sample_on_messages(
-    client, raw_key, counting_provider, session
-):
+async def test_cache_miss_records_sample_on_messages(client, raw_key, counting_provider, session):
     await create_prompt("p2", "You are a pirate.", session)
     r = await client.post(
         "/v1/messages",
@@ -150,9 +148,7 @@ async def test_cache_miss_without_prompt_name_records_no_sample(
 # -- cache hits never record a new sample -----------------------------------
 
 
-async def test_exact_cache_hit_records_no_new_sample(
-    client, raw_key, counting_provider, session
-):
+async def test_exact_cache_hit_records_no_new_sample(client, raw_key, counting_provider, session):
     await create_prompt("p3", "You are a pirate.", session)
     body = {
         "model": "gpt-4o",
@@ -208,9 +204,7 @@ async def test_semantic_cache_hit_records_no_new_sample(
 # -- streaming bypasses sample recording -------------------------------------
 
 
-async def test_streaming_request_records_no_sample(
-    client, raw_key, counting_provider, session
-):
+async def test_streaming_request_records_no_sample(client, raw_key, counting_provider, session):
     await create_prompt("p5", "You are a pirate.", session)
     body = {
         "model": "gpt-4o",

@@ -131,9 +131,7 @@ def test_no_conversational_message_raises():
 
 
 def test_result_to_openai_passes_through_canonical_finish_reason():
-    result = FakeResult(
-        text="hello", input_tokens=3, output_tokens=2, stop_reason="stop"
-    )
+    result = FakeResult(text="hello", input_tokens=3, output_tokens=2, stop_reason="stop")
     resp = result_to_openai(result, model="claude-sonnet-5")
     assert resp.choices[0].message.content == "hello"
     assert resp.choices[0].finish_reason == "stop"

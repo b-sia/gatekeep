@@ -55,17 +55,13 @@ def upgrade() -> None:
     op.create_table(
         "eval_cases",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "suite_id", sa.Integer(), sa.ForeignKey("eval_suites.id"), nullable=False
-        ),
+        sa.Column("suite_id", sa.Integer(), sa.ForeignKey("eval_suites.id"), nullable=False),
         sa.Column("input_messages", postgresql.JSONB(), nullable=False),
         sa.Column("expected", sa.Text(), nullable=True),
         sa.Column("check_type", sa.String(length=32), nullable=False),
         sa.Column("judge_criteria", sa.Text(), nullable=True),
         sa.Column("reviewed", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column(
-            "source", sa.String(length=32), nullable=False, server_default="manual"
-        ),
+        sa.Column("source", sa.String(length=32), nullable=False, server_default="manual"),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -76,9 +72,7 @@ def upgrade() -> None:
     op.create_table(
         "eval_runs",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "suite_id", sa.Integer(), sa.ForeignKey("eval_suites.id"), nullable=False
-        ),
+        sa.Column("suite_id", sa.Integer(), sa.ForeignKey("eval_suites.id"), nullable=False),
         sa.Column(
             "prompt_version_id",
             sa.Integer(),

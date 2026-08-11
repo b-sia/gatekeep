@@ -105,9 +105,7 @@ async def _promote(name: str, version_num: int) -> None:
         max_tokens=settings.default_max_tokens,
     )
     async with SessionLocal() as session:
-        promoted = await promote_prompt(
-            name, version_num, session, redis=redis, gate=gate
-        )
+        promoted = await promote_prompt(name, version_num, session, redis=redis, gate=gate)
     print(f"promoted {name!r} to version {promoted.version_num}")
 
 
@@ -128,7 +126,8 @@ async def _set_candidate(name: str, version_num: int, pct: float) -> None:
     async with SessionLocal() as session:
         prompt = await set_candidate_version(name, version_num, pct, session)
     print(
-        f"set {name!r} candidate to version {version_num} at {prompt.candidate_traffic_pct}% traffic"
+        f"set {name!r} candidate to version {version_num} "
+        f"at {prompt.candidate_traffic_pct}% traffic"
     )
 
 
@@ -136,9 +135,7 @@ async def _clear_candidate(name: str) -> None:
     """Remove any configured A/B candidate for a prompt (100% back to active)."""
     async with SessionLocal() as session:
         await clear_candidate_version(name, session)
-    print(
-        f"cleared candidate for {name!r}; 100% of traffic now goes to the active version"
-    )
+    print(f"cleared candidate for {name!r}; 100% of traffic now goes to the active version")
 
 
 async def _sync(directory: str) -> None:
@@ -151,14 +148,11 @@ async def _sync(directory: str) -> None:
             template = path.read_text(encoding="utf-8")
             name = path.stem
             version = await sync_prompt_from_text(name, template, session)
-            print(
-                f"{name}\tv{version.version_num}{' (active)' if version.active else ' (new, not active)'}"
-            )
+            status = "(active)" if version.active else "(new, not active)"
+            print(f"{name}\tv{version.version_num}{status}")
 
 
-async def _eval_create_suite(
-    name: str, threshold: float | None, suite_name: str | None
-) -> None:
+async def _eval_create_suite(name: str, threshold: float | None, suite_name: str | None) -> None:
     """Create an eval suite for a prompt, defaulting the threshold from settings."""
     settings = get_settings()
     async with SessionLocal() as session:
@@ -201,7 +195,7 @@ async def _eval_add_case(
 async def _eval_run(
     name: str, version: int | None, model: str | None, include_unreviewed: bool
 ) -> bool:
-    """Run a prompt's eval suite against a version/model, print the score, and return whether it passed.
+    """Run a prompt's eval suite against a version/model, print the score, and return the result.
 
     Returns:
         True if the eval suite passed, False otherwise.
@@ -220,9 +214,7 @@ async def _eval_run(
             include_unreviewed=include_unreviewed,
         )
     status = "PASS" if run.passed else "FAIL"
-    print(
-        f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})"
-    )
+    print(f"[{status}] {name!r} score={run.score:.2f} (run id {run.id}, model {run.model})")
     return run.passed
 
 
@@ -231,9 +223,7 @@ async def _eval_load_fixtures(directory: str) -> None:
     async with SessionLocal() as session:
         suites = await load_fixtures_dir(directory, session)
     for suite in suites:
-        print(
-            f"loaded fixture cases for {suite.prompt_name!r} (threshold {suite.pass_threshold})"
-        )
+        print(f"loaded fixture cases for {suite.prompt_name!r} (threshold {suite.pass_threshold})")
 
 
 async def _eval_curate(name: str, limit: int) -> None:
@@ -253,9 +243,7 @@ async def _eval_curate(name: str, limit: int) -> None:
             provider=provider,
             generate_model=settings.default_model,
         )
-    print(
-        f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate"
-    )
+    print(f"curated {len(cases)} unreviewed case(s) for {name!r}; review them before they gate")
 
 
 async def _eval_review(name: str) -> None:
@@ -326,9 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prompt_parser = subparsers.add_parser("prompt", help="manage prompt templates")
-    prompt_subparsers = prompt_parser.add_subparsers(
-        dest="prompt_command", required=True
-    )
+    prompt_subparsers = prompt_parser.add_subparsers(dest="prompt_command", required=True)
 
     create_parser = prompt_subparsers.add_parser(
         "create", help="create a new prompt from a template file"
@@ -345,9 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prompt_subparsers.add_parser("list", help="list all prompts and active versions")
 
-    show_parser = prompt_subparsers.add_parser(
-        "show", help="show a prompt's active template"
-    )
+    show_parser = prompt_subparsers.add_parser("show", help="show a prompt's active template")
     show_parser.add_argument("name")
 
     promote_parser = prompt_subparsers.add_parser(
@@ -401,16 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
 
-    cs = eval_subparsers.add_parser(
-        "create-suite", help="create an eval suite for a prompt"
-    )
+    cs = eval_subparsers.add_parser("create-suite", help="create an eval suite for a prompt")
     cs.add_argument("name")
     cs.add_argument("--threshold", type=float, default=None)
     cs.add_argument("--name", dest="suite_name", default=None)
 
-    ac = eval_subparsers.add_parser(
-        "add-case", help="add a manual case from a JSON messages file"
-    )
+    ac = eval_subparsers.add_parser("add-case", help="add a manual case from a JSON messages file")
     ac.add_argument("name")
     ac.add_argument("--input-file", required=True)
     ac.add_argument(
@@ -432,15 +412,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lf.add_argument("directory")
 
-    cu = eval_subparsers.add_parser(
-        "curate", help="mine request samples into unreviewed cases"
-    )
+    cu = eval_subparsers.add_parser("curate", help="mine request samples into unreviewed cases")
     cu.add_argument("name")
     cu.add_argument("--limit", type=int, default=10)
 
-    rv = eval_subparsers.add_parser(
-        "review", help="approve/reject unreviewed curated cases"
-    )
+    rv = eval_subparsers.add_parser("review", help="approve/reject unreviewed curated cases")
     rv.add_argument("name")
 
     return parser
@@ -476,9 +452,7 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_set_budget(args.name, args.amount, args.unlimited))
         elif args.command == "eval":
             if args.eval_command == "create-suite":
-                asyncio.run(
-                    _eval_create_suite(args.name, args.threshold, args.suite_name)
-                )
+                asyncio.run(_eval_create_suite(args.name, args.threshold, args.suite_name))
             elif args.eval_command == "add-case":
                 asyncio.run(
                     _eval_add_case(
@@ -491,9 +465,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.eval_command == "run":
                 passed = asyncio.run(
-                    _eval_run(
-                        args.name, args.version, args.model, args.include_unreviewed
-                    )
+                    _eval_run(args.name, args.version, args.model, args.include_unreviewed)
                 )
                 if not passed:
                     return 2

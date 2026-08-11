@@ -27,9 +27,7 @@ class AnthropicProvider:
         """Send a non-streaming completion request and return a normalized result."""
         message = await self._client.messages.create(**payload)
         text = "".join(
-            block.text
-            for block in message.content
-            if getattr(block, "type", None) == "text"
+            block.text for block in message.content if getattr(block, "type", None) == "text"
         )
         return CompletionResult(
             text=text,
@@ -38,9 +36,7 @@ class AnthropicProvider:
             stop_reason=_FINISH_REASON_MAP.get(message.stop_reason, "stop"),
         )
 
-    async def stream(
-        self, payload: dict[str, Any]
-    ) -> AsyncIterator[TextDelta | StreamEnd]:
+    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[TextDelta | StreamEnd]:
         """Stream a completion, yielding text deltas followed by a final StreamEnd."""
         async with self._client.messages.stream(**payload) as stream:
             async for text in stream.text_stream:

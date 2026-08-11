@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.models import EvalCase, EvalRun, EvalSuite, PromptVersion
 from gatekeep.prompts import (
     PromptVersionNotFoundError,
-    get_active_prompt_version,
     _get_prompt_row,
+    get_active_prompt_version,
 )
 
 _JUDGE_TEMPLATE = (
@@ -57,8 +57,7 @@ class EvalGateFailure(Exception):
     def __init__(self, eval_run: EvalRun) -> None:
         self.eval_run = eval_run
         super().__init__(
-            f"eval gate failed: score {eval_run.score:.2f} < threshold "
-            f"(run id {eval_run.id})"
+            f"eval gate failed: score {eval_run.score:.2f} < threshold (run id {eval_run.id})"
         )
 
 
@@ -85,14 +84,10 @@ async def create_suite(
     return suite
 
 
-async def get_suite_for_prompt(
-    prompt_name: str, session: AsyncSession
-) -> EvalSuite | None:
+async def get_suite_for_prompt(prompt_name: str, session: AsyncSession) -> EvalSuite | None:
     """Return the eval suite bound to `prompt_name`, or None if none is registered."""
     return (
-        await session.execute(
-            select(EvalSuite).where(EvalSuite.prompt_name == prompt_name)
-        )
+        await session.execute(select(EvalSuite).where(EvalSuite.prompt_name == prompt_name))
     ).scalar_one_or_none()
 
 
@@ -140,8 +135,7 @@ def _render_messages(input_messages: list[dict]) -> str:
     chat-template renderer.
     """
     return "\n".join(
-        f"{message.get('role', 'user')}: {message.get('content', '')}"
-        for message in input_messages
+        f"{message.get('role', 'user')}: {message.get('content', '')}" for message in input_messages
     )
 
 
@@ -235,18 +229,14 @@ async def _score_case(
             "messages": [
                 {
                     "role": "user",
-                    "content": _JUDGE_TEMPLATE.format(
-                        criteria=case.judge_criteria, actual=actual
-                    ),
+                    "content": _JUDGE_TEMPLATE.format(criteria=case.judge_criteria, actual=actual),
                 }
             ],
             "max_tokens": 128,
         }
         verdict = (await provider.complete(judge_payload)).text
         # Strip markdown formatting (e.g., "**PASS**" -> "PASS") before checking
-        verdict_normalized = (
-            verdict.strip().replace("**", "").replace("*", "").replace("_", "")
-        )
+        verdict_normalized = verdict.strip().replace("**", "").replace("*", "").replace("_", "")
         passed = verdict_normalized.upper().startswith("PASS")
         reason = verdict.strip()
 
@@ -311,9 +301,7 @@ async def run_eval_suite(
     return run
 
 
-def make_eval_gate(
-    *, provider, generate_model: str, judge_model: str, max_tokens: int
-) -> Gate:
+def make_eval_gate(*, provider, generate_model: str, judge_model: str, max_tokens: int) -> Gate:
     """Build a promotion gate that runs the prompt's suite and blocks on failure.
 
     The returned coroutine is a no-op when no suite is registered for the
@@ -321,9 +309,7 @@ def make_eval_gate(
     the persisted EvalRun.
     """
 
-    async def gate(
-        prompt_name: str, version: PromptVersion, session: AsyncSession
-    ) -> None:
+    async def gate(prompt_name: str, version: PromptVersion, session: AsyncSession) -> None:
         suite = await get_suite_for_prompt(prompt_name, session)
         if suite is None:
             return
@@ -376,9 +362,7 @@ async def run_suite_for_prompt(
             )
         ).scalar_one_or_none()
         if version is None:
-            raise PromptVersionNotFoundError(
-                f"prompt {prompt_name!r} has no version {version_num}"
-            )
+            raise PromptVersionNotFoundError(f"prompt {prompt_name!r} has no version {version_num}")
 
     return await run_eval_suite(
         suite,

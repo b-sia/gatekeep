@@ -43,9 +43,7 @@ def _by_prompt_key(prompt_name: str) -> str:
     return f"{_KEY_PREFIX}by-prompt:{prompt_name}"
 
 
-async def get_cached_response(
-    redis: Redis, request_hash: str
-) -> ChatCompletionResponse | None:
+async def get_cached_response(redis: Redis, request_hash: str) -> ChatCompletionResponse | None:
     """Look up a cached chat completion response by request hash, or None on a miss."""
     raw = await redis.get(_redis_key(request_hash))
     if raw is None:
@@ -67,9 +65,7 @@ async def set_cached_response(
     Redis set (`cache:exact:by-prompt:{prompt_name}`) so a later prompt
     promotion can find and invalidate every exact-cache entry it produced.
     """
-    await redis.set(
-        _redis_key(request_hash), response.model_dump_json(), ex=ttl_seconds
-    )
+    await redis.set(_redis_key(request_hash), response.model_dump_json(), ex=ttl_seconds)
     if prompt_name is not None:
         await redis.sadd(_by_prompt_key(prompt_name), request_hash)
 

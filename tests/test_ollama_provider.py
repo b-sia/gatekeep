@@ -21,9 +21,7 @@ class FakeOllamaClient:
             yield chunk
 
 
-def _response(
-    content="hello world", done_reason="stop", prompt_eval_count=5, eval_count=2
-):
+def _response(content="hello world", done_reason="stop", prompt_eval_count=5, eval_count=2):
     return SimpleNamespace(
         message=SimpleNamespace(content=content),
         done_reason=done_reason,

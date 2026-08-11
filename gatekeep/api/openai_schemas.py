@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -9,8 +9,8 @@ class ChatMessage(BaseModel):
     """A single message in an OpenAI-style chat completion request."""
 
     role: Literal["system", "developer", "user", "assistant", "tool"]
-    content: Union[str, list[dict[str, Any]], None] = None
-    name: Optional[str] = None
+    content: str | list[dict[str, Any]] | None = None
+    name: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -20,15 +20,15 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: list[ChatMessage]
-    max_tokens: Optional[int] = None
-    max_completion_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
     stream: bool = False
-    stop: Union[str, list[str], None] = None
-    prompt_name: Optional[str] = None
+    stop: str | list[str] | None = None
+    prompt_name: str | None = None
     route_by_cost: bool = False
-    quality_floor: Optional[float] = None
+    quality_floor: float | None = None
 
 
 class Usage(BaseModel):
@@ -43,7 +43,7 @@ class ResponseMessage(BaseModel):
     """The assistant message returned inside a non-streaming completion choice."""
 
     role: Literal["assistant"] = "assistant"
-    content: Optional[str] = None
+    content: str | None = None
 
 
 class Choice(BaseModel):
@@ -51,7 +51,7 @@ class Choice(BaseModel):
 
     index: int = 0
     message: ResponseMessage
-    finish_reason: Optional[str] = None
+    finish_reason: str | None = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -68,8 +68,8 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     """An incremental assistant-message delta within a streaming chunk."""
 
-    role: Optional[str] = None
-    content: Optional[str] = None
+    role: str | None = None
+    content: str | None = None
 
 
 class ChunkChoice(BaseModel):
@@ -77,7 +77,7 @@ class ChunkChoice(BaseModel):
 
     index: int = 0
     delta: DeltaMessage
-    finish_reason: Optional[str] = None
+    finish_reason: str | None = None
 
 
 class ChatCompletionChunk(BaseModel):

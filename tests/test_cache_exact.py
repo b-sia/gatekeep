@@ -191,9 +191,7 @@ async def client(counting_provider):
         yield c
 
 
-async def test_second_identical_request_is_served_from_cache(
-    client, raw_key, counting_provider
-):
+async def test_second_identical_request_is_served_from_cache(client, raw_key, counting_provider):
     body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "ping"}]}
     r1 = await client.post(
         "/v1/chat/completions",

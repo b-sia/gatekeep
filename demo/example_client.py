@@ -10,7 +10,6 @@ import os
 
 import httpx
 
-
 # Configuration
 GATEKEEP_URL = os.getenv("GATEKEEP_URL", "http://localhost:8100")
 API_KEY = os.getenv("GATEKEEP_API_KEY", "sk-test-key")
@@ -96,9 +95,7 @@ async def example_3_openai_client():
     try:
         from openai import AsyncOpenAI
     except ImportError:
-        print(
-            "OpenAI client not installed. Install with: pip install openai"
-        )
+        print("OpenAI client not installed. Install with: pip install openai")
         return
 
     # Create client pointing to Gatekeep instead of OpenAI
@@ -131,9 +128,7 @@ async def example_4_with_error_handling():
                     f"{GATEKEEP_URL}/v1/chat/completions",
                     json={
                         "model": DEFAULT_MODEL,
-                        "messages": [
-                            {"role": "user", "content": "Hello!"}
-                        ],
+                        "messages": [{"role": "user", "content": "Hello!"}],
                     },
                     headers={"Authorization": f"Bearer {API_KEY}"},
                     timeout=30.0,
@@ -224,9 +219,7 @@ async def example_6_provider_switching():
                     f"{GATEKEEP_URL}/v1/chat/completions",
                     json={
                         "model": model,
-                        "messages": [
-                            {"role": "user", "content": "Say 'Hello from [model]!'"}
-                        ],
+                        "messages": [{"role": "user", "content": "Say 'Hello from [model]!'"}],
                     },
                     headers={"Authorization": f"Bearer {API_KEY}"},
                     timeout=10.0,

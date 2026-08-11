@@ -10,22 +10,21 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import ollama
-from redis.exceptions import RedisError
 from anthropic import AsyncAnthropic
-from google import genai
-from openai import AsyncOpenAI
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from google import genai
+from openai import AsyncOpenAI
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
 from gatekeep.api.anthropic_schemas import MessagesRequest
-from gatekeep.api.dashboard import router as dashboard_router
 from gatekeep.api.anthropic_translation import (
     content_block_delta_event,
     content_block_start_event,
@@ -39,6 +38,7 @@ from gatekeep.api.anthropic_translation import (
     result_to_messages,
     reverse_finish_reason,
 )
+from gatekeep.api.dashboard import router as dashboard_router
 from gatekeep.api.errors import (
     anthropic_error,
     map_provider_error,
@@ -267,9 +267,7 @@ async def _finish_request(
         The `LatencyTimings` for this request.
     """
     mark(request, path=path)
-    timings = observe_non_streaming(
-        request, model=model, path=path, provider_ms=provider_ms
-    )
+    timings = observe_non_streaming(request, model=model, path=path, provider_ms=provider_ms)
     await log_request(
         session,
         key_id=key_id,
@@ -380,9 +378,7 @@ async def _finish_failed_request(
 
 
 @app.exception_handler(FastAPIHTTPException)
-async def _http_exception_handler(
-    request: Request, exc: FastAPIHTTPException
-) -> JSONResponse:
+async def _http_exception_handler(request: Request, exc: FastAPIHTTPException) -> JSONResponse:
     """Serialize HTTPException bodies as flat, top-level errors, OpenAI- or
     Anthropic-shaped depending on which endpoint raised them.
 
@@ -399,13 +395,9 @@ async def _http_exception_handler(
     is_messages = request.url.path == "/v1/messages"
     if isinstance(exc.detail, dict) and "error" in exc.detail:
         content = openai_error_to_anthropic(exc.detail) if is_messages else exc.detail
-        return JSONResponse(
-            status_code=exc.status_code, content=content, headers=exc.headers
-        )
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
     if is_messages:
-        return anthropic_error(
-            exc.status_code, str(exc.detail), "invalid_request_error"
-        )
+        return anthropic_error(exc.status_code, str(exc.detail), "invalid_request_error")
     return openai_error(exc.status_code, str(exc.detail), "invalid_request_error")
 
 
@@ -492,9 +484,7 @@ async def chat_completions(
         except PromptNotFoundError as exc:
             return openai_error(400, str(exc), "invalid_request_error")
         served_prompt_version = version.version_num
-        req.messages = [
-            ChatMessage(role="system", content=version.template)
-        ] + req.messages
+        req.messages = [ChatMessage(role="system", content=version.template)] + req.messages
     try:
         provider_name, payload = openai_to_payload(
             req,
@@ -540,15 +530,11 @@ async def chat_completions(
     try:
         cached = await get_cached_response(redis, request_hash)
     except RedisError:
-        logger.warning(
-            "Exact cache lookup failed (Redis unavailable); treating as a cache miss."
-        )
+        logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
     if cached is not None:
         cache_exact_hits.labels(model=model).inc()
-        cost_usd = calculate_cost(
-            model, cached.usage.prompt_tokens, cached.usage.completion_tokens
-        )
+        cost_usd = calculate_cost(model, cached.usage.prompt_tokens, cached.usage.completion_tokens)
         cache_cost_saved_usd.inc(cost_usd)
         await _finish_request(
             request,
@@ -582,9 +568,7 @@ async def chat_completions(
         )
         if semantic_match is not None:
             cache_semantic_hits.labels(model=model).inc()
-            cache_semantic_similarity.labels(model=model).observe(
-                semantic_match.similarity
-            )
+            cache_semantic_similarity.labels(model=model).observe(semantic_match.similarity)
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
             await _finish_request(
@@ -636,9 +620,7 @@ async def chat_completions(
             prompt_name=req.prompt_name,
         )
     except RedisError:
-        logger.warning(
-            "Exact cache write failed (Redis unavailable); serving response uncached."
-        )
+        logger.warning("Exact cache write failed (Redis unavailable); serving response uncached.")
     if embedding is not None:
         await store_cached_response(
             session,
@@ -717,14 +699,10 @@ async def messages(
         served_prompt_version = version.version_num
         existing_system = extract_text(req.system) if req.system is not None else ""
         req.system = (
-            f"{version.template}\n\n{existing_system}"
-            if existing_system
-            else version.template
+            f"{version.template}\n\n{existing_system}" if existing_system else version.template
         )
 
-    provider_name, payload = messages_to_payload(
-        req, model_aliases=settings.model_aliases
-    )
+    provider_name, payload = messages_to_payload(req, model_aliases=settings.model_aliases)
     provider = get_provider(provider_name)
     model = payload["model"]
 
@@ -761,15 +739,11 @@ async def messages(
     try:
         cached = await get_cached_response(redis, request_hash)
     except RedisError:
-        logger.warning(
-            "Exact cache lookup failed (Redis unavailable); treating as a cache miss."
-        )
+        logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
     if cached is not None:
         cache_exact_hits.labels(model=model).inc()
-        cost_usd = calculate_cost(
-            model, cached.usage.prompt_tokens, cached.usage.completion_tokens
-        )
+        cost_usd = calculate_cost(model, cached.usage.prompt_tokens, cached.usage.completion_tokens)
         cache_cost_saved_usd.inc(cost_usd)
         await _finish_request(
             request,
@@ -803,9 +777,7 @@ async def messages(
         )
         if semantic_match is not None:
             cache_semantic_hits.labels(model=model).inc()
-            cache_semantic_similarity.labels(model=model).observe(
-                semantic_match.similarity
-            )
+            cache_semantic_similarity.labels(model=model).observe(semantic_match.similarity)
             cache_cost_saved_usd.inc(semantic_match.cached.cost_usd)
             semantic_response = build_response_from_cache(semantic_match.cached)
             await _finish_request(
@@ -825,9 +797,7 @@ async def messages(
                 prompt_name=req.prompt_name,
                 prompt_version_num=served_prompt_version,
             )
-            return JSONResponse(
-                content=openai_response_to_messages(semantic_response).model_dump()
-            )
+            return JSONResponse(content=openai_response_to_messages(semantic_response).model_dump())
         cache_semantic_misses.labels(model=model).inc()
 
     # Marked before the call so a provider error still carries labels.
@@ -860,9 +830,7 @@ async def messages(
             prompt_name=req.prompt_name,
         )
     except RedisError:
-        logger.warning(
-            "Exact cache write failed (Redis unavailable); serving response uncached."
-        )
+        logger.warning("Exact cache write failed (Redis unavailable); serving response uncached.")
     if embedding is not None:
         await store_cached_response(
             session,
@@ -948,18 +916,14 @@ async def _messages_sse(
     accumulated: list[str] = []
     stream_ended = False
     try:
-        yield _anthropic_event(
-            "message_start", message_start_event(id=message_id, model=model)
-        )
+        yield _anthropic_event("message_start", message_start_event(id=message_id, model=model))
         yield _anthropic_event("content_block_start", content_block_start_event())
         timer.provider_started()
         async for ev in provider.stream(payload):
             if isinstance(ev, TextDelta):
                 timer.delta()
                 accumulated.append(ev.text)
-                yield _anthropic_event(
-                    "content_block_delta", content_block_delta_event(ev.text)
-                )
+                yield _anthropic_event("content_block_delta", content_block_delta_event(ev.text))
             elif isinstance(ev, StreamEnd):
                 stream_ended = True
                 outcome = "ok"
@@ -1186,17 +1150,13 @@ async def _sse(
             if isinstance(ev, TextDelta):
                 timer.delta()
                 accumulated.append(ev.text)
-                yield _event(
-                    text_chunk(ev.text, id=completion_id, created=created, model=model)
-                )
+                yield _event(text_chunk(ev.text, id=completion_id, created=created, model=model))
             elif isinstance(ev, StreamEnd):
                 stream_ended = True
                 outcome = "ok"
                 input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
                 yield _event(
-                    final_chunk(
-                        ev.stop_reason, id=completion_id, created=created, model=model
-                    )
+                    final_chunk(ev.stop_reason, id=completion_id, created=created, model=model)
                 )
                 break
         if not stream_ended:
@@ -1210,9 +1170,7 @@ async def _sse(
             outcome = "ok"
             input_tokens = estimate_tokens(_payload_text(payload))
             output_tokens = estimate_tokens("".join(accumulated))
-            yield _event(
-                final_chunk(None, id=completion_id, created=created, model=model)
-            )
+            yield _event(final_chunk(None, id=completion_id, created=created, model=model))
     except (GeneratorExit, asyncio.CancelledError):
         outcome = "client_disconnect"
         input_tokens = estimate_tokens(_payload_text(payload))

@@ -30,9 +30,7 @@ async def _clean_budget_keys():
 
 async def _make_key(session, monthly_budget_usd: float | None = None) -> ApiKey:
     raw = generate_key()
-    key = ApiKey(
-        name="c", key_hash=hash_key(raw), monthly_budget_usd=monthly_budget_usd
-    )
+    key = ApiKey(name="c", key_hash=hash_key(raw), monthly_budget_usd=monthly_budget_usd)
     session.add(key)
     await session.commit()
     await session.refresh(key)

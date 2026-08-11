@@ -86,9 +86,7 @@ def openai_to_payload(
             raise TranslationError(f"unsupported message role in v1: {msg.role}")
 
     if not messages:
-        raise TranslationError(
-            "request must contain at least one user or assistant message"
-        )
+        raise TranslationError("request must contain at least one user or assistant message")
 
     provider, model = resolve_route(req.model, aliases=model_aliases)
 
@@ -100,9 +98,7 @@ def openai_to_payload(
     if system_parts:
         payload["system"] = "\n\n".join(system_parts)
     if req.stop:
-        payload["stop_sequences"] = (
-            [req.stop] if isinstance(req.stop, str) else list(req.stop)
-        )
+        payload["stop_sequences"] = [req.stop] if isinstance(req.stop, str) else list(req.stop)
     # temperature/top_p/top_k intentionally omitted (rejected by Sonnet 5 / Opus 4.8).
     return provider, payload
 

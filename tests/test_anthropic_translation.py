@@ -93,9 +93,7 @@ def test_openai_response_to_messages_converts_cached_shape():
         id="chatcmpl-1",
         created=0,
         model="claude-sonnet-5",
-        choices=[
-            Choice(message=ResponseMessage(content="cached text"), finish_reason="length")
-        ],
+        choices=[Choice(message=ResponseMessage(content="cached text"), finish_reason="length")],
         usage=Usage(prompt_tokens=4, completion_tokens=6, total_tokens=10),
     )
     resp = openai_response_to_messages(cached)

@@ -32,9 +32,7 @@ async def select_model(
         return requested_model
 
     requested_cost = _model_cost(requested_model)
-    candidates = [
-        model for model in MODEL_PRICING if _model_cost(model) < requested_cost
-    ]
+    candidates = [model for model in MODEL_PRICING if _model_cost(model) < requested_cost]
     if not candidates:
         return requested_model
 

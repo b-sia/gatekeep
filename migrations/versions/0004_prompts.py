@@ -36,9 +36,7 @@ def upgrade() -> None:
     op.create_table(
         "prompt_versions",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "prompt_id", sa.Integer(), sa.ForeignKey("prompts.id"), nullable=False
-        ),
+        sa.Column("prompt_id", sa.Integer(), sa.ForeignKey("prompts.id"), nullable=False),
         sa.Column("version_num", sa.Integer(), nullable=False),
         sa.Column("template", sa.Text(), nullable=False),
         sa.Column(

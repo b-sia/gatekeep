@@ -35,9 +35,7 @@ def _sum_for(histogram, labels):
 
 def test_observe_non_streaming_returns_duration_and_provider_ms():
     request = _FakeRequest(started_at=0.0)
-    timings = observe_non_streaming(
-        request, model="m-obs-1", path="provider", provider_ms=50.0
-    )
+    timings = observe_non_streaming(request, model="m-obs-1", path="provider", provider_ms=50.0)
     assert timings.duration_ms is not None
     assert timings.provider_ms == pytest.approx(50.0)
     assert timings.ttft_ms is None
@@ -71,9 +69,7 @@ def test_observe_non_streaming_publishes_provider_ms_for_middleware():
         {"model": "m-obs-1", "path": "provider"},
     )
     request = _FakeRequest(started_at=0.0)
-    timings = observe_non_streaming(
-        request, model="m-obs-1", path="provider", provider_ms=50.0
-    )
+    timings = observe_non_streaming(request, model="m-obs-1", path="provider", provider_ms=50.0)
     after = _sum_for(
         metrics.gateway_overhead_seconds,
         {"model": "m-obs-1", "path": "provider"},
@@ -101,9 +97,7 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
     """E2E for streams is the middleware's job now; the timer owns TTLT."""
     e2e_labels = {"model": "m-ttlt", "path": "stream"}
     before_e2e = _sum_for(metrics.request_duration_seconds, e2e_labels)
-    before_ttlt = (
-        _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"}) or 0.0
-    )
+    before_ttlt = _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"}) or 0.0
 
     state = {"started_at": 0.0}
     timer = StreamTimer(state, model="m-ttlt")
@@ -113,9 +107,7 @@ def test_stream_timer_records_time_to_last_token_not_request_duration():
 
     assert _sum_for(metrics.request_duration_seconds, e2e_labels) == before_e2e
     after_ttlt = _sum_for(metrics.time_to_last_token_seconds, {"model": "m-ttlt"})
-    assert after_ttlt - before_ttlt == pytest.approx(
-        timings.duration_ms / 1000, rel=1e-3
-    )
+    assert after_ttlt - before_ttlt == pytest.approx(timings.duration_ms / 1000, rel=1e-3)
 
 
 def test_stream_timer_publishes_provider_ms_onto_state_for_the_middleware():
@@ -142,9 +134,7 @@ def test_stream_timer_without_started_at_is_a_no_op():
     timer = StreamTimer(None, model="m-stream-none")
     timer.provider_started()
     timer.delta()
-    assert timer.finish() == LatencyTimings(
-        duration_ms=None, provider_ms=None, ttft_ms=None
-    )
+    assert timer.finish() == LatencyTimings(duration_ms=None, provider_ms=None, ttft_ms=None)
 
 
 def test_stream_timer_with_no_deltas_leaves_ttft_none():
@@ -244,9 +234,7 @@ def test_mark_provider_ms_none_is_distinct_from_unset():
 # (duration_ms - ttft_ms) / NULLIF(completion_tokens - 1, 0).
 
 
-def mean_itl_ms(
-    duration_ms: float, ttft_ms: float, completion_tokens: int
-) -> float | None:
+def mean_itl_ms(duration_ms: float, ttft_ms: float, completion_tokens: int) -> float | None:
     """Mean inter-token latency in ms, or None when it is undefined.
 
     Undefined below two completion tokens: one token has no gap to measure, and

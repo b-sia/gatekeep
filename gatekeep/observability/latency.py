@@ -101,12 +101,8 @@ class LatencyMiddleware:
             # how much of e2e_seconds was provider time, so skip rather than
             # miscount the whole span as gateway overhead.
             return
-        overhead_seconds = (
-            e2e_seconds if provider_ms is None else e2e_seconds - provider_ms / 1000
-        )
-        gateway_overhead_seconds.labels(model=model, path=path).observe(
-            max(overhead_seconds, 0.0)
-        )
+        overhead_seconds = e2e_seconds if provider_ms is None else e2e_seconds - provider_ms / 1000
+        gateway_overhead_seconds.labels(model=model, path=path).observe(max(overhead_seconds, 0.0))
 
 
 def mark(
@@ -187,9 +183,7 @@ def observe_non_streaming(
     mark(request, provider_ms=provider_ms)
     if provider_ms is not None and count_latency:
         provider_duration_seconds.labels(model=model).observe(provider_ms / 1000)
-    return LatencyTimings(
-        duration_ms=duration_ms, provider_ms=provider_ms, ttft_ms=None
-    )
+    return LatencyTimings(duration_ms=duration_ms, provider_ms=provider_ms, ttft_ms=None)
 
 
 class StreamTimer:
@@ -244,9 +238,7 @@ class StreamTimer:
             self.ttft_ms = (now - self._started_at) * 1000
             ttft_seconds.labels(model=self._model).observe(self.ttft_ms / 1000)
         else:
-            inter_token_seconds.labels(model=self._model).observe(
-                now - self._last_delta_at
-            )
+            inter_token_seconds.labels(model=self._model).observe(now - self._last_delta_at)
         self._last_delta_at = now
 
     def finish(self, *, succeeded: bool = True) -> LatencyTimings:
@@ -279,15 +271,11 @@ class StreamTimer:
 
         now = time.perf_counter()
         provider_ms = (
-            None
-            if self._provider_started_at is None
-            else (now - self._provider_started_at) * 1000
+            None if self._provider_started_at is None else (now - self._provider_started_at) * 1000
         )
         if succeeded:
             duration_ms = (now - self._started_at) * 1000
-            time_to_last_token_seconds.labels(model=self._model).observe(
-                duration_ms / 1000
-            )
+            time_to_last_token_seconds.labels(model=self._model).observe(duration_ms / 1000)
         else:
             duration_ms = (
                 None
@@ -298,9 +286,7 @@ class StreamTimer:
         # state.get(...), so a non-None started_at implies a non-None state.
         self._state["provider_ms"] = provider_ms
         if provider_ms is not None:
-            provider_duration_seconds.labels(model=self._model).observe(
-                provider_ms / 1000
-            )
+            provider_duration_seconds.labels(model=self._model).observe(provider_ms / 1000)
         return LatencyTimings(
             duration_ms=duration_ms, provider_ms=provider_ms, ttft_ms=self.ttft_ms
         )

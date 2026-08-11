@@ -41,9 +41,7 @@ async def load_fixture_file(path: pathlib.Path, session: AsyncSession) -> EvalSu
         await session.refresh(suite)
 
     await session.execute(
-        delete(EvalCase).where(
-            EvalCase.suite_id == suite.id, EvalCase.source == "fixture"
-        )
+        delete(EvalCase).where(EvalCase.suite_id == suite.id, EvalCase.source == "fixture")
     )
     await session.commit()
 

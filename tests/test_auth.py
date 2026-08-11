@@ -20,9 +20,7 @@ async def test_require_api_key_accepts_valid(session):
     session.add(ApiKey(name="c", key_hash=hash_key(raw)))
     await session.commit()
 
-    key = await require_api_key(
-        authorization=f"Bearer {raw}", x_api_key=None, session=session
-    )
+    key = await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
     assert key.name == "c"
 
 
@@ -35,9 +33,7 @@ async def test_require_api_key_rejects_missing(session):
 
 async def test_require_api_key_rejects_unknown(session):
     with pytest.raises(HTTPException) as ei:
-        await require_api_key(
-            authorization="Bearer nope", x_api_key=None, session=session
-        )
+        await require_api_key(authorization="Bearer nope", x_api_key=None, session=session)
     assert ei.value.status_code == 401
     assert ei.value.detail["error"]["type"] == "authentication_error"
 
@@ -47,9 +43,7 @@ async def test_require_api_key_rejects_inactive(session):
     session.add(ApiKey(name="c", key_hash=hash_key(raw), active=False))
     await session.commit()
     with pytest.raises(HTTPException) as ei:
-        await require_api_key(
-            authorization=f"Bearer {raw}", x_api_key=None, session=session
-        )
+        await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
     assert ei.value.status_code == 401
     assert ei.value.detail["error"]["type"] == "authentication_error"
 
