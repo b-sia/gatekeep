@@ -11,7 +11,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # Check if Gatekeep is already running
-if ! curl -s http://localhost:8100/health > /dev/null 2>&1; then
+if ! curl -s http://localhost:8100/healthz > /dev/null 2>&1; then
     echo "⚠️  Gatekeep server not running on port 8100"
     echo "Starting Gatekeep via docker-compose..."
     docker-compose up -d
