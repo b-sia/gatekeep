@@ -77,11 +77,7 @@ def _response(id="chatcmpl-1"):
         id=id,
         created=1234,
         model="claude-sonnet-5",
-        choices=[
-            Choice(
-                index=0, message=ResponseMessage(content="pong"), finish_reason="stop"
-            )
-        ],
+        choices=[Choice(index=0, message=ResponseMessage(content="pong"), finish_reason="stop")],
         usage=Usage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
     )
 
@@ -223,9 +219,7 @@ async def test_promote_invalidates_exact_cache_entries_tagged_with_prompt(sessio
     await add_prompt_version("system-context", "v2 text", session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(
-        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
-    )
+    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
 
     await promote_prompt("system-context", 2, session, redis=redis)
 
@@ -282,12 +276,8 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
             "max_tokens": 1,
         }
     )
-    await set_cached_response(
-        redis, h_a, _response("a"), ttl_seconds=60, prompt_name="a"
-    )
-    await set_cached_response(
-        redis, h_b, _response("b"), ttl_seconds=60, prompt_name="b"
-    )
+    await set_cached_response(redis, h_a, _response("a"), ttl_seconds=60, prompt_name="a")
+    await set_cached_response(redis, h_b, _response("b"), ttl_seconds=60, prompt_name="b")
     await set_cached_response(redis, h_plain, _response("plain"), ttl_seconds=60)
 
     embedding = embed_text("x")
@@ -387,9 +377,7 @@ async def test_rollback_invalidates_cache_for_the_prompt(session):
     await promote_prompt("system-context", 2, session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(
-        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
-    )
+    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
 
     await rollback_prompt("system-context", session, redis=redis)
 
@@ -551,9 +539,7 @@ async def test_promote_unaffected_by_inflight_candidate(session):
     active = await get_active_prompt_version("system-context", session)
     assert active.version_num == 2
     # the candidate configuration itself is untouched by promotion
-    prompt_row = next(
-        p for p in await list_prompts(session) if p.name == "system-context"
-    )
+    prompt_row = next(p for p in await list_prompts(session) if p.name == "system-context")
     assert prompt_row.candidate_version_id == v3.id
     assert prompt_row.candidate_traffic_pct == 20.0
 
@@ -580,9 +566,7 @@ async def test_setting_candidate_does_not_invalidate_cache(session):
     await add_prompt_version("system-context", "v2 text", session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(
-        redis, h, _response(), ttl_seconds=60, prompt_name="system-context"
-    )
+    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
 
     await set_candidate_version("system-context", 2, 10.0, session)
     assert await get_cached_response(redis, h) is not None

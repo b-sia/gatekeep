@@ -155,9 +155,7 @@ async def log_request(
     session.add(log)
     await session.commit()
     try:
-        await record_spend(
-            get_redis(), key_id=key_id, cost_usd=0.0 if cached else cost_usd
-        )
+        await record_spend(get_redis(), key_id=key_id, cost_usd=0.0 if cached else cost_usd)
     except RedisError:
         # Best-effort accelerator: a missed increment here just means the
         # next budget check falls back to a DB aggregate (get_period_spend),

@@ -8,9 +8,7 @@ async def _suite_with_version(session, prompt_name):
     prompt = Prompt(name=prompt_name)
     session.add(prompt)
     await session.flush()
-    version = PromptVersion(
-        prompt_id=prompt.id, version_num=1, template="t", active=True
-    )
+    version = PromptVersion(prompt_id=prompt.id, version_num=1, template="t", active=True)
     session.add(version)
     await session.flush()
     return suite, version

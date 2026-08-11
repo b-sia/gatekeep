@@ -31,9 +31,7 @@ async def test_request_sample_round_trips_structured_messages(session):
 
 
 async def test_eval_suite_case_and_run_persist(session):
-    suite = EvalSuite(
-        name="system-context", prompt_name="system-context", pass_threshold=0.9
-    )
+    suite = EvalSuite(name="system-context", prompt_name="system-context", pass_threshold=0.9)
     session.add(suite)
     await session.flush()
 
@@ -50,9 +48,7 @@ async def test_eval_suite_case_and_run_persist(session):
     prompt = Prompt(name="system-context")
     session.add(prompt)
     await session.flush()
-    version = PromptVersion(
-        prompt_id=prompt.id, version_num=1, template="t", active=True
-    )
+    version = PromptVersion(prompt_id=prompt.id, version_num=1, template="t", active=True)
     session.add(version)
     await session.flush()
 
@@ -62,16 +58,12 @@ async def test_eval_suite_case_and_run_persist(session):
         model="claude-sonnet-5",
         score=1.0,
         passed=True,
-        report=[
-            {"case_id": case.id, "passed": True, "actual_output": "pong", "reason": ""}
-        ],
+        report=[{"case_id": case.id, "passed": True, "actual_output": "pong", "reason": ""}],
     )
     session.add(run)
     await session.commit()
 
-    assert (
-        await session.execute(select(EvalCase))
-    ).scalar_one().check_type == "contains"
+    assert (await session.execute(select(EvalCase))).scalar_one().check_type == "contains"
     assert (await session.execute(select(EvalRun))).scalar_one().passed is True
 
 

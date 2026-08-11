@@ -20,9 +20,7 @@ async def _prompt_version(session, template="answer helpfully"):
     prompt = Prompt(name="system-context")
     session.add(prompt)
     await session.flush()
-    version = PromptVersion(
-        prompt_id=prompt.id, version_num=1, template=template, active=True
-    )
+    version = PromptVersion(prompt_id=prompt.id, version_num=1, template=template, active=True)
     session.add(version)
     await session.flush()
     return version
@@ -83,9 +81,7 @@ async def test_llm_judge_uses_fixed_judge_model_and_parses_verdict(session):
     )
 
     assert run.passed is True
-    assert (
-        provider.payloads[1]["model"] == "claude-sonnet-5"
-    )  # fixed judge, not generate_model
+    assert provider.payloads[1]["model"] == "claude-sonnet-5"  # fixed judge, not generate_model
     # least-privilege: the judge call must never grant tool access, so a
     # prompt-injected criteria/output can't escalate beyond bad grading text
     assert "tools" not in provider.payloads[1]
@@ -228,9 +224,7 @@ async def test_run_suite_for_prompt_can_target_a_specific_version(session):
     )
     # the v2 version row was evaluated
     v2 = (
-        await session.execute(
-            select(PromptVersion).where(PromptVersion.version_num == 2)
-        )
+        await session.execute(select(PromptVersion).where(PromptVersion.version_num == 2))
     ).scalar_one()
     assert run.prompt_version_id == v2.id
 

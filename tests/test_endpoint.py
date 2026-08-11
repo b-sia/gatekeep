@@ -54,12 +54,8 @@ async def test_run_shielded_completes_the_coroutine_despite_repeated_cancellatio
     task.cancel()
     await asyncio.sleep(0.01)
     task.cancel()  # cancel again while the shielded write is still in flight
-    await (
-        task
-    )  # must NOT raise: both cancellations are absorbed until the write finishes
-    assert completed, (
-        "the shielded write must run to completion despite repeated cancellation"
-    )
+    await task  # must NOT raise: both cancellations are absorbed until the write finishes
+    assert completed, "the shielded write must run to completion despite repeated cancellation"
 
 
 async def test_run_shielded_returns_the_coroutines_result_when_not_cancelled():
@@ -285,9 +281,7 @@ async def test_non_streaming_completion(client, raw_key):
     assert body["usage"]["total_tokens"] == 4
 
 
-async def test_openai_prefixed_model_routes_to_openai_provider_response(
-    client, raw_key
-):
+async def test_openai_prefixed_model_routes_to_openai_provider_response(client, raw_key):
     r = await client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {raw_key}"},
@@ -334,9 +328,7 @@ async def test_non_streaming_completion_logs_request(client, raw_key, session):
     response_id = r.json()["id"]
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == response_id)
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == response_id))
     ).scalar_one()
     assert log.model == "claude-sonnet-5"
     assert log.prompt_tokens == 3
@@ -362,18 +354,14 @@ async def test_streaming_completion_logs_request(client, raw_key, session):
     response_id = first_chunk["id"]
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == response_id)
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == response_id))
     ).scalar_one()
     assert log.prompt_tokens == 3
     assert log.completion_tokens == 2
     assert log.total_tokens == 5
 
 
-async def test_prompt_name_substitutes_active_template_as_system_message(
-    client, raw_key, session
-):
+async def test_prompt_name_substitutes_active_template_as_system_message(client, raw_key, session):
     await create_prompt("system-context", "You are a pirate.", session)
     captured = {}
     original_complete = app_module._providers["anthropic"].complete
@@ -399,9 +387,7 @@ async def test_prompt_name_substitutes_active_template_as_system_message(
     assert captured["payload"]["system"] == "You are a pirate."
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     assert log.prompt_version_num == 1
 
@@ -409,9 +395,7 @@ async def test_prompt_name_substitutes_active_template_as_system_message(
 # -- A/B candidate traffic split -------------------------------------------
 
 
-async def test_candidate_at_100_pct_always_serves_candidate_template(
-    client, raw_key, session
-):
+async def test_candidate_at_100_pct_always_serves_candidate_template(client, raw_key, session):
     """A candidate configured at 100% traffic must always be served instead
     of the active version, and the served version's number must land on
     RequestLog for later active-vs-candidate comparison."""
@@ -444,16 +428,12 @@ async def test_candidate_at_100_pct_always_serves_candidate_template(
     assert captured["payload"]["system"] == "You are a wizard."
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     assert log.prompt_version_num == 2
 
 
-async def test_candidate_at_0_pct_never_serves_candidate_template(
-    client, raw_key, session
-):
+async def test_candidate_at_0_pct_never_serves_candidate_template(client, raw_key, session):
     """A candidate configured at 0% traffic must behave exactly like no
     candidate at all: always the active version, never the candidate."""
     await create_prompt("system-context", "You are a pirate.", session)
@@ -485,9 +465,7 @@ async def test_candidate_at_0_pct_never_serves_candidate_template(
     assert captured["payload"]["system"] == "You are a pirate."
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     assert log.prompt_version_num == 1
 
@@ -519,11 +497,7 @@ async def test_candidate_split_routes_a_mix_of_active_and_candidate_requests(
         response_ids.append(r.json()["id"])
 
     logs = (
-        (
-            await session.execute(
-                select(RequestLog).where(RequestLog.response_id.in_(response_ids))
-            )
-        )
+        (await session.execute(select(RequestLog).where(RequestLog.response_id.in_(response_ids))))
         .scalars()
         .all()
     )
@@ -558,9 +532,7 @@ async def test_promote_prompt_unaffected_by_inflight_candidate_via_endpoint(
     )
     assert r.status_code == 200
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     # candidate (v3) at 20% may or may not have fired for this single
     # request, but the active version promoted-to (v2) must be a valid
@@ -574,9 +546,7 @@ async def test_promote_prompt_unaffected_by_inflight_candidate_via_endpoint(
     assert active.version_num == 2
 
 
-async def test_rate_limit_exhaustion_returns_429_with_retry_after(
-    client, raw_key, monkeypatch
-):
+async def test_rate_limit_exhaustion_returns_429_with_retry_after(client, raw_key, monkeypatch):
     """Drain a key's token bucket through the real HTTP endpoint and confirm
     the request that exceeds it gets a real 429 with a Retry-After header
     (not just at the require_rate_limit dependency level)."""
@@ -616,16 +586,12 @@ async def budgeted_raw_key(session):
     recorded."""
     raw = generate_key()
     one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
-    session.add(
-        ApiKey(name="b", key_hash=hash_key(raw), monthly_budget_usd=one_call_cost / 2)
-    )
+    session.add(ApiKey(name="b", key_hash=hash_key(raw), monthly_budget_usd=one_call_cost / 2))
     await session.commit()
     return raw
 
 
-async def test_budget_cap_allows_below_cap_then_rejects_once_exceeded(
-    client, budgeted_raw_key
-):
+async def test_budget_cap_allows_below_cap_then_rejects_once_exceeded(client, budgeted_raw_key):
     """Exercise the budget cap through the real /v1/chat/completions endpoint:
     a request under the cap succeeds, and the very next request - now that
     the first request's cost has pushed cumulative spend past the cap -
@@ -727,9 +693,7 @@ async def test_route_by_cost_with_prompt_name_substitutes_cheaper_qualifying_mod
     assert captured["payload"]["model"] == cheap_model
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == body["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == body["id"]))
     ).scalar_one()
     assert log.model == cheap_model
     assert log.routed_from == "claude-sonnet-5"
@@ -756,17 +720,13 @@ async def test_route_by_cost_without_prompt_name_is_a_noop(client, raw_key, sess
     assert body["model"] == "claude-sonnet-5"
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == body["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == body["id"]))
     ).scalar_one()
     assert log.model == "claude-sonnet-5"
     assert log.routed_from is None
 
 
-async def test_route_by_cost_defaults_to_false_and_never_substitutes(
-    client, raw_key, session
-):
+async def test_route_by_cost_defaults_to_false_and_never_substitutes(client, raw_key, session):
     """route_by_cost omitted (defaulting to False) must never substitute the
     model, even when prompt_name is set and a cheaper qualifying model
     exists - this is the 'never silently override' invariant."""
@@ -787,9 +747,7 @@ async def test_route_by_cost_defaults_to_false_and_never_substitutes(
     assert body["model"] == "claude-sonnet-5"
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == body["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == body["id"]))
     ).scalar_one()
     assert log.model == "claude-sonnet-5"
     assert log.routed_from is None
@@ -847,11 +805,7 @@ async def test_cache_hit_leaves_provider_ms_null(client, raw_key, session):
     await client.post("/v1/chat/completions", headers=headers, json=body)
     await client.post("/v1/chat/completions", headers=headers, json=body)
 
-    logs = (
-        (await session.execute(select(RequestLog).order_by(RequestLog.id)))
-        .scalars()
-        .all()
-    )
+    logs = (await session.execute(select(RequestLog).order_by(RequestLog.id))).scalars().all()
     assert len(logs) == 2
     assert logs[1].cached is True
     assert logs[1].provider_ms is None
@@ -867,25 +821,13 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     e2e_labels = {"model": "claude-sonnet-5", "path": "stream"}
     ttlt_labels = {"model": "claude-sonnet-5"}
     overhead_labels = {"model": "claude-sonnet-5", "path": "stream"}
-    before_e2e_count = sample_for(
-        metrics.request_duration_seconds, "_count", e2e_labels
-    )
+    before_e2e_count = sample_for(metrics.request_duration_seconds, "_count", e2e_labels)
     before_e2e_sum = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels)
-    before_ttlt_count = sample_for(
-        metrics.time_to_last_token_seconds, "_count", ttlt_labels
-    )
-    before_ttlt_sum = sample_for(
-        metrics.time_to_last_token_seconds, "_sum", ttlt_labels
-    )
-    before_overhead_count = sample_for(
-        metrics.gateway_overhead_seconds, "_count", overhead_labels
-    )
-    before_overhead_sum = sample_for(
-        metrics.gateway_overhead_seconds, "_sum", overhead_labels
-    )
-    before_provider_sum = sample_for(
-        metrics.provider_duration_seconds, "_sum", ttlt_labels
-    )
+    before_ttlt_count = sample_for(metrics.time_to_last_token_seconds, "_count", ttlt_labels)
+    before_ttlt_sum = sample_for(metrics.time_to_last_token_seconds, "_sum", ttlt_labels)
+    before_overhead_count = sample_for(metrics.gateway_overhead_seconds, "_count", overhead_labels)
+    before_overhead_sum = sample_for(metrics.gateway_overhead_seconds, "_sum", overhead_labels)
+    before_provider_sum = sample_for(metrics.provider_duration_seconds, "_sum", ttlt_labels)
 
     async with client.stream(
         "POST",
@@ -900,23 +842,18 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
         async for _ in response.aiter_lines():
             pass
 
-    e2e_delta = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels) - (
-        before_e2e_sum
-    )
+    e2e_delta = sample_for(metrics.request_duration_seconds, "_sum", e2e_labels) - (before_e2e_sum)
     ttlt_delta = sample_for(metrics.time_to_last_token_seconds, "_sum", ttlt_labels) - (
         before_ttlt_sum
     )
     overhead_delta = (
-        sample_for(metrics.gateway_overhead_seconds, "_sum", overhead_labels)
-        - before_overhead_sum
+        sample_for(metrics.gateway_overhead_seconds, "_sum", overhead_labels) - before_overhead_sum
     )
     provider_delta = (
-        sample_for(metrics.provider_duration_seconds, "_sum", ttlt_labels)
-        - before_provider_sum
+        sample_for(metrics.provider_duration_seconds, "_sum", ttlt_labels) - before_provider_sum
     )
     assert (
-        sample_for(metrics.request_duration_seconds, "_count", e2e_labels)
-        == before_e2e_count + 1
+        sample_for(metrics.request_duration_seconds, "_count", e2e_labels) == before_e2e_count + 1
     ), "exactly one E2E observation per streamed request, no double-count"
     assert (
         sample_for(metrics.time_to_last_token_seconds, "_count", ttlt_labels)
@@ -933,9 +870,7 @@ async def test_middleware_records_e2e_for_sse_under_the_stream_path(client, raw_
     )
 
 
-async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
-    client, raw_key
-):
+async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(client, raw_key):
     """The non-streaming path went through the same refactor as streaming -
     observe_non_streaming now only publishes provider_ms, the middleware
     derives overhead - but only the streaming path had an equivalent exact-
@@ -960,17 +895,13 @@ async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
     assert r.status_code == 200
 
     duration_delta = (
-        sample_for(metrics.request_duration_seconds, "_sum", labels)
-        - before_duration_sum
+        sample_for(metrics.request_duration_seconds, "_sum", labels) - before_duration_sum
     )
     overhead_delta = (
-        sample_for(metrics.gateway_overhead_seconds, "_sum", labels)
-        - before_overhead_sum
+        sample_for(metrics.gateway_overhead_seconds, "_sum", labels) - before_overhead_sum
     )
     provider_delta = (
-        sample_for(
-            metrics.provider_duration_seconds, "_sum", {"model": "claude-sonnet-5"}
-        )
+        sample_for(metrics.provider_duration_seconds, "_sum", {"model": "claude-sonnet-5"})
         - before_provider_sum
     )
     assert overhead_delta == pytest.approx(duration_delta - provider_delta, rel=1e-3), (
@@ -993,12 +924,8 @@ async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
     from gatekeep.observability import metrics
 
     labels = {"model": "claude-sonnet-5", "path": "provider"}
-    before_duration_count = sample_for(
-        metrics.request_duration_seconds, "_count", labels
-    )
-    before_overhead_count = sample_for(
-        metrics.gateway_overhead_seconds, "_count", labels
-    )
+    before_duration_count = sample_for(metrics.request_duration_seconds, "_count", labels)
+    before_overhead_count = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
 
     r = await broken_client.post(
         "/v1/chat/completions",
@@ -1011,12 +938,10 @@ async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
     assert r.status_code == 502
 
     assert (
-        sample_for(metrics.request_duration_seconds, "_count", labels)
-        == before_duration_count + 1
+        sample_for(metrics.request_duration_seconds, "_count", labels) == before_duration_count + 1
     )
     assert (
-        sample_for(metrics.gateway_overhead_seconds, "_count", labels)
-        == before_overhead_count + 1
+        sample_for(metrics.gateway_overhead_seconds, "_count", labels) == before_overhead_count + 1
     ), "provider_ms is now published even on failure, so overhead must be observed"
 
     log = (await session.execute(select(RequestLog))).scalars().one()
@@ -1080,9 +1005,7 @@ async def test_provider_error_survives_failing_accounting_write(
     assert r.status_code == 502, "the mapped provider error, not a masked 500"
 
 
-async def test_non_streaming_records_path_matching_the_metric_label(
-    client, raw_key, session
-):
+async def test_non_streaming_records_path_matching_the_metric_label(client, raw_key, session):
     """A provider-served non-streaming request must record `path ==
     "provider"` on the `RequestLog` row `_finish_request` writes."""
     response = await client.post(
@@ -1107,11 +1030,7 @@ async def test_cache_hit_records_cache_exact_path(client, raw_key, session):
     await client.post("/v1/chat/completions", headers=headers, json=body)
     await client.post("/v1/chat/completions", headers=headers, json=body)
 
-    logs = (
-        (await session.execute(select(RequestLog).order_by(RequestLog.id)))
-        .scalars()
-        .all()
-    )
+    logs = (await session.execute(select(RequestLog).order_by(RequestLog.id))).scalars().all()
     assert [log.path for log in logs] == ["provider", "cache_exact"]
 
 
@@ -1189,9 +1108,7 @@ async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
     assert log.duration_ms is not None
     assert log.provider_ms is not None
 
-    key_id_row = (
-        await session.execute(select(ApiKey.id).where(ApiKey.name == "c"))
-    ).scalar_one()
+    key_id_row = (await session.execute(select(ApiKey.id).where(ApiKey.name == "c"))).scalar_one()
     redis = get_redis()
     spend_key = _spend_redis_key(key_id_row, _current_period())
     spent = await redis.get(spend_key)

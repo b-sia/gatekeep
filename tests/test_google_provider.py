@@ -69,18 +69,24 @@ async def test_complete_maps_max_tokens_stop_reason():
     client = FakeGoogleClient(FakeModels(response=_response(finish_reason="MAX_TOKENS")))
     provider = GoogleProvider(client)
     result = await provider.complete(
-        {"model": "gemini-flash-latest", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        {
+            "model": "gemini-flash-latest",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
     )
     assert result.stop_reason == "length"
 
 
 async def test_complete_maps_prohibited_content_stop_reason():
-    client = FakeGoogleClient(
-        FakeModels(response=_response(finish_reason="PROHIBITED_CONTENT"))
-    )
+    client = FakeGoogleClient(FakeModels(response=_response(finish_reason="PROHIBITED_CONTENT")))
     provider = GoogleProvider(client)
     result = await provider.complete(
-        {"model": "gemini-flash-latest", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+        {
+            "model": "gemini-flash-latest",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+        }
     )
     assert result.stop_reason == "content_filter"
 
@@ -131,7 +137,11 @@ async def test_stream_yields_deltas_then_end():
     events = [
         e
         async for e in provider.stream(
-            {"model": "gemini-flash-latest", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
+            {
+                "model": "gemini-flash-latest",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+            }
         )
     ]
     deltas = [e for e in events if isinstance(e, TextDelta)]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,7 +9,7 @@ class MessageParam(BaseModel):
     """A single message in an Anthropic-style Messages API request."""
 
     role: Literal["user", "assistant"]
-    content: Union[str, list[dict[str, Any]]]
+    content: str | list[dict[str, Any]]
 
 
 class MessagesRequest(BaseModel):
@@ -24,13 +24,13 @@ class MessagesRequest(BaseModel):
 
     model: str
     messages: list[MessageParam] = Field(min_length=1)
-    system: Optional[Union[str, list[dict[str, Any]]]] = None
+    system: str | list[dict[str, Any]] | None = None
     max_tokens: int
-    stop_sequences: Optional[list[str]] = None
+    stop_sequences: list[str] | None = None
     stream: bool = False
-    prompt_name: Optional[str] = None
+    prompt_name: str | None = None
     route_by_cost: bool = False
-    quality_floor: Optional[float] = None
+    quality_floor: float | None = None
 
 
 class ContentBlock(BaseModel):
@@ -55,6 +55,6 @@ class MessagesResponse(BaseModel):
     role: Literal["assistant"] = "assistant"
     model: str
     content: list[ContentBlock]
-    stop_reason: Optional[str] = None
-    stop_sequence: Optional[str] = None
+    stop_reason: str | None = None
+    stop_sequence: str | None = None
     usage: MessagesUsage

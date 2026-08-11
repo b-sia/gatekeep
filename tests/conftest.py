@@ -43,7 +43,6 @@ from sqlalchemy.engine.url import make_url  # noqa: E402
 from gatekeep.config import get_settings  # noqa: E402
 from gatekeep.db import Base, SessionLocal, engine  # noqa: E402
 
-
 _database_ready = False
 
 
@@ -65,9 +64,7 @@ async def _ensure_database_exists(database_url: str) -> None:
     maintenance_url = url.set(database="postgres")
     conn = await asyncpg.connect(maintenance_url.render_as_string(hide_password=False))
     try:
-        exists = await conn.fetchval(
-            "SELECT 1 FROM pg_database WHERE datname = $1", target_db
-        )
+        exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", target_db)
         if not exists:
             await conn.execute(f'CREATE DATABASE "{target_db}"')
     finally:

@@ -39,9 +39,7 @@ def _metric_sample(text: str, name: str, labels: dict[str, str]) -> float | None
     """Find one sample's value from raw Prometheus exposition text, or None."""
     for family in text_string_to_metric_families(text):
         for sample in family.samples:
-            if sample.name == name and all(
-                sample.labels.get(k) == v for k, v in labels.items()
-            ):
+            if sample.name == name and all(sample.labels.get(k) == v for k, v in labels.items()):
                 return sample.value
     return None
 
@@ -58,8 +56,7 @@ def test_observe_request_records_token_and_cost_histograms():
     output = metrics.request_tokens.collect()[0]
     total_samples = [s for s in output.samples if s.name.endswith("_sum")]
     assert any(
-        s.labels.get("model") == "test-model-tokens" and s.value == 15
-        for s in total_samples
+        s.labels.get("model") == "test-model-tokens" and s.value == 15 for s in total_samples
     )
     cost_output = metrics.request_cost_usd.collect()[0]
     cost_samples = [s for s in cost_output.samples if s.name.endswith("_sum")]
@@ -166,9 +163,7 @@ async def test_metrics_endpoint_is_unauthenticated_and_valid(client):
     assert len(families) > 0
 
 
-async def test_metrics_endpoint_reports_request_totals_after_a_completion(
-    client, raw_key
-):
+async def test_metrics_endpoint_reports_request_totals_after_a_completion(client, raw_key):
     body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi there"}]}
     r = await client.post(
         "/v1/chat/completions",
@@ -177,9 +172,7 @@ async def test_metrics_endpoint_reports_request_totals_after_a_completion(
     )
     assert r.status_code == 200
     resp = await client.get("/metrics")
-    value = _metric_sample(
-        resp.text, "gatekeep_requests_total", {"model": "claude-sonnet-5"}
-    )
+    value = _metric_sample(resp.text, "gatekeep_requests_total", {"model": "claude-sonnet-5"})
     assert value is not None
     assert value >= 1
 
@@ -300,9 +293,9 @@ def test_latency_histograms_have_llm_appropriate_buckets():
 def test_request_duration_seconds_is_labeled_by_model_and_path():
     from gatekeep.observability import metrics
 
-    metrics.request_duration_seconds.labels(
-        model="test-latency-model", path="provider"
-    ).observe(1.5)
+    metrics.request_duration_seconds.labels(model="test-latency-model", path="provider").observe(
+        1.5
+    )
     samples = metrics.request_duration_seconds.collect()[0].samples
     assert any(
         s.name.endswith("_sum")
@@ -366,6 +359,5 @@ def test_single_label_histograms_take_model_only():
     metrics.provider_duration_seconds.labels(model="test-ttft-model").observe(2.0)
     samples = metrics.ttft_seconds.collect()[0].samples
     assert any(
-        s.name.endswith("_count") and s.labels == {"model": "test-ttft-model"}
-        for s in samples
+        s.name.endswith("_count") and s.labels == {"model": "test-ttft-model"} for s in samples
     )

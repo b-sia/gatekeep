@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -77,18 +77,14 @@ async def store_cached_response(
     return row
 
 
-async def delete_cached_responses_by_prompt(
-    session: AsyncSession, prompt_name: str
-) -> None:
+async def delete_cached_responses_by_prompt(session: AsyncSession, prompt_name: str) -> None:
     """Delete every semantic-cache row tagged with `prompt_name`.
 
     Does not commit; the caller (promote_prompt) commits this alongside its
     own version-pointer change so both updates land in one transaction.
     No-op if no rows are tagged with this prompt name.
     """
-    await session.execute(
-        delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name)
-    )
+    await session.execute(delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name))
 
 
 @dataclass
@@ -131,7 +127,7 @@ async def find_semantic_match(
     `prompt_version_num` is None (no `prompt_name` on this request), behavior
     is unchanged from before this parameter existed.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
     distance = CachedResponse.embedding.cosine_distance(embedding)
     stmt = (
         select(CachedResponse, distance.label("distance"))

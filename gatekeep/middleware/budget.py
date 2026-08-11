@@ -31,14 +31,14 @@ def _current_period(now: dt.datetime | None = None) -> str:
     Budgets reset every calendar month by construction: a new period label
     means a fresh Redis counter and a fresh DB aggregation window.
     """
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     return f"{now.year:04d}-{now.month:02d}"
 
 
 def _period_start(period: str) -> dt.datetime:
     """Return the UTC datetime marking the start of a "YYYY-MM" period label."""
     year, month = (int(p) for p in period.split("-"))
-    return dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
+    return dt.datetime(year, month, 1, tzinfo=dt.UTC)
 
 
 def _spend_redis_key(key_id: int, period: str) -> str:
@@ -69,7 +69,7 @@ async def record_spend(
             triggered the write - the next budget check will fall back to a
             DB aggregate instead (see `get_period_spend`).
     """
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
     redis_key = _spend_redis_key(key_id, period)
     total = await redis.incrbyfloat(redis_key, cost_usd)
@@ -122,7 +122,7 @@ async def get_period_spend(
     but still-correct DB read rather than blocking (or wrongly allowing)
     every request for the key.
     """
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
     redis_key = _spend_redis_key(key_id, period)
     try:
@@ -151,9 +151,7 @@ async def get_period_spend(
     return spent
 
 
-async def _fire_alert_if_new(
-    redis: Redis, key_id: int, period: str, label: str
-) -> bool:
+async def _fire_alert_if_new(redis: Redis, key_id: int, period: str, label: str) -> bool:
     """Mark an alert as fired for this key/period/label, returning True the first time.
 
     Uses SET NX so concurrent requests for the same key can't both fire the
@@ -203,7 +201,8 @@ async def _maybe_alert(
     elif spent >= budget * alert_threshold:
         if await _fire_alert_if_new(redis, key_id, period, "warning"):
             logger.warning(
-                "Budget warning for key %s: spent $%.4f of $%.4f budget (%.0f%% threshold, period %s)",
+                "Budget warning for key %s: spent $%.4f of $%.4f budget "
+                "(%.0f%% threshold, period %s)",
                 key_id,
                 spent,
                 budget,
@@ -246,14 +245,12 @@ async def check_budget(
     if key.monthly_budget_usd is None:
         return True, None
 
-    now = now or dt.datetime.now(dt.timezone.utc)
+    now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
     spent = await get_period_spend(session, redis, key_id=key.id, now=now)
 
     threshold = (
-        alert_threshold
-        if alert_threshold is not None
-        else get_settings().budget_alert_threshold
+        alert_threshold if alert_threshold is not None else get_settings().budget_alert_threshold
     )
     await _maybe_alert(redis, key.id, period, spent, key.monthly_budget_usd, threshold)
 
@@ -274,9 +271,7 @@ def _budget_exceeded(budget: float, spent: float) -> HTTPException:
         status_code=429,
         detail={
             "error": {
-                "message": (
-                    f"Monthly budget of ${budget:.2f} exceeded (spent ${spent:.2f})."
-                ),
+                "message": (f"Monthly budget of ${budget:.2f} exceeded (spent ${spent:.2f})."),
                 "type": "budget_exceeded_error",
                 "code": None,
             }

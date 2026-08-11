@@ -74,9 +74,7 @@ class FakeClient:
 
 async def test_complete_returns_normalized_result():
     provider = AnthropicProvider(FakeClient(FakeMessages()))
-    result = await provider.complete(
-        {"model": "claude-sonnet-5", "messages": [], "max_tokens": 10}
-    )
+    result = await provider.complete({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})
     assert isinstance(result, CompletionResult)
     assert result.text == "hello world"
     assert result.input_tokens == 5
@@ -110,7 +108,5 @@ async def test_complete_maps_unknown_stop_reason_to_stop():
             )
 
     provider = AnthropicProvider(FakeClient(FakeMessagesUnknownReason()))
-    result = await provider.complete(
-        {"model": "claude-sonnet-5", "messages": [], "max_tokens": 10}
-    )
+    result = await provider.complete({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})
     assert result.stop_reason == "tool_calls"

@@ -24,7 +24,7 @@ def _reason_name(reason: Any) -> str:
 
 
 def _to_google_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
-    """Translate a provider-neutral payload into generate_content()/generate_content_stream() kwargs.
+    """Translate a provider-neutral payload into generate_content()/generate_content_stream() args.
 
     Maps `assistant` -> `model` (Gemini's role name), folds `system` into
     `config.system_instruction`, and `max_tokens` into
@@ -56,9 +56,7 @@ class GoogleProvider:
 
     async def complete(self, payload: dict[str, Any]) -> CompletionResult:
         """Send a non-streaming completion request and return a normalized result."""
-        response = await self._client.aio.models.generate_content(
-            **_to_google_kwargs(payload)
-        )
+        response = await self._client.aio.models.generate_content(**_to_google_kwargs(payload))
         return CompletionResult(
             text=response.text or "",
             input_tokens=response.usage_metadata.prompt_token_count or 0,
@@ -68,9 +66,7 @@ class GoogleProvider:
             ),
         )
 
-    async def stream(
-        self, payload: dict[str, Any]
-    ) -> AsyncIterator[TextDelta | StreamEnd]:
+    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[TextDelta | StreamEnd]:
         """Stream a completion, yielding text deltas followed by a final StreamEnd.
 
         Every chunk carries `usage_metadata` (cumulative token counts), but

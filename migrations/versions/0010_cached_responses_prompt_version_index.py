@@ -22,6 +22,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_cached_responses_model_prompt_version_num", table_name="cached_responses"
-    )
+    op.drop_index("ix_cached_responses_model_prompt_version_num", table_name="cached_responses")

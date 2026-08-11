@@ -10,9 +10,7 @@ from gatekeep.models import ApiKey, RequestLog
 
 
 def test_calculate_cost_known_model():
-    cost = calculate_cost(
-        "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
-    )
+    cost = calculate_cost("claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost == 12.0
 
 
@@ -31,16 +29,12 @@ def test_calculate_cost_haiku_alias_is_priced():
 
 
 def test_calculate_cost_unknown_model_is_free():
-    cost = calculate_cost(
-        "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000
-    )
+    cost = calculate_cost("llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost == 0.0
 
 
 def test_calculate_cost_openai_gpt4o_is_priced():
-    cost = calculate_cost(
-        "gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000
-    )
+    cost = calculate_cost("gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost > 0.0
 
 
@@ -67,9 +61,7 @@ async def test_log_request_persists_row(session):
         response_id="chatcmpl-abc",
     )
 
-    found = (
-        await session.execute(select(RequestLog).where(RequestLog.id == log.id))
-    ).scalar_one()
+    found = (await session.execute(select(RequestLog).where(RequestLog.id == log.id))).scalar_one()
     assert found.key_id == key.id
     assert found.model == "claude-sonnet-5"
     assert found.prompt_tokens == 100

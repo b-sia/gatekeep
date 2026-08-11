@@ -45,9 +45,7 @@ class OllamaProvider:
             stop_reason=_FINISH_REASON_MAP.get(response.done_reason, "stop"),
         )
 
-    async def stream(
-        self, payload: dict[str, Any]
-    ) -> AsyncIterator[TextDelta | StreamEnd]:
+    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[TextDelta | StreamEnd]:
         """Stream a completion, yielding text deltas followed by a final StreamEnd."""
         chunks = await self._client.chat(**_to_ollama_kwargs(payload), stream=True)
         async for chunk in chunks:

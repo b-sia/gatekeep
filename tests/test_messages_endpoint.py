@@ -150,9 +150,7 @@ async def test_streaming_message(client, raw_key):
     assert "event: message_stop" in body
 
 
-async def test_streaming_error_emits_anthropic_shaped_error_event(
-    client, raw_key, monkeypatch
-):
+async def test_streaming_error_emits_anthropic_shaped_error_event(client, raw_key, monkeypatch):
     class FailingProvider:
         async def stream(self, payload):
             raise RuntimeError("boom")
@@ -248,9 +246,7 @@ async def test_prompt_name_prepends_template_as_system(client, raw_key, session)
     assert calls[0]["system"] == "Always say hi first.\n\nalso be polite"
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     assert log.prompt_version_num == 1
 
@@ -289,9 +285,7 @@ async def test_prompt_name_candidate_at_100_pct_serves_candidate_via_messages(
     assert calls[0]["system"] == "Always say bye first."
 
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == r.json()["id"])
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == r.json()["id"]))
     ).scalar_one()
     assert log.prompt_version_num == 2
 
@@ -483,9 +477,7 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
     must return normally (the generator catches and re-raises GeneratorExit,
     which is the successful-close case per the async generator protocol,
     not an error) and the row must still be written."""
-    key = ApiKey(
-        name="messages-aclose-disconnect-test", key_hash=hash_key(generate_key())
-    )
+    key = ApiKey(name="messages-aclose-disconnect-test", key_hash=hash_key(generate_key()))
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -514,9 +506,7 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
     content_block_start or any delta) must still be caught by the try block
     and log a row - this is the same boundary condition Task 5 found a bug
     at for _sse, fixed the same way here."""
-    key = ApiKey(
-        name="messages-disconnect-early-test", key_hash=hash_key(generate_key())
-    )
+    key = ApiKey(name="messages-disconnect-early-test", key_hash=hash_key(generate_key()))
     session.add(key)
     await session.commit()
     await session.refresh(key)

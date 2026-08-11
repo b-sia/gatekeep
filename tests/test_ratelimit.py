@@ -35,9 +35,7 @@ async def test_check_rate_limit_allows_up_to_capacity():
 async def test_check_rate_limit_rejects_once_exhausted():
     redis = get_redis()
     for _ in range(2):
-        await check_rate_limit(
-            redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0
-        )
+        await check_rate_limit(redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0)
     allowed, remaining = await check_rate_limit(
         redis, key_id=2, capacity=2, refill_rate=0.001, now=1000.0
     )
@@ -60,9 +58,7 @@ async def test_check_rate_limit_refills_over_time():
 async def test_check_rate_limit_keys_are_independent_per_id():
     redis = get_redis()
     await check_rate_limit(redis, key_id=4, capacity=1, refill_rate=0.001, now=1000.0)
-    allowed, _ = await check_rate_limit(
-        redis, key_id=5, capacity=1, refill_rate=0.001, now=1000.0
-    )
+    allowed, _ = await check_rate_limit(redis, key_id=5, capacity=1, refill_rate=0.001, now=1000.0)
     assert allowed is True
 
 
@@ -83,9 +79,7 @@ async def test_require_rate_limit_allows_when_tokens_available(session, monkeypa
     assert result.id == key.id
 
 
-async def test_require_rate_limit_rejects_with_429_and_retry_after(
-    session, monkeypatch
-):
+async def test_require_rate_limit_rejects_with_429_and_retry_after(session, monkeypatch):
     from gatekeep.config import get_settings
 
     settings = get_settings()
@@ -109,9 +103,7 @@ async def test_require_rate_limit_rejects_with_429_and_retry_after(
     assert rate_limit_rejections_total._value.get() - before == 1
 
 
-async def test_require_rate_limit_fails_closed_with_503_on_redis_outage(
-    session, monkeypatch
-):
+async def test_require_rate_limit_fails_closed_with_503_on_redis_outage(session, monkeypatch):
     """A Redis outage during the rate-limit check must reject with 503, not 500 or pass through."""
     from redis.exceptions import ConnectionError as RedisConnectionError
 

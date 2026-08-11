@@ -96,9 +96,7 @@ def _metric_sample(text: str, name: str, labels: dict[str, str]) -> float | None
     """Find one sample's value from raw Prometheus exposition text, or None."""
     for family in text_string_to_metric_families(text):
         for sample in family.samples:
-            if sample.name == name and all(
-                sample.labels.get(k) == v for k, v in labels.items()
-            ):
+            if sample.name == name and all(sample.labels.get(k) == v for k, v in labels.items()):
                 return sample.value
     return None
 
@@ -123,9 +121,7 @@ async def test_full_flow_miss_exact_hit_semantic_hit_ratelimit_and_metrics(
     assert counting_provider.calls == 1
     response_id = r1.json()["id"]
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.response_id == response_id)
-        )
+        await session.execute(select(RequestLog).where(RequestLog.response_id == response_id))
     ).scalar_one()
     assert log.cached is False
 
@@ -137,14 +133,9 @@ async def test_full_flow_miss_exact_hit_semantic_hit_ratelimit_and_metrics(
     )
     assert r2.status_code == 200
     assert counting_provider.calls == 1  # no new provider call
-    assert (
-        r2.json()["choices"][0]["message"]["content"]
-        == "Paris is the capital of France."
-    )
+    assert r2.json()["choices"][0]["message"]["content"] == "Paris is the capital of France."
     exact_hit_log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.cache_key.isnot(None))
-        )
+        await session.execute(select(RequestLog).where(RequestLog.cache_key.isnot(None)))
     ).scalar_one()
     assert exact_hit_log.cached is True
 
@@ -161,9 +152,7 @@ async def test_full_flow_miss_exact_hit_semantic_hit_ratelimit_and_metrics(
     assert r3.status_code == 200
     assert counting_provider.calls == 1  # still no new provider call
     semantic_log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.cache_key == "semantic")
-        )
+        await session.execute(select(RequestLog).where(RequestLog.cache_key == "semantic"))
     ).scalar_one()
     assert semantic_log.cached is True
 

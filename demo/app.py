@@ -13,18 +13,19 @@ To use: Update GATEKEEP_URL and API_KEY below, then run this app.
 import json
 import os
 import pathlib
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, FileResponse 
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Load .env file if it exists
 try:
     from dotenv import load_dotenv
+
     env_path = pathlib.Path(__file__).parent.parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
@@ -64,6 +65,7 @@ class Message(BaseModel):
 async def index():
     """Serve the demo chat interface."""
     import pathlib
+
     html_path = pathlib.Path(__file__).parent / "static" / "index.html"
     if html_path.exists():
         response = FileResponse(html_path, media_type="text/html")
@@ -87,6 +89,7 @@ async def chat_stream(message: Message) -> StreamingResponse:
 
     This demonstrates streaming - useful for real-time UI updates.
     """
+
     async def generate() -> AsyncGenerator[str, None]:
         """Stream responses from Gatekeep."""
         try:
@@ -104,9 +107,7 @@ async def chat_stream(message: Message) -> StreamingResponse:
                 ) as response:
                     if response.status_code != 200:
                         error_text = await response.aread()
-                        payload = json.dumps(
-                            {"error": f"Gateway error: {error_text.decode()}"}
-                        )
+                        payload = json.dumps({"error": f"Gateway error: {error_text.decode()}"})
                         yield f"data: {payload}\n\n"
                         return
 
@@ -141,20 +142,19 @@ async def chat_sync(message: Message) -> dict:
             )
 
             if response.status_code != 200:
-                raise HTTPException(
-                    status_code=response.status_code, detail=response.text
-                )
+                raise HTTPException(status_code=response.status_code, detail=response.text)
 
             return response.json()
 
     except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Gateway error: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Gateway error: {str(e)}") from e
 
 
 # Serve static files (CSS, JS) from the demo/static directory
 # Must be mounted after all other routes to avoid conflicts
 try:
     import pathlib
+
     static_dir = pathlib.Path(__file__).parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

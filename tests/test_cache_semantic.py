@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -100,9 +100,7 @@ async def test_store_cached_response_persists_row(session):
         cost_usd=0.001,
     )
     row = (
-        await session.execute(
-            select(CachedResponse).where(CachedResponse.exact_hash == "hash-1")
-        )
+        await session.execute(select(CachedResponse).where(CachedResponse.exact_hash == "hash-1"))
     ).scalar_one()
     assert row.response_text == "Paris"
     assert row.model == "claude-sonnet-5"
@@ -320,7 +318,7 @@ async def test_find_semantic_match_excludes_expired_rows(session):
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
-        created_at=datetime.now(timezone.utc) - timedelta(seconds=1000),
+        created_at=datetime.now(UTC) - timedelta(seconds=1000),
     )
     session.add(row)
     await session.commit()
@@ -429,24 +427,17 @@ async def test_semantically_similar_request_is_served_from_cache(
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert counting_provider.calls == 1
-    assert (
-        r2.json()["choices"][0]["message"]["content"]
-        == "Paris is the capital of France."
-    )
+    assert r2.json()["choices"][0]["message"]["content"] == "Paris is the capital of France."
 
 
-async def test_semantic_hit_logs_cached_true_with_semantic_key(
-    client, raw_key, session
-):
+async def test_semantic_hit_logs_cached_true_with_semantic_key(client, raw_key, session):
     body1 = {
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "What is the capital of Germany?"}],
     }
     body2 = {
         "model": "gpt-4o",
-        "messages": [
-            {"role": "user", "content": "What's the capital city of Germany?"}
-        ],
+        "messages": [{"role": "user", "content": "What's the capital city of Germany?"}],
     }
     await client.post(
         "/v1/chat/completions",
@@ -459,9 +450,7 @@ async def test_semantic_hit_logs_cached_true_with_semantic_key(
         json=body2,
     )
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.cache_key == "semantic")
-        )
+        await session.execute(select(RequestLog).where(RequestLog.cache_key == "semantic"))
     ).scalar_one()
     assert log.cached is True
 
@@ -476,9 +465,7 @@ async def test_semantic_hit_records_cache_semantic_path(client, raw_key, session
     }
     body2 = {
         "model": "gpt-4o",
-        "messages": [
-            {"role": "user", "content": "What's the capital city of Austria?"}
-        ],
+        "messages": [{"role": "user", "content": "What's the capital city of Austria?"}],
     }
     await client.post(
         "/v1/chat/completions",
@@ -491,16 +478,12 @@ async def test_semantic_hit_records_cache_semantic_path(client, raw_key, session
         json=body2,
     )
     log = (
-        await session.execute(
-            select(RequestLog).where(RequestLog.cache_key == "semantic")
-        )
+        await session.execute(select(RequestLog).where(RequestLog.cache_key == "semantic"))
     ).scalar_one()
     assert log.path == "cache_semantic"
 
 
-async def test_dissimilar_requests_both_call_provider(
-    client, raw_key, counting_provider
-):
+async def test_dissimilar_requests_both_call_provider(client, raw_key, counting_provider):
     body1 = {
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "What is the capital of Spain?"}],
@@ -599,9 +582,7 @@ async def test_candidate_and_active_semantic_cache_entries_do_not_cross_contamin
     await clear_candidate_version("system-context", session)
 
 
-async def test_concurrent_identical_requests_both_succeed(
-    client, raw_key, counting_provider
-):
+async def test_concurrent_identical_requests_both_succeed(client, raw_key, counting_provider):
     """Two concurrent requests with identical text can both miss the caches
     and race to write the same exact_hash cache row; the client-visible
     response must still succeed for both, even though only one cache write
@@ -628,9 +609,7 @@ async def test_concurrent_identical_requests_both_succeed(
     assert r2.status_code == 200
 
 
-async def test_streaming_requests_bypass_semantic_cache(
-    client, raw_key, counting_provider
-):
+async def test_streaming_requests_bypass_semantic_cache(client, raw_key, counting_provider):
     body = {
         "model": "gpt-4o",
         "stream": True,

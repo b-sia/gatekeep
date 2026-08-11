@@ -37,11 +37,9 @@ async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
     await _seed_samples(session, "p", 3)
     provider = FakeProvider(["criteria for q0", "criteria for q1"])
 
-    cases = await curate_cases(
-        "p", session, limit=2, provider=provider, generate_model="m"
-    )
+    cases = await curate_cases("p", session, limit=2, provider=provider, generate_model="m")
     assert len(cases) == 2
-    for c, expected_criteria in zip(cases, ["criteria for q0", "criteria for q1"]):
+    for c, expected_criteria in zip(cases, ["criteria for q0", "criteria for q1"], strict=False):
         assert c.reviewed is False
         assert c.source == "curated"
         assert c.check_type == "llm_judge"
@@ -52,13 +50,9 @@ async def test_curate_falls_back_to_generic_criteria_on_generation_failure(sessi
     await create_suite("p", session, pass_threshold=0.9)
     await _seed_samples(session, "p", 1)
     request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    provider = FakeProvider(
-        [APIError("upstream is down", request=request, body=None)]
-    )
+    provider = FakeProvider([APIError("upstream is down", request=request, body=None)])
 
-    cases = await curate_cases(
-        "p", session, limit=1, provider=provider, generate_model="m"
-    )
+    cases = await curate_cases("p", session, limit=1, provider=provider, generate_model="m")
     assert len(cases) == 1
     assert cases[0].judge_criteria == CURATED_JUDGE_CRITERIA
 
@@ -74,9 +68,7 @@ async def test_review_approve_marks_reviewed_and_reject_deletes(session):
     await create_suite("p", session, pass_threshold=0.9)
     await _seed_samples(session, "p", 2)
     provider = FakeProvider(["criteria 0", "criteria 1"])
-    cases = await curate_cases(
-        "p", session, limit=2, provider=provider, generate_model="m"
-    )
+    cases = await curate_cases("p", session, limit=2, provider=provider, generate_model="m")
 
     await review_case(cases[0].id, session, approve=True)
     await review_case(cases[1].id, session, approve=False)

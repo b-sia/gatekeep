@@ -16,6 +16,4 @@ class FakeProvider:
         text = self._texts.pop(0)
         if isinstance(text, Exception):
             raise text
-        return CompletionResult(
-            text=text, input_tokens=1, output_tokens=1, stop_reason="stop"
-        )
+        return CompletionResult(text=text, input_tokens=1, output_tokens=1, stop_reason="stop")

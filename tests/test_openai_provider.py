@@ -34,9 +34,7 @@ class FakeOpenAIClient:
 def _response(content="hello world", finish_reason="stop", prompt=5, completion=2):
     return SimpleNamespace(
         choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=content), finish_reason=finish_reason
-            )
+            SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)
         ],
         usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion),
     )
@@ -56,9 +54,7 @@ async def test_complete_returns_normalized_result():
 
 
 async def test_complete_maps_length_stop_reason():
-    client = FakeOpenAIClient(
-        FakeCompletions(response=_response(finish_reason="length"))
-    )
+    client = FakeOpenAIClient(FakeCompletions(response=_response(finish_reason="length")))
     provider = OpenAIProvider(client)
     result = await provider.complete(
         {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}

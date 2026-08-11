@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -23,7 +23,7 @@ EMBEDDING_DIM = 384
 
 def _utcnow() -> datetime:
     """Return the current time as a timezone-aware UTC datetime."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ApiKey(Base):
@@ -133,9 +133,7 @@ class Prompt(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     active_version_id: Mapped[int | None] = mapped_column(
-        ForeignKey(
-            "prompt_versions.id", use_alter=True, name="fk_prompts_active_version_id"
-        ),
+        ForeignKey("prompt_versions.id", use_alter=True, name="fk_prompts_active_version_id"),
         nullable=True,
     )
     previous_version_id: Mapped[int | None] = mapped_column(
@@ -202,9 +200,7 @@ class CachedResponse(Base):
     )
     exact_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     user_messages_text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float]] = mapped_column(
-        Vector(EMBEDDING_DIM), nullable=False
-    )
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
@@ -284,9 +280,7 @@ class EvalRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     suite_id: Mapped[int] = mapped_column(ForeignKey("eval_suites.id"), nullable=False)
-    prompt_version_id: Mapped[int] = mapped_column(
-        ForeignKey("prompt_versions.id"), nullable=False
-    )
+    prompt_version_id: Mapped[int] = mapped_column(ForeignKey("prompt_versions.id"), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)

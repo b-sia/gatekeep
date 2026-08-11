@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -78,9 +78,7 @@ async def _seed_log(
     await session.refresh(log)
     if created_at is not None:
         await session.execute(
-            update(RequestLog)
-            .where(RequestLog.id == log.id)
-            .values(created_at=created_at)
+            update(RequestLog).where(RequestLog.id == log.id).values(created_at=created_at)
         )
         await session.commit()
     return log
@@ -114,9 +112,7 @@ async def test_prompts_requires_auth(client):
 
 async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
     await _seed_log(
@@ -180,19 +176,13 @@ async def test_usage_summary_totals_and_breakdowns(client, raw_key, session):
 
 async def test_usage_summary_respects_time_range(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = now - timedelta(days=30)
-    await _seed_log(
-        session, key_id=key_row.id, model="gpt-4o", cost_usd=5.0, created_at=old
-    )
-    await _seed_log(
-        session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now
-    )
+    await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=5.0, created_at=old)
+    await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now)
 
     start = (now - timedelta(days=1)).isoformat()
     end = (now + timedelta(hours=1)).isoformat()
@@ -209,9 +199,7 @@ async def test_usage_summary_respects_time_range(client, raw_key, session):
 
 async def test_usage_summary_filters_by_model(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
     await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0)
     await _seed_log(session, key_id=key_row.id, model="claude-sonnet-5", cost_usd=2.0)
@@ -252,9 +240,7 @@ async def test_usage_summary_includes_cost_of_failed_rows(client, raw_key, sessi
     assert body["spend_usd"] == pytest.approx(0.75)
 
 
-async def test_usage_summary_includes_failed_count_and_success_rate(
-    client, raw_key, session
-):
+async def test_usage_summary_includes_failed_count_and_success_rate(client, raw_key, session):
     key_id = await _key_id(session, raw_key)
     await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="ok")
     await _seed_log(session, key_id=key_id, model="gpt-4o", outcome=None)
@@ -272,9 +258,7 @@ async def test_usage_summary_includes_failed_count_and_success_rate(
     assert body["success_rate"] == pytest.approx(0.5)
 
 
-async def test_usage_summary_cache_hit_rate_ignores_failed_rows(
-    client, raw_key, session
-):
+async def test_usage_summary_cache_hit_rate_ignores_failed_rows(client, raw_key, session):
     """cache_hit_rate is taken over successful requests, not the full count.
     Since #17 logs failed rows, including them in the denominator would deflate
     the rate whenever upstream failures rise, with no change in caching. Here
@@ -312,16 +296,12 @@ async def test_usage_summary_success_rate_is_zero_for_an_empty_window(client, ra
 
 async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     yesterday = now - timedelta(days=1)
-    await _seed_log(
-        session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now
-    )
+    await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now)
     await _seed_log(
         session,
         key_id=key_row.id,
@@ -330,9 +310,7 @@ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
         cached=True,
         created_at=now,
     )
-    await _seed_log(
-        session, key_id=key_row.id, model="gpt-4o", cost_usd=3.0, created_at=yesterday
-    )
+    await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=3.0, created_at=yesterday)
 
     r = await client.get(
         "/dashboard/api/usage/timeseries",
@@ -355,16 +333,12 @@ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
     assert total_cost == 6.0
 
 
-async def test_usage_timeseries_includes_token_and_spend_fields(
-    client, raw_key, session
-):
+async def test_usage_timeseries_includes_token_and_spend_fields(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await _seed_log(
         session,
         key_id=key_row.id,
@@ -407,15 +381,11 @@ async def test_usage_timeseries_includes_token_and_spend_fields(
 
 async def test_usage_timeseries_accepts_minute_interval(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
-    now = datetime.now(timezone.utc)
-    await _seed_log(
-        session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now
-    )
+    now = datetime.now(UTC)
+    await _seed_log(session, key_id=key_row.id, model="gpt-4o", cost_usd=1.0, created_at=now)
 
     r = await client.get(
         "/dashboard/api/usage/timeseries",
@@ -449,16 +419,12 @@ async def test_usage_timeseries_by_model_requires_auth(client):
     assert r.status_code == 401
 
 
-async def test_usage_timeseries_by_model_groups_by_bucket_and_model(
-    client, raw_key, session
-):
+async def test_usage_timeseries_by_model_groups_by_bucket_and_model(client, raw_key, session):
     key_row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await _seed_log(
         session,
         key_id=key_row.id,
@@ -605,9 +571,7 @@ async def test_prompts_list_returns_active_version_num(client, raw_key, session)
     assert row["active_version_num"] == 2
 
 
-async def test_prompt_versions_timeline_ordered_with_active_flag(
-    client, raw_key, session
-):
+async def test_prompt_versions_timeline_ordered_with_active_flag(client, raw_key, session):
     await create_prompt("dash-timeline-prompt", "v1 text", session, created_by="alice")
     await add_prompt_version(
         "dash-timeline-prompt", "v2 text", session, created_by="bob", notes="tweak"
@@ -655,9 +619,7 @@ async def test_dashboard_api_prefix_alone_returns_404(client):
 async def _key_id(session, raw_key: str) -> int:
     """Resolve the ApiKey id backing a raw dashboard test key."""
     row = (
-        await session.execute(
-            select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
-        )
+        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key)))
     ).scalar_one()
     return row.id
 
@@ -773,9 +735,7 @@ async def test_latency_summary_percentiles(client, raw_key, session):
     assert body["ttft_ms"]["p50_ms"] == 200.0
 
 
-async def test_latency_overhead_excludes_uncached_row_with_no_provider_ms(
-    client, raw_key, session
-):
+async def test_latency_overhead_excludes_uncached_row_with_no_provider_ms(client, raw_key, session):
     """A non-cached row with a NULL `provider_ms` means the upstream call
     never completed (see `test_provider_error_does_not_count_whole_span_as_
     overhead` on the Prometheus side); the gateway never logs such a row
@@ -863,11 +823,9 @@ async def test_latency_summary_excludes_failed_outcome_rows(client, raw_key, ses
     assert body["stream_ttlt_ms"]["p50_ms"] == 100.0
 
 
-async def test_latency_timeseries_excludes_failed_outcome_rows(
-    client, raw_key, session
-):
+async def test_latency_timeseries_excludes_failed_outcome_rows(client, raw_key, session):
     key_id = await _key_id(session, raw_key)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await _seed_log(
         session,
         key_id=key_id,
@@ -960,14 +918,12 @@ async def test_latency_summary_excludes_rows_with_no_path(client, raw_key, sessi
     assert body["by_path"] == []
 
 
-async def test_latency_summary_empty_window_returns_nulls_not_zeros(
-    client, raw_key, session
-):
+async def test_latency_summary_empty_window_returns_nulls_not_zeros(client, raw_key, session):
     """A cost-only workload must read "no data", not "0 ms"."""
     key_id = await _key_id(session, raw_key)
     await _seed_latency_fixture(session, key_id)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.get(
         "/dashboard/api/latency/summary",
         headers={"Authorization": f"Bearer {raw_key}"},
@@ -1012,7 +968,7 @@ async def test_latency_timeseries_requires_auth(client):
 
 async def test_latency_timeseries_buckets_by_day(client, raw_key, session):
     key_id = await _key_id(session, raw_key)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     yesterday = now - timedelta(days=1)
 
     # Yesterday: two non-streaming rows only.
@@ -1092,13 +1048,11 @@ async def test_latency_timeseries_excludes_rows_with_no_path(client, raw_key, se
     assert r.json()["buckets"] == []
 
 
-async def test_latency_timeseries_empty_window_is_not_an_error(
-    client, raw_key, session
-):
+async def test_latency_timeseries_empty_window_is_not_an_error(client, raw_key, session):
     key_id = await _key_id(session, raw_key)
     await _seed_latency_fixture(session, key_id)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     r = await client.get(
         "/dashboard/api/latency/timeseries",
         headers={"Authorization": f"Bearer {raw_key}"},

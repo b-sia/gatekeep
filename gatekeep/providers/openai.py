@@ -43,9 +43,7 @@ class OpenAIProvider:
 
     async def complete(self, payload: dict[str, Any]) -> CompletionResult:
         """Send a non-streaming completion request and return a normalized result."""
-        response = await self._client.chat.completions.create(
-            **_to_openai_kwargs(payload)
-        )
+        response = await self._client.chat.completions.create(**_to_openai_kwargs(payload))
         choice = response.choices[0]
         return CompletionResult(
             text=choice.message.content or "",
@@ -54,9 +52,7 @@ class OpenAIProvider:
             stop_reason=_FINISH_REASON_MAP.get(choice.finish_reason, "stop"),
         )
 
-    async def stream(
-        self, payload: dict[str, Any]
-    ) -> AsyncIterator[TextDelta | StreamEnd]:
+    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[TextDelta | StreamEnd]:
         """Stream a completion, yielding text deltas followed by a final StreamEnd.
 
         Requests `stream_options={"include_usage": True}` so the final chunk
@@ -74,9 +70,7 @@ class OpenAIProvider:
                 if delta.content:
                     yield TextDelta(text=delta.content)
                 if chunk.choices[0].finish_reason:
-                    stop_reason = _FINISH_REASON_MAP.get(
-                        chunk.choices[0].finish_reason, "stop"
-                    )
+                    stop_reason = _FINISH_REASON_MAP.get(chunk.choices[0].finish_reason, "stop")
             if chunk.usage is not None:
                 yield StreamEnd(
                     stop_reason=stop_reason,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -32,7 +32,7 @@ def _default_window() -> tuple[datetime, datetime]:
     Used as the default reporting window for endpoints where the caller
     doesn't supply explicit `start`/`end` query parameters.
     """
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     return end - timedelta(days=7), end
 
 
@@ -90,9 +90,7 @@ def _base_filters(
     return filters
 
 
-async def _breakdown(
-    session: AsyncSession, group_col, filters: list
-) -> list[UsageBreakdownRow]:
+async def _breakdown(session: AsyncSession, group_col, filters: list) -> list[UsageBreakdownRow]:
     """Run one GROUP BY aggregate over RequestLog for `group_col` and return
     the resulting rows as `UsageBreakdownRow`s, ordered by cost descending.
 
@@ -130,9 +128,7 @@ async def _breakdown(
     ]
 
 
-async def _key_breakdown(
-    session: AsyncSession, filters: list
-) -> list[UsageBreakdownRow]:
+async def _key_breakdown(session: AsyncSession, filters: list) -> list[UsageBreakdownRow]:
     """Run the same aggregate as `_breakdown` grouped by `RequestLog.key_id`,
     but also join `ApiKey` to attach each key's display name as `label`.
 
@@ -191,9 +187,7 @@ async def usage_summary(
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end
-    filters = _base_filters(
-        start, end, model=model, key_id=key_id, prompt_name=prompt_name
-    )
+    filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
 
     totals_row = (
         await session.execute(
@@ -216,9 +210,7 @@ async def usage_summary(
                     0,
                 ),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.outcome.in_(_FAILED_OUTCOMES), 1), else_=0)
-                    ),
+                    func.sum(case((RequestLog.outcome.in_(_FAILED_OUTCOMES), 1), else_=0)),
                     0,
                 ),
             ).where(*filters)
@@ -314,9 +306,7 @@ async def usage_timeseries(
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end
-    filters = _base_filters(
-        start, end, model=model, key_id=key_id, prompt_name=prompt_name
-    )
+    filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (
@@ -332,9 +322,7 @@ async def usage_timeseries(
                 func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
                 func.coalesce(func.sum(RequestLog.completion_tokens), 0),
                 func.coalesce(
-                    func.sum(
-                        case((RequestLog.cached, RequestLog.total_tokens), else_=0)
-                    ),
+                    func.sum(case((RequestLog.cached, RequestLog.total_tokens), else_=0)),
                     0,
                 ),
                 func.coalesce(
@@ -423,9 +411,7 @@ async def usage_timeseries_by_model(
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end
-    filters = _base_filters(
-        start, end, model=model, key_id=key_id, prompt_name=prompt_name
-    )
+    filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (
@@ -558,8 +544,7 @@ def _percentile_exprs(column, condition) -> list:
     NULL drops out rather than counting as a zero-length provider call.
     """
     return [
-        func.percentile_cont(q).within_group(column.asc()).filter(condition)
-        for q in _QUANTILES
+        func.percentile_cont(q).within_group(column.asc()).filter(condition) for q in _QUANTILES
     ]
 
 
@@ -712,9 +697,7 @@ async def latency_summary(
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end
-    filters = _latency_filters(
-        start, end, model=model, key_id=key_id, prompt_name=prompt_name
-    )
+    filters = _latency_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
 
     row = (
         await session.execute(
@@ -735,9 +718,7 @@ async def latency_summary(
     stream_ttlt = _percentiles(*row[10:13])
     ttft = _percentiles(*row[13:16])
 
-    by_path = await _latency_breakdown(
-        session, RequestLog.path, filters, condition=true()
-    )
+    by_path = await _latency_breakdown(session, RequestLog.path, filters, condition=true())
     by_model = await _latency_breakdown(
         session, RequestLog.model, filters, condition=_NON_STREAMING
     )
@@ -847,9 +828,7 @@ async def latency_timeseries(
     default_start, default_end = _default_window()
     start = start or default_start
     end = end or default_end
-    filters = _latency_filters(
-        start, end, model=model, key_id=key_id, prompt_name=prompt_name
-    )
+    filters = _latency_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (
@@ -869,15 +848,9 @@ async def latency_timeseries(
                 func.percentile_cont(0.95)
                 .within_group(RequestLog.provider_ms.asc())
                 .filter(_NON_STREAMING),
-                func.percentile_cont(0.5)
-                .within_group(_OVERHEAD_MS.asc())
-                .filter(_NON_STREAMING),
-                func.percentile_cont(0.95)
-                .within_group(_OVERHEAD_MS.asc())
-                .filter(_NON_STREAMING),
-                func.percentile_cont(0.5)
-                .within_group(RequestLog.ttft_ms.asc())
-                .filter(_STREAMING),
+                func.percentile_cont(0.5).within_group(_OVERHEAD_MS.asc()).filter(_NON_STREAMING),
+                func.percentile_cont(0.95).within_group(_OVERHEAD_MS.asc()).filter(_NON_STREAMING),
+                func.percentile_cont(0.5).within_group(RequestLog.ttft_ms.asc()).filter(_STREAMING),
                 func.percentile_cont(0.95)
                 .within_group(RequestLog.ttft_ms.asc())
                 .filter(_STREAMING),
@@ -914,9 +887,7 @@ async def latency_timeseries(
             ttft_p95,
         ) in rows
     ]
-    return LatencyTimeseriesResponse(
-        start=start, end=end, interval=interval, buckets=buckets
-    )
+    return LatencyTimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
 
 
 class EvalRunOut(BaseModel):
