@@ -1,0 +1,127 @@
+# Review package: da0c1bb..253e42d
+
+## Commits
+253e42d feat: openai-compatible request/response schemas
+
+## Files changed
+ gatekeep/api/__init__.py       |  0
+ gatekeep/api/openai_schemas.py | 69 ++++++++++++++++++++++++++++++++++++++++++
+ tests/test_openai_schemas.py   | 31 +++++++++++++++++++
+ 3 files changed, 100 insertions(+)
+
+## Diff
+diff --git a/gatekeep/api/__init__.py b/gatekeep/api/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/gatekeep/api/openai_schemas.py b/gatekeep/api/openai_schemas.py
+new file mode 100644
+index 0000000..b7d71bc
+--- /dev/null
++++ b/gatekeep/api/openai_schemas.py
+@@ -0,0 +1,69 @@
++from __future__ import annotations
++
++from typing import Any, Literal, Optional, Union
++
++from pydantic import BaseModel
++
++
++class ChatMessage(BaseModel):
++    role: Literal["system", "developer", "user", "assistant", "tool"]
++    content: Union[str, list[dict[str, Any]], None] = None
++    name: Optional[str] = None
++
++
++class ChatCompletionRequest(BaseModel):
++    model_config = {"extra": "allow"}
++
++    model: str
++    messages: list[ChatMessage]
++    max_tokens: Optional[int] = None
++    max_completion_tokens: Optional[int] = None
++    temperature: Optional[float] = None
++    top_p: Optional[float] = None
++    stream: bool = False
++    stop: Union[str, list[str], None] = None
++
++
++class Usage(BaseModel):
++    prompt_tokens: int
++    completion_tokens: int
++    total_tokens: int
++
++
++class ResponseMessage(BaseModel):
++    role: Literal["assistant"] = "assistant"
++    content: Optional[str] = None
++
++
++class Choice(BaseModel):
++    index: int = 0
++    message: ResponseMessage
++    finish_reason: Optional[str] = None
++
++
++class ChatCompletionResponse(BaseModel):
++    id: str
++    object: Literal["chat.completion"] = "chat.completion"
++    created: int
++    model: str
++    choices: list[Choice]
++    usage: Usage
++
++
++class DeltaMessage(BaseModel):
++    role: Optional[str] = None
++    content: Optional[str] = None
++
++
++class ChunkChoice(BaseModel):
++    index: int = 0
++    delta: DeltaMessage
++    finish_reason: Optional[str] = None
++
++
++class ChatCompletionChunk(BaseModel):
++    id: str
++    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
++    created: int
++    model: str
++    choices: list[ChunkChoice]
+diff --git a/tests/test_openai_schemas.py b/tests/test_openai_schemas.py
+new file mode 100644
+index 0000000..376d3a9
+--- /dev/null
++++ b/tests/test_openai_schemas.py
+@@ -0,0 +1,31 @@
++from gatekeep.api.openai_schemas import (
++    ChatCompletionRequest,
++    ChatCompletionResponse,
++    Choice,
++    ResponseMessage,
++    Usage,
++)
++
++
++def test_parses_minimal_request():
++    req = ChatCompletionRequest.model_validate(
++        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
++    )
++    assert req.model == "gpt-4o"
++    assert req.stream is False
++    assert req.messages[0].content == "hi"
++
++
++def test_response_serializes_openai_shape():
++    resp = ChatCompletionResponse(
++        id="chatcmpl-x",
++        created=1,
++        model="claude-sonnet-5",
++        choices=[Choice(message=ResponseMessage(content="hello"), finish_reason="stop")],
++        usage=Usage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
++    )
++    data = resp.model_dump()
++    assert data["object"] == "chat.completion"
++    assert data["choices"][0]["message"]["role"] == "assistant"
++    assert data["choices"][0]["finish_reason"] == "stop"
++    assert data["usage"]["total_tokens"] == 4

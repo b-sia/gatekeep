@@ -1,0 +1,805 @@
+# Review package: 753289d..95e4479
+
+## Commits
+95e4479 fix: close final-review gaps in streaming outcome tracking
+
+## Files changed
+ dashboard/src/components/StatRow.tsx |   4 +-
+ gatekeep/app.py                      | 133 +++++++++++++++++++++++++++--------
+ tests/test_endpoint.py               |  87 +++++++++++++++++++++++
+ tests/test_messages_endpoint.py      |  87 +++++++++++++++++++++++
+ 4 files changed, 281 insertions(+), 30 deletions(-)
+
+## Diff
+diff --git a/dashboard/src/components/StatRow.tsx b/dashboard/src/components/StatRow.tsx
+index 3da5479..b1643bb 100644
+--- a/dashboard/src/components/StatRow.tsx
++++ b/dashboard/src/components/StatRow.tsx
+@@ -17,22 +17,22 @@ function formatTokens(count: number): string {
+ function StatCard({ label, value, context }: { label: string; value: string; context: string }) {
+   return (
+     <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+       <div className="mt-1 text-2xl font-semibold text-slate-100">{value}</div>
+       <div className="mt-1 text-xs text-slate-500">{context}</div>
+     </div>
+   );
+ }
+ 
+-/** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate) for
+- * the current filter selection. Renders loading placeholders until
++/** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate,
++ * success rate) for the current filter selection. Renders loading placeholders until
+  * `summary` is available. */
+ export default function StatRow({ summary }: StatRowProps) {
+   if (!summary) {
+     return (
+       <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-6">
+         {[
+           "Requests",
+           "Total cost",
+           "Total tokens",
+           "Total savings",
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+index 5d8e778..bbdc71e 100644
+--- a/gatekeep/app.py
++++ b/gatekeep/app.py
+@@ -1,17 +1,19 @@
+ from __future__ import annotations
+ 
+ import asyncio
+ import json
+ import logging
+ import pathlib
+ import time
++from collections.abc import Coroutine
++from typing import Any
+ 
+ import ollama
+ from redis.exceptions import RedisError
+ from anthropic import AsyncAnthropic
+ from google import genai
+ from openai import AsyncOpenAI
+ from fastapi import Depends, FastAPI
+ from fastapi.exceptions import HTTPException as FastAPIHTTPException
+ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+@@ -270,20 +272,82 @@ async def _finish_request(
+     )
+     observe_request(
+         model=model,
+         prompt_tokens=prompt_tokens,
+         completion_tokens=completion_tokens,
+         cost_usd=cost_usd,
+     )
+     return timings
+ 
+ 
++async def _finish_failed_request(
++    request: Request,
++    session: AsyncSession,
++    *,
++    model: str,
++    provider_started: float,
++    key_id: int,
++    response_id: str,
++    prompt_name: str | None,
++    routed_from: str | None,
++    prompt_version_num: int | None,
++) -> None:
++    """Publish latency labels and record accounting for a non-streaming
++    request whose provider call raised.
++
++    Mirrors `_finish_request`'s bundling of `observe_non_streaming` +
++    `log_request` for the success path, but for the `provider.complete(...)`
++    exception branch of `chat_completions`/`messages`: zero tokens and zero
++    cost (no partial output exists on this path, unlike the streaming
++    generators which can estimate from accumulated delta text), and
++    `outcome="provider_error"` unconditionally. Deliberately does not call
++    `observe_request` (the token/cost histograms): a 0-token/`$0` observation
++    would drag those histograms down with no informative signal, unlike the
++    streaming failure paths, which have real (estimated) tokens/cost to
++    contribute.
++
++    Args:
++        request: The Starlette request carrying `state.started_at`.
++        session: DB session to persist the `RequestLog` row through.
++        model: Resolved model id, used as the metric label.
++        provider_started: `time.perf_counter()` value captured just before
++            the provider call, used to compute `provider_ms`.
++        key_id: The requesting API key's id.
++        response_id: A freshly generated id - no real response exists on
++            this path.
++        prompt_name: The prompt template requested, if any.
++        routed_from: The originally requested model, if cost-routing chose
++            a cheaper substitute.
++        prompt_version_num: Which `PromptVersion` was resolved, if any.
++    """
++    provider_ms = (time.perf_counter() - provider_started) * 1000
++    timings = observe_non_streaming(
++        request, model=model, path=_PROVIDER_PATH, provider_ms=provider_ms
++    )
++    await log_request(
++        session,
++        key_id=key_id,
++        model=model,
++        prompt_tokens=0,
++        completion_tokens=0,
++        response_id=response_id,
++        prompt_name=prompt_name,
++        routed_from=routed_from,
++        prompt_version_num=prompt_version_num,
++        path=_PROVIDER_PATH,
++        outcome="provider_error",
++        duration_ms=timings.duration_ms,
++        provider_ms=timings.provider_ms,
++        ttft_ms=timings.ttft_ms,
++    )
++
++
+ @app.exception_handler(FastAPIHTTPException)
+ async def _http_exception_handler(
+     request: Request, exc: FastAPIHTTPException
+ ) -> JSONResponse:
+     """Serialize HTTPException bodies as flat, top-level errors, OpenAI- or
+     Anthropic-shaped depending on which endpoint raised them.
+ 
+     FastAPI's default handler nests HTTPException.detail under a "detail"
+     key; when detail is already an OpenAI-shaped {"error": {...}} dict (as
+     require_api_key, require_rate_limit, and require_budget raise), this returns it verbatim
+@@ -504,39 +568,30 @@ async def chat_completions(
+             )
+             return JSONResponse(content=semantic_response.model_dump())
+         cache_semantic_misses.labels(model=model).inc()
+ 
+     # Marked before the call so a provider error still carries labels.
+     mark(request, path=_PROVIDER_PATH)
+     provider_started = time.perf_counter()
+     try:
+         result = await provider.complete(payload)
+     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+-        error_provider_ms = (time.perf_counter() - provider_started) * 1000
+-        error_timings = observe_non_streaming(
+-            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
+-        )
+-        await log_request(
++        await _finish_failed_request(
++            request,
+             session,
+-            key_id=key_id,
+             model=model,
+-            prompt_tokens=0,
+-            completion_tokens=0,
++            provider_started=provider_started,
++            key_id=key_id,
+             response_id=new_completion_id(),
+             prompt_name=req.prompt_name,
+             routed_from=routed_from,
+             prompt_version_num=served_prompt_version,
+-            path=_PROVIDER_PATH,
+-            outcome="provider_error",
+-            duration_ms=error_timings.duration_ms,
+-            provider_ms=error_timings.provider_ms,
+-            ttft_ms=error_timings.ttft_ms,
+         )
+         return map_provider_error(exc)
+     provider_ms = (time.perf_counter() - provider_started) * 1000
+     response = result_to_openai(result, model=model)
+     try:
+         await set_cached_response(
+             redis,
+             request_hash,
+             response,
+             ttl_seconds=settings.cache_exact_ttl_seconds,
+@@ -736,39 +791,30 @@ async def messages(
+                 content=openai_response_to_messages(semantic_response).model_dump()
+             )
+         cache_semantic_misses.labels(model=model).inc()
+ 
+     # Marked before the call so a provider error still carries labels.
+     mark(request, path=_PROVIDER_PATH)
+     provider_started = time.perf_counter()
+     try:
+         result = await provider.complete(payload)
+     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
+-        error_provider_ms = (time.perf_counter() - provider_started) * 1000
+-        error_timings = observe_non_streaming(
+-            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
+-        )
+-        await log_request(
++        await _finish_failed_request(
++            request,
+             session,
+-            key_id=key_id,
+             model=model,
+-            prompt_tokens=0,
+-            completion_tokens=0,
++            provider_started=provider_started,
++            key_id=key_id,
+             response_id=new_message_id(),
+             prompt_name=req.prompt_name,
+             routed_from=routed_from,
+             prompt_version_num=served_prompt_version,
+-            path=_PROVIDER_PATH,
+-            outcome="provider_error",
+-            duration_ms=error_timings.duration_ms,
+-            provider_ms=error_timings.provider_ms,
+-            ttft_ms=error_timings.ttft_ms,
+         )
+         return map_provider_error_anthropic(exc)
+     provider_ms = (time.perf_counter() - provider_started) * 1000
+     openai_shaped = result_to_openai(result, model=model)
+     messages_response = result_to_messages(result, model=model)
+     try:
+         await set_cached_response(
+             redis,
+             request_hash,
+             openai_shaped,
+@@ -829,21 +875,25 @@ async def _messages_sse(
+     prompt_version_num: int | None = None,
+     state: dict | None = None,
+ ):
+     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
+ 
+     Emits message_start, content_block_start, a content_block_delta per text
+     delta, content_block_stop, message_delta (carrying the authoritative
+     final usage and stop_reason on a clean finish), then message_stop.
+     Accounting runs in a `finally` block so it fires on every exit path -
+     see `_sse`'s docstring for the full outcome-tagging rationale (`ok` /
+-    `provider_error` / `client_disconnect`), which applies identically here.
++    `provider_error` / `client_disconnect`), which applies identically here,
++    including its fourth case: a stream whose iteration ends without ever
++    reaching `StreamEnd` raises `RuntimeError` and so is tagged
++    `provider_error` with estimated tokens, rather than logged as a $0 `ok`
++    row it has no authoritative counts to justify.
+ 
+     Uses its own DB session for the same reason `_sse` does (the
+     request-scoped session dependency is already closed by the time this
+     generator keeps running), and wraps the accounting write in
+     `_run_shielded` for the same cancellation-safety reason.
+ 
+     `state` is `request.scope["state"]`, passed in because the generator runs
+     after the endpoint has returned and can no longer reach the `request`
+     object itself. It doubles as the channel back to the middleware:
+     `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
+@@ -851,45 +901,52 @@ async def _messages_sse(
+     path including a failed one. The middleware still records end-to-end for
+     this request; what the generator adds is TTFT, inter-token gaps, and
+     time-to-last-token.
+     """
+     message_id = new_message_id()
+     timer = StreamTimer(state, model=model)
+ 
+     outcome = "ok"
+     input_tokens = output_tokens = 0
+     accumulated: list[str] = []
++    stream_ended = False
+     try:
+         yield _anthropic_event(
+             "message_start", message_start_event(id=message_id, model=model)
+         )
+         yield _anthropic_event("content_block_start", content_block_start_event())
+         timer.provider_started()
+         async for ev in provider.stream(payload):
+             if isinstance(ev, TextDelta):
+                 timer.delta()
+                 accumulated.append(ev.text)
+                 yield _anthropic_event(
+                     "content_block_delta", content_block_delta_event(ev.text)
+                 )
+             elif isinstance(ev, StreamEnd):
++                stream_ended = True
+                 outcome = "ok"
+                 input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
+                 yield _anthropic_event("content_block_stop", content_block_stop_event())
+                 yield _anthropic_event(
+                     "message_delta",
+                     message_delta_event(
+                         stop_reason=reverse_finish_reason(ev.stop_reason),
+                         input_tokens=ev.input_tokens,
+                         output_tokens=ev.output_tokens,
+                     ),
+                 )
++        if not stream_ended:
++            raise RuntimeError(
++                "provider stream ended without a StreamEnd event; no "
++                "authoritative token counts are available"
++            )
+     except (GeneratorExit, asyncio.CancelledError):
+         outcome = "client_disconnect"
+         input_tokens = estimate_tokens(_payload_text(payload))
+         output_tokens = estimate_tokens("".join(accumulated))
+         raise
+     except Exception as exc:  # surface upstream errors inside the stream
+         outcome = "provider_error"
+         input_tokens = estimate_tokens(_payload_text(payload))
+         output_tokens = estimate_tokens("".join(accumulated))
+         yield _anthropic_event(
+@@ -929,35 +986,41 @@ async def _messages_sse(
+         await _run_shielded(_record())
+     # Unreachable on the client-disconnect path, same as _sse.
+     yield _anthropic_event("message_stop", message_stop_event())
+ 
+ 
+ def _anthropic_event(event_type: str, data: dict) -> str:
+     """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
+     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+ 
+ 
+-async def _run_shielded(coro):
++async def _run_shielded(coro: Coroutine[Any, Any, Any]) -> Any:
+     """Await `coro` to completion, even if the calling task is cancelled one
+     or more times while doing so.
+ 
+     Used for the streaming generators' failure-path accounting: their
+     `finally` block runs during `GeneratorExit`/`asyncio.CancelledError`
+     (a client disconnecting mid-stream), and a real disconnect can inject
+     cancellation more than once - e.g. a persistent cancel scope keeps
+     re-raising it at every `await` until the scope itself exits. A bare
+     `await coro` there would let a second cancellation cut the DB commit
+     short and drop the row. `asyncio.shield` protects the wrapped task from
+     the *outer* cancellation, but the outer `await` still raises
+     CancelledError immediately when cancelled - so this loops, re-awaiting
+     the same underlying task, until that task has actually finished.
+ 
++    Scoped to callers in a `finally` block that either already have an
++    exception in flight (which resumes propagating once this returns) or are
++    about to end the generator; it is not a general-purpose "run to
++    completion no matter what" utility, since it silently discards the
++    caller's OWN cancellation once the wrapped coroutine completes.
++
+     Args:
+         coro: The coroutine to run to completion.
+ 
+     Returns:
+         Whatever `coro` returns.
+ 
+     Raises:
+         asyncio.CancelledError: only once the wrapped task itself is done
+             (either with a result or, in principle, its own cancellation -
+             which nothing here ever triggers).
+@@ -1018,20 +1081,27 @@ async def _sse(
+       provider's authoritative token counts.
+     - A provider error mid-stream surfaces as an in-band SSE error event
+       (as before) and logs `outcome="provider_error"` with tokens estimated
+       from the accumulated delta text via `estimate_tokens`, since no
+       authoritative count exists without a `StreamEnd`.
+     - A client disconnect (`GeneratorExit`/`asyncio.CancelledError`, neither
+       an `Exception` subclass) logs `outcome="client_disconnect"` the same
+       estimated way, then re-raises - a disconnected client cannot receive
+       the closing chunk or an error event either way, so the fix records the
+       row without attempting to resurrect the connection.
++    - A stream whose iteration ends without ever reaching `StreamEnd` (the
++      openai/google/ollama providers all emit it conditionally, so their
++      generators can finish without it) is treated identically to a provider
++      error - it raises `RuntimeError` here so the handler above tags it
++      `provider_error` with estimated tokens, for the same reason: no
++      authoritative count exists. Logging it as a $0 `ok` row instead would
++      be exactly the silent under-accounting this design set out to remove.
+ 
+     Uses its own DB session (`SessionLocal`) since this generator keeps
+     running after the request-scoped session dependency has already been
+     closed. The accounting write in `finally` is wrapped in `_run_shielded`
+     because a disconnecting client can inject cancellation more than once
+     while that write is in flight, and a bare `await` there could let a
+     second cancellation cut the DB commit short.
+ 
+     `state` is `request.scope["state"]`, passed in because the generator runs
+     after the endpoint has returned and can no longer reach the `request`
+@@ -1043,38 +1113,45 @@ async def _sse(
+     time-to-last-token. Timing is recorded via StreamTimer and lands on the
+     same RequestLog row.
+     """
+     completion_id = new_completion_id()
+     created = int(time.time())
+     timer = StreamTimer(state, model=model)
+ 
+     outcome = "ok"
+     input_tokens = output_tokens = 0
+     accumulated: list[str] = []
++    stream_ended = False
+     try:
+         yield _event(role_chunk(id=completion_id, created=created, model=model))
+         timer.provider_started()
+         async for ev in provider.stream(payload):
+             if isinstance(ev, TextDelta):
+                 timer.delta()
+                 accumulated.append(ev.text)
+                 yield _event(
+                     text_chunk(ev.text, id=completion_id, created=created, model=model)
+                 )
+             elif isinstance(ev, StreamEnd):
++                stream_ended = True
+                 outcome = "ok"
+                 input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
+                 yield _event(
+                     final_chunk(
+                         ev.stop_reason, id=completion_id, created=created, model=model
+                     )
+                 )
++        if not stream_ended:
++            raise RuntimeError(
++                "provider stream ended without a StreamEnd event; no "
++                "authoritative token counts are available"
++            )
+     except (GeneratorExit, asyncio.CancelledError):
+         outcome = "client_disconnect"
+         input_tokens = estimate_tokens(_payload_text(payload))
+         output_tokens = estimate_tokens("".join(accumulated))
+         raise
+     except Exception as exc:  # surface upstream errors inside the stream
+         outcome = "provider_error"
+         input_tokens = estimate_tokens(_payload_text(payload))
+         output_tokens = estimate_tokens("".join(accumulated))
+         error_payload = {
+diff --git a/tests/test_endpoint.py b/tests/test_endpoint.py
+index 98979a4..1a14eb4 100644
+--- a/tests/test_endpoint.py
++++ b/tests/test_endpoint.py
+@@ -127,20 +127,35 @@ class MidStreamFailureProvider:
+ 
+     async def complete(self, payload):
+         raise RuntimeError("upstream exploded mid non-stream")
+ 
+     async def stream(self, payload):
+         yield TextDelta(text="po")
+         yield TextDelta(text="ng")
+         raise RuntimeError("upstream exploded mid-stream")
+ 
+ 
++class StreamEndsWithoutMarkerProvider:
++    """Yields deltas then simply stops, without ever yielding StreamEnd -
++    reproduces some providers' conditional StreamEnd emission (openai.py's
++    usage-chunk gate, google.py's finish_reason gate, ollama.py's done-flag
++    gate), where the async generator can complete its iteration without
++    ever reaching StreamEnd."""
++
++    async def complete(self, payload):
++        raise RuntimeError("not used")
++
++    async def stream(self, payload):
++        yield TextDelta(text="po")
++        yield TextDelta(text="ng")
++
++
+ @pytest_asyncio.fixture
+ async def raw_key(session):
+     raw = generate_key()
+     session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+     await session.commit()
+     return raw
+ 
+ 
+ @pytest_asyncio.fixture
+ async def client(monkeypatch):
+@@ -171,20 +186,32 @@ async def mid_stream_failure_client(monkeypatch):
+     failing = MidStreamFailureProvider()
+     monkeypatch.setitem(app_module._providers, "anthropic", failing)
+     monkeypatch.setitem(app_module._providers, "ollama", failing)
+     monkeypatch.setitem(app_module._providers, "openai", failing)
+     monkeypatch.setitem(app_module._providers, "google", failing)
+     transport = ASGITransport(app=app)
+     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+         yield c
+ 
+ 
++@pytest_asyncio.fixture
++async def stream_ends_without_marker_client(monkeypatch):
++    stubbed = StreamEndsWithoutMarkerProvider()
++    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
++    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
++    monkeypatch.setitem(app_module._providers, "openai", stubbed)
++    monkeypatch.setitem(app_module._providers, "google", stubbed)
++    transport = ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
++        yield c
++
++
+ async def test_healthz(client):
+     r = await client.get("/healthz")
+     assert r.status_code == 200
+     assert r.json() == {"status": "ok"}
+ 
+ 
+ async def test_requires_auth(client):
+     r = await client.post(
+         "/v1/chat/completions",
+         json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+@@ -1030,20 +1057,21 @@ async def test_streaming_records_stream_path(client, raw_key, session):
+             "model": "claude-sonnet-5",
+             "messages": [{"role": "user", "content": "ping"}],
+             "stream": True,
+         },
+     ) as response:
+         assert response.status_code == 200
+         async for _ in response.aiter_lines():
+             pass
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.path == "stream"
++    assert log.outcome == "ok"
+ 
+     after_count = sample_for(
+         metrics.request_duration_seconds,
+         "_count",
+         {"model": "claude-sonnet-5", "path": log.path},
+     )
+     assert after_count > before_count
+ 
+ 
+ async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+@@ -1113,20 +1141,46 @@ async def test_provider_error_mid_stream_observes_gateway_overhead(
+             "messages": [{"role": "user", "content": "ping"}],
+         },
+     ) as r:
+         async for _ in r.aiter_lines():
+             pass
+ 
+     after = sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+     assert after == before + 1
+ 
+ 
++async def test_stream_ending_without_streamend_marker_logs_failed_row(
++    stream_ends_without_marker_client, raw_key, session
++):
++    """A provider whose stream() completes without ever yielding StreamEnd
++    must not be silently logged as a $0 'ok' success - it has no
++    authoritative token count either, exactly like a mid-stream exception."""
++    async with stream_ends_without_marker_client.stream(
++        "POST",
++        "/v1/chat/completions",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "claude-sonnet-5",
++            "stream": True,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    ) as r:
++        assert r.status_code == 200
++        body = "".join([line async for line in r.aiter_lines()])
++    assert "upstream_error" in body
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "provider_error"
++    assert log.completion_tokens == 1
++    assert log.cost_usd > 0
++
++
+ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+     """Reproduces issue #17's second case: the generator receives
+     CancelledError, not an Exception subclass, so the pre-fix `except
+     Exception` handler never runs. Drives _sse directly rather than through
+     an HTTP client: simulating a genuine client disconnect through
+     httpx's ASGITransport is not reliable, and the design spec's own
+     reproduction sketch calls for driving the generator directly."""
+     import time as time_module
+ 
+     key = ApiKey(name="disconnect-test", key_hash=hash_key(generate_key()))
+@@ -1150,20 +1204,53 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+ 
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.outcome == "client_disconnect"
+     # Only "po" was accumulated before the cancellation.
+     assert log.completion_tokens == 1
+     assert log.prompt_tokens > 0
+     assert log.duration_ms is not None
+     assert log.provider_ms is not None
+ 
+ 
++async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
++    """Real client disconnects are delivered via Starlette's aclose() -
++    GeneratorExit thrown at the generator's suspended yield - not a
++    directly-injected CancelledError. The athrow-based tests above cover
++    the exception TYPE handling but not this delivery MECHANISM. aclose()
++    must return normally (the generator catches and re-raises GeneratorExit,
++    which is the successful-close case per the async generator protocol,
++    not an error) and the row must still be written."""
++    import time as time_module
++
++    key = ApiKey(name="aclose-disconnect-test", key_hash=hash_key(generate_key()))
++    session.add(key)
++    await session.commit()
++    await session.refresh(key)
++
++    state = {"started_at": time_module.perf_counter()}
++    gen = app_module._sse(
++        FakeProvider(),
++        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
++        "claude-sonnet-5",
++        key_id=key.id,
++        state=state,
++    )
++    await gen.__anext__()  # role chunk
++    await gen.__anext__()  # first text delta, "po"
++
++    await gen.aclose()  # must return normally, not raise
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "client_disconnect"
++    assert log.completion_tokens == 1
++
++
+ async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
+     """Spec item 3: a failure before any delta arrives leaves duration_ms
+     and ttft_ms null, but the row still gets written with the right
+     outcome."""
+     import time as time_module
+ 
+     key = ApiKey(name="disconnect-early-test", key_hash=hash_key(generate_key()))
+     session.add(key)
+     await session.commit()
+     await session.refresh(key)
+diff --git a/tests/test_messages_endpoint.py b/tests/test_messages_endpoint.py
+index 8cf2402..97d1cbb 100644
+--- a/tests/test_messages_endpoint.py
++++ b/tests/test_messages_endpoint.py
+@@ -76,20 +76,45 @@ class MidStreamFailureProvider:
+ @pytest_asyncio.fixture
+ async def mid_stream_failure_client(monkeypatch):
+     failing = MidStreamFailureProvider()
+     monkeypatch.setitem(app_module._providers, "anthropic", failing)
+     monkeypatch.setitem(app_module._providers, "ollama", failing)
+     transport = ASGITransport(app=app)
+     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+         yield c
+ 
+ 
++class StreamEndsWithoutMarkerProvider:
++    """Yields deltas then simply stops, without ever yielding StreamEnd -
++    reproduces some providers' conditional StreamEnd emission (openai.py's
++    usage-chunk gate, google.py's finish_reason gate, ollama.py's done-flag
++    gate), where the async generator can complete its iteration without
++    ever reaching StreamEnd."""
++
++    async def complete(self, payload):
++        raise RuntimeError("not used")
++
++    async def stream(self, payload):
++        yield TextDelta(text="po")
++        yield TextDelta(text="ng")
++
++
++@pytest_asyncio.fixture
++async def stream_ends_without_marker_client(monkeypatch):
++    stubbed = StreamEndsWithoutMarkerProvider()
++    monkeypatch.setitem(app_module._providers, "anthropic", stubbed)
++    monkeypatch.setitem(app_module._providers, "ollama", stubbed)
++    transport = ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
++        yield c
++
++
+ async def test_non_streaming_message(client, raw_key):
+     r = await client.post(
+         "/v1/messages",
+         headers={"Authorization": f"Bearer {raw_key}"},
+         json={
+             "model": "claude-sonnet-5",
+             "max_tokens": 50,
+             "messages": [{"role": "user", "content": "ping"}],
+         },
+     )
+@@ -353,20 +378,21 @@ async def test_messages_streaming_records_stream_path(client, raw_key, session):
+             "max_tokens": 16,
+             "messages": [{"role": "user", "content": "ping"}],
+             "stream": True,
+         },
+     ) as response:
+         assert response.status_code == 200
+         async for _ in response.aiter_lines():
+             pass
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.path == "stream"
++    assert log.outcome == "ok"
+ 
+ 
+ async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+     mid_stream_failure_client, raw_key, session
+ ):
+     async with mid_stream_failure_client.stream(
+         "POST",
+         "/v1/messages",
+         headers={"Authorization": f"Bearer {raw_key}"},
+         json={
+@@ -382,20 +408,47 @@ async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
+ 
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.outcome == "provider_error"
+     assert log.completion_tokens == 1  # "po" + "ng" -> ceil(4/4)
+     assert log.prompt_tokens > 0
+     assert log.cost_usd > 0
+     assert log.duration_ms is not None
+     assert log.provider_ms is not None
+ 
+ 
++async def test_stream_ending_without_streamend_marker_logs_failed_row(
++    stream_ends_without_marker_client, raw_key, session
++):
++    """A provider whose stream() completes without ever yielding StreamEnd
++    must not be silently logged as a $0 'ok' success - it has no
++    authoritative token count either, exactly like a mid-stream exception."""
++    async with stream_ends_without_marker_client.stream(
++        "POST",
++        "/v1/messages",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "claude-sonnet-5",
++            "max_tokens": 50,
++            "stream": True,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    ) as r:
++        assert r.status_code == 200
++        body = b"".join([chunk async for chunk in r.aiter_bytes()]).decode()
++    assert "event: error" in body
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "provider_error"
++    assert log.completion_tokens == 1
++    assert log.cost_usd > 0
++
++
+ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+     key = ApiKey(name="messages-disconnect-test", key_hash=hash_key(generate_key()))
+     session.add(key)
+     await session.commit()
+     await session.refresh(key)
+ 
+     state = {"started_at": time.perf_counter()}
+     gen = app_module._messages_sse(
+         FakeProvider(),
+         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
+@@ -410,20 +463,54 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
+     with pytest.raises(asyncio.CancelledError):
+         await gen.athrow(asyncio.CancelledError())
+ 
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.outcome == "client_disconnect"
+     assert log.completion_tokens == 1
+     assert log.prompt_tokens > 0
+     assert log.duration_ms is not None
+ 
+ 
++async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
++    """Real client disconnects are delivered via Starlette's aclose() -
++    GeneratorExit thrown at the generator's suspended yield - not a
++    directly-injected CancelledError. The athrow-based tests above cover
++    the exception TYPE handling but not this delivery MECHANISM. aclose()
++    must return normally (the generator catches and re-raises GeneratorExit,
++    which is the successful-close case per the async generator protocol,
++    not an error) and the row must still be written."""
++    key = ApiKey(
++        name="messages-aclose-disconnect-test", key_hash=hash_key(generate_key())
++    )
++    session.add(key)
++    await session.commit()
++    await session.refresh(key)
++
++    state = {"started_at": time.perf_counter()}
++    gen = app_module._messages_sse(
++        FakeProvider(),
++        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
++        "claude-sonnet-5",
++        key_id=key.id,
++        state=state,
++    )
++    await gen.__anext__()  # message_start
++    await gen.__anext__()  # content_block_start
++    await gen.__anext__()  # first content_block_delta, "po"
++
++    await gen.aclose()  # must return normally, not raise
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "client_disconnect"
++    assert log.completion_tokens == 1
++
++
+ async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
+     """Cancelling right after the very first yield (message_start, before
+     content_block_start or any delta) must still be caught by the try block
+     and log a row - this is the same boundary condition Task 5 found a bug
+     at for _sse, fixed the same way here."""
+     key = ApiKey(
+         name="messages-disconnect-early-test", key_hash=hash_key(generate_key())
+     )
+     session.add(key)
+     await session.commit()

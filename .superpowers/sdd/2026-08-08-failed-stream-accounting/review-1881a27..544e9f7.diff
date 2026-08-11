@@ -1,0 +1,424 @@
+# Review package: 1881a27..544e9f7
+
+## Commits
+544e9f7 fix(dashboard): exclude failed-outcome rows from latency percentiles
+
+## Files changed
+ gatekeep/api/dashboard.py | 44 ++++++++++-----------
+ tests/test_dashboard.py   | 97 +++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 110 insertions(+), 31 deletions(-)
+
+## Diff
+diff --git a/gatekeep/api/dashboard.py b/gatekeep/api/dashboard.py
+index c83992e..538a199 100644
+--- a/gatekeep/api/dashboard.py
++++ b/gatekeep/api/dashboard.py
+@@ -1,18 +1,18 @@
+ from __future__ import annotations
+ 
+ from datetime import datetime, timedelta, timezone
+ from typing import Literal
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query
+ from pydantic import BaseModel
+-from sqlalchemy import Integer, case, func, select, true
++from sqlalchemy import Integer, case, func, or_, select, true
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from gatekeep.db import get_session
+ from gatekeep.middleware.auth import require_api_key
+ from gatekeep.models import (
+     ApiKey,
+     EvalRun,
+     EvalSuite,
+     Prompt,
+     PromptVersion,
+@@ -194,29 +194,25 @@ async def usage_summary(
+ 
+     totals_row = (
+         await session.execute(
+             select(
+                 func.count(RequestLog.id),
+                 func.coalesce(func.sum(RequestLog.total_tokens), 0),
+                 func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                 func.coalesce(func.sum(RequestLog.completion_tokens), 0),
+                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                 func.coalesce(
+-                    func.sum(
+-                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+-                    ),
++                    func.sum(case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)),
+                     0.0,
+                 ),
+                 func.coalesce(
+-                    func.sum(
+-                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+-                    ),
++                    func.sum(case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)),
+                     0.0,
+                 ),
+                 func.coalesce(
+                     func.sum(func.cast(RequestLog.cached, Integer)),
+                     0,
+                 ),
+             ).where(*filters)
+         )
+     ).one()
+     (
+@@ -316,29 +312,25 @@ async def usage_timeseries(
+                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0),
+                 func.coalesce(func.sum(RequestLog.prompt_tokens), 0),
+                 func.coalesce(func.sum(RequestLog.completion_tokens), 0),
+                 func.coalesce(
+                     func.sum(
+                         case((RequestLog.cached, RequestLog.total_tokens), else_=0)
+                     ),
+                     0,
+                 ),
+                 func.coalesce(
+-                    func.sum(
+-                        case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)
+-                    ),
++                    func.sum(case((RequestLog.cached, 0.0), else_=RequestLog.cost_usd)),
+                     0.0,
+                 ),
+                 func.coalesce(
+-                    func.sum(
+-                        case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)
+-                    ),
++                    func.sum(case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)),
+                     0.0,
+                 ),
+             )
+             .where(*filters)
+             .group_by(bucket)
+             .order_by(bucket)
+         )
+     ).all()
+ 
+     buckets = [
+@@ -385,23 +377,21 @@ class UsageByModelTimeseriesResponse(BaseModel):
+     simple regardless of how many distinct models appear in the window;
+     callers group by `model` themselves.
+     """
+ 
+     start: datetime
+     end: datetime
+     interval: str
+     rows: list[UsageByModelBucket]
+ 
+ 
+-@router.get(
+-    "/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse
+-)
++@router.get("/usage/timeseries/by-model", response_model=UsageByModelTimeseriesResponse)
+ async def usage_timeseries_by_model(
+     start: datetime | None = Query(default=None),
+     end: datetime | None = Query(default=None),
+     interval: Literal["minute", "hour", "day"] = Query(default="day"),
+     model: str | None = Query(default=None),
+     key_id: int | None = Query(default=None),
+     prompt_name: str | None = Query(default=None),
+     session: AsyncSession = Depends(get_session),
+     _caller: ApiKey = Depends(require_api_key),
+ ) -> UsageByModelTimeseriesResponse:
+@@ -506,34 +496,44 @@ class LatencyBreakdownRow(BaseModel):
+ 
+ def _latency_filters(
+     start: datetime,
+     end: datetime,
+     *,
+     model: str | None,
+     key_id: int | None,
+     prompt_name: str | None,
+ ) -> list:
+     """Build the WHERE clauses for a latency query: the usual usage filters
+-    plus the two latency-eligibility conditions.
++    plus the latency-eligibility conditions.
+ 
+     `path IS NOT NULL` excludes rows written between migrations 0011 and
+     0012, which carry timings but no path - nothing after the fact can tell
+     a streamed one from a non-streamed one, so they cannot be assigned to
+     either side of the streaming split. This self-heals as those rows age
+     out of the reporting window.
++
++    The `outcome` condition excludes failed rows (`provider_error` /
++    `client_disconnect`, #17): their `duration_ms` is real (see
++    StreamTimer.finish(succeeded=False)), but a percentile blending "how
++    long a normal request takes" with "how long a request took before it
++    failed" would describe neither quantity. NULL passes through (a
++    pre-0013 row, or any row logged without an explicit outcome), matching
++    how NULL `path` predates migration 0012.
+     """
+     return [
+-        *_base_filters(
+-            start, end, model=model, key_id=key_id, prompt_name=prompt_name
+-        ),
++        *_base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name),
+         RequestLog.path.isnot(None),
+         RequestLog.duration_ms.isnot(None),
++        or_(
++            RequestLog.outcome.is_(None),
++            RequestLog.outcome == "ok",
++        ),
+     ]
+ 
+ 
+ def _percentile_exprs(column, condition) -> list:
+     """Return p50/p95/p99 `percentile_cont` expressions over `column`,
+     restricted to the rows matching `condition` via an aggregate FILTER.
+ 
+     `percentile_cont` ignores NULLs in its sorted input, which is what makes
+     `provider_ms` percentiles correct without a second filter: a cache hit's
+     NULL drops out rather than counting as a zero-length provider call.
+@@ -715,23 +715,21 @@ async def latency_summary(
+     overhead = _percentiles(*row[7:10])
+     stream_ttlt = _percentiles(*row[10:13])
+     ttft = _percentiles(*row[13:16])
+ 
+     by_path = await _latency_breakdown(
+         session, RequestLog.path, filters, condition=true()
+     )
+     by_model = await _latency_breakdown(
+         session, RequestLog.model, filters, condition=_NON_STREAMING
+     )
+-    by_key = await _latency_key_breakdown(
+-        session, filters, condition=_NON_STREAMING
+-    )
++    by_key = await _latency_key_breakdown(session, filters, condition=_NON_STREAMING)
+     by_prompt = await _latency_breakdown(
+         session, RequestLog.prompt_name, filters, condition=_NON_STREAMING
+     )
+ 
+     return LatencySummaryResponse(
+         start=start,
+         end=end,
+         sample_count=sample_count,
+         e2e_ms=e2e,
+         provider_ms=provider,
+diff --git a/tests/test_dashboard.py b/tests/test_dashboard.py
+index df84198..e2145ba 100644
+--- a/tests/test_dashboard.py
++++ b/tests/test_dashboard.py
+@@ -41,41 +41,44 @@ async def _seed_log(
+     prompt_tokens: int = 10,
+     completion_tokens: int = 5,
+     cost_usd: float = 0.01,
+     cached: bool = False,
+     prompt_name: str | None = None,
+     created_at: datetime | None = None,
+     path: str | None = None,
+     duration_ms: float | None = None,
+     provider_ms: float | None = None,
+     ttft_ms: float | None = None,
++    outcome: str | None = None,
+ ) -> RequestLog:
+     """Insert one RequestLog row directly, optionally backdating created_at.
+ 
+     `path`/`duration_ms`/`provider_ms`/`ttft_ms` default to None, matching a
+     pre-0012 row: such rows are deliberately excluded from every latency
+-    query, so latency tests must pass `path` explicitly.
++    query, so latency tests must pass `path` explicitly. `outcome` defaults
++    to None, matching a pre-0013 (or successful) row.
+     """
+     log = RequestLog(
+         key_id=key_id,
+         model=model,
+         prompt_tokens=prompt_tokens,
+         completion_tokens=completion_tokens,
+         total_tokens=prompt_tokens + completion_tokens,
+         cost_usd=cost_usd,
+         cached=cached,
+         response_id=f"resp-{uuid4()}",
+         prompt_name=prompt_name,
+         path=path,
+         duration_ms=duration_ms,
+         provider_ms=provider_ms,
+         ttft_ms=ttft_ms,
++        outcome=outcome,
+     )
+     session.add(log)
+     await session.commit()
+     await session.refresh(log)
+     if created_at is not None:
+         await session.execute(
+             update(RequestLog)
+             .where(RequestLog.id == log.id)
+             .values(created_at=created_at)
+         )
+@@ -265,21 +268,23 @@ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
+     assert body["interval"] == "day"
+     assert len(body["buckets"]) == 2
+     total_requests = sum(b["request_count"] for b in body["buckets"])
+     total_cache_hits = sum(b["cache_hit_count"] for b in body["buckets"])
+     total_cost = sum(b["cost_usd"] for b in body["buckets"])
+     assert total_requests == 3
+     assert total_cache_hits == 1
+     assert total_cost == 6.0
+ 
+ 
+-async def test_usage_timeseries_includes_token_and_spend_fields(client, raw_key, session):
++async def test_usage_timeseries_includes_token_and_spend_fields(
++    client, raw_key, session
++):
+     key_row = (
+         await session.execute(
+             select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+         )
+     ).scalar_one()
+ 
+     now = datetime.now(timezone.utc)
+     await _seed_log(
+         session,
+         key_id=key_row.id,
+@@ -728,20 +733,100 @@ async def test_latency_overhead_excludes_uncached_row_with_no_provider_ms(
+     # toward e2e and the sample total...
+     assert body["sample_count"] == 2
+     assert body["e2e_ms"]["p50_ms"] == 300.0
+ 
+     # ...but only the row with a real provider_ms feeds overhead. If the
+     # uncached-NULL row leaked in as duration-minus-zero, p50 would be
+     # (20 + 500) / 2 = 260 instead.
+     assert body["overhead_ms"]["p50_ms"] == 20.0
+ 
+ 
++async def test_latency_summary_excludes_failed_outcome_rows(client, raw_key, session):
++    """A failed row's accurate duration_ms is still stored (see the design
++    spec), but must not move the percentiles - only outcome='ok'/NULL rows
++    are latency-eligible."""
++    key_id = await _key_id(session, raw_key)
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        path="stream",
++        duration_ms=100.0,
++        provider_ms=80.0,
++        outcome=None,
++    )
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        path="stream",
++        duration_ms=9999.0,
++        provider_ms=9999.0,
++        outcome="provider_error",
++    )
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        path="stream",
++        duration_ms=9999.0,
++        provider_ms=9999.0,
++        outcome="client_disconnect",
++    )
++
++    r = await client.get(
++        "/dashboard/api/latency/summary",
++        headers={"Authorization": f"Bearer {raw_key}"},
++    )
++    body = r.json()
++
++    assert body["sample_count"] == 1
++    assert body["stream_ttlt_ms"]["p50_ms"] == 100.0
++
++
++async def test_latency_timeseries_excludes_failed_outcome_rows(
++    client, raw_key, session
++):
++    key_id = await _key_id(session, raw_key)
++    now = datetime.now(timezone.utc)
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        path="provider",
++        duration_ms=100.0,
++        provider_ms=80.0,
++        created_at=now,
++        outcome="ok",
++    )
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        path="provider",
++        duration_ms=9999.0,
++        provider_ms=9999.0,
++        created_at=now,
++        outcome="provider_error",
++    )
++
++    r = await client.get(
++        "/dashboard/api/latency/timeseries",
++        headers={"Authorization": f"Bearer {raw_key}"},
++    )
++    body = r.json()
++
++    assert len(body["buckets"]) == 1
++    assert body["buckets"][0]["sample_count"] == 1
++    assert body["buckets"][0]["e2e_p50_ms"] == 100.0
++
++
+ async def test_latency_summary_breakdowns(client, raw_key, session):
+     key_id = await _key_id(session, raw_key)
+     await _seed_latency_fixture(session, key_id)
+ 
+     r = await client.get(
+         "/dashboard/api/latency/summary",
+         headers={"Authorization": f"Bearer {raw_key}"},
+     )
+     body = r.json()
+ 
+@@ -766,23 +851,21 @@ async def test_latency_summary_breakdowns(client, raw_key, session):
+     assert by_key[str(key_id)]["p50_ms"] == 200.0
+     assert by_key[str(key_id)]["label"] == "dashboard-test"
+ 
+     by_prompt = {row["key"]: row for row in body["by_prompt"]}
+     assert by_prompt["p1"]["sample_count"] == 2
+     assert by_prompt["p1"]["p50_ms"] == 150.0
+     assert by_prompt["(none)"]["sample_count"] == 1
+     assert by_prompt["(none)"]["p50_ms"] == 300.0
+ 
+ 
+-async def test_latency_summary_excludes_rows_with_no_path(
+-    client, raw_key, session
+-):
++async def test_latency_summary_excludes_rows_with_no_path(client, raw_key, session):
+     """Rows written between migrations 0011 and 0012 carry timings but no
+     path, and nothing can tell a streamed one from a non-streamed one."""
+     key_id = await _key_id(session, raw_key)
+     await _seed_log(
+         session,
+         key_id=key_id,
+         model="gpt-4o",
+         duration_ms=500.0,
+         provider_ms=400.0,
+     )
+@@ -904,23 +987,21 @@ async def test_latency_timeseries_buckets_by_day(client, raw_key, session):
+ 
+     assert second["sample_count"] == 1
+     # The only row today is streamed, so every non-streaming field is null -
+     # never 0, which would read as an instantaneous response.
+     assert second["e2e_p50_ms"] is None
+     assert second["provider_p50_ms"] is None
+     assert second["overhead_p50_ms"] is None
+     assert second["ttft_p50_ms"] == 250.0
+ 
+ 
+-async def test_latency_timeseries_excludes_rows_with_no_path(
+-    client, raw_key, session
+-):
++async def test_latency_timeseries_excludes_rows_with_no_path(client, raw_key, session):
+     key_id = await _key_id(session, raw_key)
+     await _seed_log(
+         session,
+         key_id=key_id,
+         model="gpt-4o",
+         duration_ms=500.0,
+         provider_ms=400.0,
+     )
+ 
+     r = await client.get(

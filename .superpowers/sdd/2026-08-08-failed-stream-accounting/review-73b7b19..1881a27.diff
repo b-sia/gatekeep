@@ -1,0 +1,229 @@
+# Review package: 73b7b19..1881a27
+
+## Commits
+1881a27 fix(app): non-streaming provider errors publish provider_ms and log outcome=provider_error
+
+## Files changed
+ gatekeep/app.py                 | 40 ++++++++++++++++++++++++++++++++++++++++
+ tests/test_endpoint.py          | 35 +++++++++++++++++++++--------------
+ tests/test_messages_endpoint.py | 32 ++++++++++++++++++++++++++++++++
+ 3 files changed, 93 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+index 58cfe8d..5d8e778 100644
+--- a/gatekeep/app.py
++++ b/gatekeep/app.py
+@@ -504,20 +504,40 @@ async def chat_completions(
+             )
+             return JSONResponse(content=semantic_response.model_dump())
+         cache_semantic_misses.labels(model=model).inc()
+ 
+     # Marked before the call so a provider error still carries labels.
+     mark(request, path=_PROVIDER_PATH)
+     provider_started = time.perf_counter()
+     try:
+         result = await provider.complete(payload)
+     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
++        error_provider_ms = (time.perf_counter() - provider_started) * 1000
++        error_timings = observe_non_streaming(
++            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
++        )
++        await log_request(
++            session,
++            key_id=key_id,
++            model=model,
++            prompt_tokens=0,
++            completion_tokens=0,
++            response_id=new_completion_id(),
++            prompt_name=req.prompt_name,
++            routed_from=routed_from,
++            prompt_version_num=served_prompt_version,
++            path=_PROVIDER_PATH,
++            outcome="provider_error",
++            duration_ms=error_timings.duration_ms,
++            provider_ms=error_timings.provider_ms,
++            ttft_ms=error_timings.ttft_ms,
++        )
+         return map_provider_error(exc)
+     provider_ms = (time.perf_counter() - provider_started) * 1000
+     response = result_to_openai(result, model=model)
+     try:
+         await set_cached_response(
+             redis,
+             request_hash,
+             response,
+             ttl_seconds=settings.cache_exact_ttl_seconds,
+             prompt_name=req.prompt_name,
+@@ -716,20 +736,40 @@ async def messages(
+                 content=openai_response_to_messages(semantic_response).model_dump()
+             )
+         cache_semantic_misses.labels(model=model).inc()
+ 
+     # Marked before the call so a provider error still carries labels.
+     mark(request, path=_PROVIDER_PATH)
+     provider_started = time.perf_counter()
+     try:
+         result = await provider.complete(payload)
+     except Exception as exc:  # provider SDK error, e.g. anthropic.APIError
++        error_provider_ms = (time.perf_counter() - provider_started) * 1000
++        error_timings = observe_non_streaming(
++            request, model=model, path=_PROVIDER_PATH, provider_ms=error_provider_ms
++        )
++        await log_request(
++            session,
++            key_id=key_id,
++            model=model,
++            prompt_tokens=0,
++            completion_tokens=0,
++            response_id=new_message_id(),
++            prompt_name=req.prompt_name,
++            routed_from=routed_from,
++            prompt_version_num=served_prompt_version,
++            path=_PROVIDER_PATH,
++            outcome="provider_error",
++            duration_ms=error_timings.duration_ms,
++            provider_ms=error_timings.provider_ms,
++            ttft_ms=error_timings.ttft_ms,
++        )
+         return map_provider_error_anthropic(exc)
+     provider_ms = (time.perf_counter() - provider_started) * 1000
+     openai_shaped = result_to_openai(result, model=model)
+     messages_response = result_to_messages(result, model=model)
+     try:
+         await set_cached_response(
+             redis,
+             request_hash,
+             openai_shaped,
+             ttl_seconds=settings.cache_exact_ttl_seconds,
+diff --git a/tests/test_endpoint.py b/tests/test_endpoint.py
+index 0ad5117..98979a4 100644
+--- a/tests/test_endpoint.py
++++ b/tests/test_endpoint.py
+@@ -917,30 +917,31 @@ async def test_middleware_overhead_is_exact_on_the_non_streaming_provider_path(
+             metrics.provider_duration_seconds, "_sum", {"model": "claude-sonnet-5"}
+         )
+         - before_provider_sum
+     )
+     assert overhead_delta == pytest.approx(duration_delta - provider_delta, rel=1e-3), (
+         "overhead must equal duration minus provider exactly on the non-streaming "
+         "provider path too, not just on the stream path"
+     )
+ 
+ 
+-async def test_provider_error_does_not_count_whole_span_as_overhead(
+-    broken_client, raw_key
++async def test_provider_error_now_publishes_provider_ms_and_counts_overhead(
++    broken_client, raw_key, session
+ ):
+-    """`mark(request, path="provider")` runs before `provider.complete(...)` so
+-    a failed call still carries labels - but that also means provider_ms is
+-    never published when the call raises. The middleware must not fall back to
+-    treating the unpublished value as "no provider call" (a cache hit) and
+-    counting the whole elapsed span as gateway overhead: it genuinely doesn't
+-    know how that time split, so it must skip the observation entirely rather
+-    than record a misleading one."""
++    """Companion fix to issue #17's milder non-streaming case: `mark(request,
++    path="provider")` already ran before `provider.complete(...)` so a failed
++    call carries labels, but provider_ms was never published, so the
++    middleware skipped the overhead observation entirely (see
++    test_provider_error_does_not_count_whole_span_as_overhead in git history
++    for the old, now-superseded behavior). The fix publishes provider_ms even
++    on failure and logs a RequestLog row, so overhead is now observed and a
++    row exists with outcome='provider_error'."""
+     from gatekeep.observability import metrics
+ 
+     labels = {"model": "claude-sonnet-5", "path": "provider"}
+     before_duration_count = sample_for(
+         metrics.request_duration_seconds, "_count", labels
+     )
+     before_overhead_count = sample_for(
+         metrics.gateway_overhead_seconds, "_count", labels
+     )
+ 
+@@ -950,27 +951,33 @@ async def test_provider_error_does_not_count_whole_span_as_overhead(
+         json={
+             "model": "claude-sonnet-5",
+             "messages": [{"role": "user", "content": "provider-error"}],
+         },
+     )
+     assert r.status_code == 502
+ 
+     assert (
+         sample_for(metrics.request_duration_seconds, "_count", labels)
+         == before_duration_count + 1
+-    ), "the middleware still knows end-to-end for a failed request"
++    )
+     assert (
+         sample_for(metrics.gateway_overhead_seconds, "_count", labels)
+-        == before_overhead_count
+-    ), (
+-        "provider_ms was never published, so overhead for this request must be skipped, not guessed"
+-    )
++        == before_overhead_count + 1
++    ), "provider_ms is now published even on failure, so overhead must be observed"
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "provider_error"
++    assert log.prompt_tokens == 0
++    assert log.completion_tokens == 0
++    assert log.cost_usd == 0
++    assert log.provider_ms is not None
++    assert log.path == "provider"
+ 
+ 
+ async def test_non_streaming_records_path_matching_the_metric_label(
+     client, raw_key, session
+ ):
+     """A provider-served non-streaming request must record `path ==
+     "provider"` on the `RequestLog` row `_finish_request` writes."""
+     response = await client.post(
+         "/v1/chat/completions",
+         headers={"Authorization": f"Bearer {raw_key}"},
+diff --git a/tests/test_messages_endpoint.py b/tests/test_messages_endpoint.py
+index f810f68..8cf2402 100644
+--- a/tests/test_messages_endpoint.py
++++ b/tests/test_messages_endpoint.py
+@@ -439,10 +439,42 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
+     )
+     await gen.__anext__()  # message_start only - no content_block_start yet
+ 
+     with pytest.raises(asyncio.CancelledError):
+         await gen.athrow(asyncio.CancelledError())
+ 
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.outcome == "client_disconnect"
+     assert log.completion_tokens == 0
+     assert log.duration_ms is None
++
++
++async def test_non_streaming_provider_error_logs_outcome_and_overhead(
++    client, raw_key, session, monkeypatch
++):
++    """A non-streaming `/v1/messages` call whose provider raises must publish
++    provider_ms and log a RequestLog row with outcome='provider_error', the
++    same accounting fix as Task 7's chat/completions companion test."""
++
++    class FailingProvider:
++        async def complete(self, payload):
++            raise RuntimeError("boom")
++
++    monkeypatch.setitem(app_module._providers, "anthropic", FailingProvider())
++
++    r = await client.post(
++        "/v1/messages",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "claude-sonnet-5",
++            "max_tokens": 50,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    )
++    assert r.status_code == 502
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "provider_error"
++    assert log.prompt_tokens == 0
++    assert log.completion_tokens == 0
++    assert log.provider_ms is not None
++    assert log.path == "provider"

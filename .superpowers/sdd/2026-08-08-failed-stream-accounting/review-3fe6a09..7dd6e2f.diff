@@ -1,0 +1,169 @@
+# Review package: 3fe6a09..7dd6e2f
+
+## Commits
+7dd6e2f feat(app): add _run_shielded helper for cancellation-safe accounting writes
+
+## Files changed
+ gatekeep/app.py        | 37 +++++++++++++++++++++++++++++++++++++
+ tests/test_endpoint.py | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 84 insertions(+)
+
+## Diff
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+index 5747b1e..2ac4fd0 100644
+--- a/gatekeep/app.py
++++ b/gatekeep/app.py
+@@ -1,12 +1,13 @@
+ from __future__ import annotations
+ 
++import asyncio
+ import json
+ import logging
+ import pathlib
+ import time
+ 
+ import ollama
+ from redis.exceptions import RedisError
+ from anthropic import AsyncAnthropic
+ from google import genai
+ from openai import AsyncOpenAI
+@@ -858,20 +859,56 @@ async def _messages_sse(
+             {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
+         )
+     yield _anthropic_event("message_stop", message_stop_event())
+ 
+ 
+ def _anthropic_event(event_type: str, data: dict) -> str:
+     """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
+     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+ 
+ 
++async def _run_shielded(coro):
++    """Await `coro` to completion, even if the calling task is cancelled one
++    or more times while doing so.
++
++    Used for the streaming generators' failure-path accounting: their
++    `finally` block runs during `GeneratorExit`/`asyncio.CancelledError`
++    (a client disconnecting mid-stream), and a real disconnect can inject
++    cancellation more than once - e.g. a persistent cancel scope keeps
++    re-raising it at every `await` until the scope itself exits. A bare
++    `await coro` there would let a second cancellation cut the DB commit
++    short and drop the row. `asyncio.shield` protects the wrapped task from
++    the *outer* cancellation, but the outer `await` still raises
++    CancelledError immediately when cancelled - so this loops, re-awaiting
++    the same underlying task, until that task has actually finished.
++
++    Args:
++        coro: The coroutine to run to completion.
++
++    Returns:
++        Whatever `coro` returns.
++
++    Raises:
++        asyncio.CancelledError: only once the wrapped task itself is done
++            (either with a result or, in principle, its own cancellation -
++            which nothing here ever triggers).
++        BaseException: whatever `coro` itself raises.
++    """
++    task = asyncio.ensure_future(coro)
++    while True:
++        try:
++            return await asyncio.shield(task)
++        except asyncio.CancelledError:
++            if task.done():
++                raise
++
++
+ async def _sse(
+     provider: _GatewayProvider,
+     payload: dict,
+     model: str,
+     *,
+     key_id: int,
+     prompt_name: str | None = None,
+     routed_from: str | None = None,
+     prompt_version_num: int | None = None,
+     state: dict | None = None,
+diff --git a/tests/test_endpoint.py b/tests/test_endpoint.py
+index e774900..23ed19f 100644
+--- a/tests/test_endpoint.py
++++ b/tests/test_endpoint.py
+@@ -1,10 +1,11 @@
++import asyncio
+ import json
+ 
+ import httpx
+ import pytest
+ import pytest_asyncio
+ from httpx import ASGITransport
+ from sqlalchemy import select
+ 
+ import gatekeep.app as app_module
+ from gatekeep.accounting import calculate_cost
+@@ -16,20 +17,66 @@ from gatekeep.middleware.ratelimit import get_redis
+ from gatekeep.models import ApiKey, EvalRun, Prompt, RequestLog
+ from gatekeep.prompts import (
+     add_prompt_version,
+     create_prompt,
+     get_active_prompt_version,
+     set_candidate_version,
+ )
+ from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+ 
+ 
++async def test_run_shielded_completes_the_coroutine_despite_repeated_cancellation():
++    """A disconnecting client can inject cancellation into the SSE generator's
++    `finally` block more than once (e.g. a persistent cancel scope). The
++    accounting write there must run to completion regardless.
++
++    `_run_shielded` absorbs the outer cancellations rather than letting them
++    cut the DB commit short - it does NOT re-raise CancelledError to its
++    caller for an outer cancellation (only if the wrapped coroutine's own
++    task is itself done/cancelled, which never happens here). In the real
++    generator, the CancelledError the client disconnect caused is already
++    propagating via the `except ... raise` clause that ran before `finally`;
++    this helper's job is only to keep the write from being cut short while
++    that propagation is paused, not to re-signal the cancellation itself.
++    So `runner()` below completes normally even though its task was
++    cancelled twice - that is the correct, intended behavior."""
++    completed = False
++
++    async def slow_write():
++        nonlocal completed
++        await asyncio.sleep(0.05)
++        completed = True
++
++    async def runner():
++        await app_module._run_shielded(slow_write())
++
++    task = asyncio.ensure_future(runner())
++    await asyncio.sleep(0.01)
++    task.cancel()
++    await asyncio.sleep(0.01)
++    task.cancel()  # cancel again while the shielded write is still in flight
++    await (
++        task
++    )  # must NOT raise: both cancellations are absorbed until the write finishes
++    assert completed, (
++        "the shielded write must run to completion despite repeated cancellation"
++    )
++
++
++async def test_run_shielded_returns_the_coroutines_result_when_not_cancelled():
++    async def compute():
++        return 42
++
++    result = await app_module._run_shielded(compute())
++    assert result == 42
++
++
+ def sample_for(histogram, suffix, labels):
+     """Return a histogram's `_sum`/`_count` sample value for an exact label
+     set, or 0.0 if that label combination hasn't been observed yet."""
+     for sample in histogram.collect()[0].samples:
+         if sample.name.endswith(suffix) and sample.labels == labels:
+             return sample.value
+     return 0.0
+ 
+ 
+ @pytest.fixture(autouse=True)

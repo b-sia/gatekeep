@@ -1,0 +1,1432 @@
+# Review package: de4644e5908fd6fd9122432b0155d5fb1d6063dc..HEAD
+
+## Commits
+5d12bfa feat: fastapi app with /v1/chat/completions (streaming + non-streaming)
+5bae837 test: cover openai error shape and map_anthropic_error
+e8aaf9a feat: api-key auth dependency and openai-shaped errors
+6c7609f feat: anthropic provider wrapper with normalized result types
+70d1729 feat: pure openai<->anthropic translation layer
+253e42d feat: openai-compatible request/response schemas
+da0c1bb fix: add psycopg2-binary to dev dependencies for alembic
+23bee5d feat: api_keys model, key hashing, and initial migration
+5627a68 fix: targeted async test-loop isolation and pytest-asyncio floor
+6adcfe1 feat: docker-compose stack and async db engine
+de04d8e feat: project scaffolding and settings
+
+## Files changed
+ .env.example                         |   9 +++
+ .gitignore                           |   8 ++
+ Dockerfile                           |  11 +++
+ alembic.ini                          |  25 +++++++
+ docker-compose.yml                   |  33 +++++++++
+ gatekeep/__init__.py                 |   0
+ gatekeep/api/__init__.py             |   0
+ gatekeep/api/errors.py               |  18 +++++
+ gatekeep/api/openai_schemas.py       |  69 +++++++++++++++++
+ gatekeep/api/translation.py          | 140 +++++++++++++++++++++++++++++++++++
+ gatekeep/app.py                      |  94 +++++++++++++++++++++++
+ gatekeep/auth_keys.py                |  12 +++
+ gatekeep/config.py                   |  29 ++++++++
+ gatekeep/db.py                       |  25 +++++++
+ gatekeep/middleware/__init__.py      |   0
+ gatekeep/middleware/auth.py          |  43 +++++++++++
+ gatekeep/models.py                   |  24 ++++++
+ gatekeep/providers/__init__.py       |   0
+ gatekeep/providers/anthropic.py      |  58 +++++++++++++++
+ migrations/env.py                    |  47 ++++++++++++
+ migrations/versions/0001_api_keys.py |  34 +++++++++
+ pyproject.toml                       |  35 +++++++++
+ scripts/create_key.py                |  26 +++++++
+ tests/__init__.py                    |   0
+ tests/conftest.py                    |  31 ++++++++
+ tests/test_auth.py                   |  72 ++++++++++++++++++
+ tests/test_config.py                 |  23 ++++++
+ tests/test_db.py                     |   2 +
+ tests/test_endpoint.py               |  86 +++++++++++++++++++++
+ tests/test_models.py                 |  24 ++++++
+ tests/test_openai_schemas.py         |  31 ++++++++
+ tests/test_provider.py               |  93 +++++++++++++++++++++++
+ tests/test_translation.py            |  94 +++++++++++++++++++++++
+ 33 files changed, 1196 insertions(+)
+
+## Diff
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..97eeb14
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,9 @@
++# Postgres (async driver)
++DATABASE_URL=postgresql+asyncpg://gatekeep:gatekeep@localhost:5432/gatekeep
++# Redis (used from Phase 2 onward)
++REDIS_URL=redis://localhost:6379/0
++# Anthropic API key the gateway uses to call Claude
++ANTHROPIC_API_KEY=sk-ant-your-key-here
++# Default Claude model when the client sends an unknown model id
++DEFAULT_MODEL=claude-sonnet-5
++DEFAULT_MAX_TOKENS=4096
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..dee0480
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,8 @@
++__pycache__/
++*.py[cod]
++.venv/
++venv/
++*.egg-info/
++.env
++.pytest_cache/
++.superpowers/
+\ No newline at end of file
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..a69c6f1
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,11 @@
++FROM python:3.12-slim
++
++WORKDIR /app
++COPY pyproject.toml ./
++COPY gatekeep ./gatekeep
++COPY migrations ./migrations
++COPY alembic.ini ./
++RUN pip install --no-cache-dir -e .
++
++EXPOSE 8000
++CMD ["uvicorn", "gatekeep.app:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/alembic.ini b/alembic.ini
+new file mode 100644
+index 0000000..83cadf5
+--- /dev/null
++++ b/alembic.ini
+@@ -0,0 +1,25 @@
++[alembic]
++script_location = migrations
++sqlalchemy.url = driver://user:pass@localhost/dbname
++
++[loggers]
++keys = root
++
++[handlers]
++keys = console
++
++[formatters]
++keys = generic
++
++[logger_root]
++level = WARN
++handlers = console
++
++[handler_console]
++class = StreamHandler
++args = (sys.stderr,)
++level = NOTSET
++formatter = generic
++
++[formatter_generic]
++format = %(levelname)-5.5s [%(name)s] %(message)s
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 0000000..17bb972
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,33 @@
++services:
++  postgres:
++    image: pgvector/pgvector:pg16
++    environment:
++      POSTGRES_USER: gatekeep
++      POSTGRES_PASSWORD: gatekeep
++      POSTGRES_DB: gatekeep
++    ports:
++      - "5432:5432"
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -U gatekeep"]
++      interval: 5s
++      timeout: 3s
++      retries: 10
++
++  redis:
++    image: redis:7
++    ports:
++      - "6379:6379"
++
++  gateway:
++    build: .
++    environment:
++      DATABASE_URL: postgresql+asyncpg://gatekeep:gatekeep@postgres:5432/gatekeep
++      REDIS_URL: redis://redis:6379/0
++      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
++    ports:
++      - "8000:8000"
++    depends_on:
++      postgres:
++        condition: service_healthy
++      redis:
++        condition: service_started
+diff --git a/gatekeep/__init__.py b/gatekeep/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/gatekeep/api/__init__.py b/gatekeep/api/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/gatekeep/api/errors.py b/gatekeep/api/errors.py
+new file mode 100644
+index 0000000..2d87162
+--- /dev/null
++++ b/gatekeep/api/errors.py
+@@ -0,0 +1,18 @@
++from __future__ import annotations
++
++from fastapi.responses import JSONResponse
++
++
++def openai_error(
++    status_code: int, message: str, err_type: str, code: str | None = None
++) -> JSONResponse:
++    return JSONResponse(
++        status_code=status_code,
++        content={"error": {"message": message, "type": err_type, "code": code}},
++    )
++
++
++def map_anthropic_error(exc: Exception) -> JSONResponse:
++    status = getattr(exc, "status_code", 502)
++    message = getattr(exc, "message", None) or str(exc)
++    return openai_error(status, message, "upstream_error", "anthropic_error")
+diff --git a/gatekeep/api/openai_schemas.py b/gatekeep/api/openai_schemas.py
+new file mode 100644
+index 0000000..b7d71bc
+--- /dev/null
++++ b/gatekeep/api/openai_schemas.py
+@@ -0,0 +1,69 @@
++from __future__ import annotations
++
++from typing import Any, Literal, Optional, Union
++
++from pydantic import BaseModel
++
++
++class ChatMessage(BaseModel):
++    role: Literal["system", "developer", "user", "assistant", "tool"]
++    content: Union[str, list[dict[str, Any]], None] = None
++    name: Optional[str] = None
++
++
++class ChatCompletionRequest(BaseModel):
++    model_config = {"extra": "allow"}
++
++    model: str
++    messages: list[ChatMessage]
++    max_tokens: Optional[int] = None
++    max_completion_tokens: Optional[int] = None
++    temperature: Optional[float] = None
++    top_p: Optional[float] = None
++    stream: bool = False
++    stop: Union[str, list[str], None] = None
++
++
++class Usage(BaseModel):
++    prompt_tokens: int
++    completion_tokens: int
++    total_tokens: int
++
++
++class ResponseMessage(BaseModel):
++    role: Literal["assistant"] = "assistant"
++    content: Optional[str] = None
++
++
++class Choice(BaseModel):
++    index: int = 0
++    message: ResponseMessage
++    finish_reason: Optional[str] = None
++
++
++class ChatCompletionResponse(BaseModel):
++    id: str
++    object: Literal["chat.completion"] = "chat.completion"
++    created: int
++    model: str
++    choices: list[Choice]
++    usage: Usage
++
++
++class DeltaMessage(BaseModel):
++    role: Optional[str] = None
++    content: Optional[str] = None
++
++
++class ChunkChoice(BaseModel):
++    index: int = 0
++    delta: DeltaMessage
++    finish_reason: Optional[str] = None
++
++
++class ChatCompletionChunk(BaseModel):
++    id: str
++    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
++    created: int
++    model: str
++    choices: list[ChunkChoice]
+diff --git a/gatekeep/api/translation.py b/gatekeep/api/translation.py
+new file mode 100644
+index 0000000..61c8bd1
+--- /dev/null
++++ b/gatekeep/api/translation.py
+@@ -0,0 +1,140 @@
++from __future__ import annotations
++
++import time
++import uuid
++from typing import Any
++
++from gatekeep.api.openai_schemas import (
++    ChatCompletionChunk,
++    ChatCompletionRequest,
++    ChatCompletionResponse,
++    Choice,
++    ChunkChoice,
++    DeltaMessage,
++    ResponseMessage,
++    Usage,
++)
++
++FINISH_REASON_MAP: dict[str, str] = {
++    "end_turn": "stop",
++    "stop_sequence": "stop",
++    "max_tokens": "length",
++    "tool_use": "tool_calls",
++    "refusal": "content_filter",
++}
++
++
++class TranslationError(ValueError):
++    """Raised when an OpenAI request cannot be mapped to Anthropic."""
++
++
++def _extract_text(content: Any) -> str:
++    if content is None:
++        return ""
++    if isinstance(content, str):
++        return content
++    parts: list[str] = []
++    for part in content:
++        if isinstance(part, dict) and part.get("type") == "text":
++            parts.append(part.get("text", ""))
++    return "".join(parts)
++
++
++def resolve_model(requested: str, *, default_model: str, aliases: dict[str, str]) -> str:
++    if requested in aliases:
++        return aliases[requested]
++    if requested.startswith("claude-"):
++        return requested
++    return default_model
++
++
++def openai_to_anthropic(
++    req: ChatCompletionRequest,
++    *,
++    default_max_tokens: int,
++    default_model: str,
++    model_aliases: dict[str, str],
++) -> dict[str, Any]:
++    system_parts: list[str] = []
++    messages: list[dict[str, str]] = []
++    for msg in req.messages:
++        text = _extract_text(msg.content)
++        if msg.role in ("system", "developer"):
++            if text:
++                system_parts.append(text)
++        elif msg.role in ("user", "assistant"):
++            messages.append({"role": msg.role, "content": text})
++        else:  # "tool" and anything else
++            raise TranslationError(f"unsupported message role in v1: {msg.role}")
++
++    if not messages:
++        raise TranslationError("request must contain at least one user or assistant message")
++
++    payload: dict[str, Any] = {
++        "model": resolve_model(req.model, default_model=default_model, aliases=model_aliases),
++        "messages": messages,
++        "max_tokens": req.max_tokens or req.max_completion_tokens or default_max_tokens,
++    }
++    if system_parts:
++        payload["system"] = "\n\n".join(system_parts)
++    if req.stop:
++        payload["stop_sequences"] = [req.stop] if isinstance(req.stop, str) else list(req.stop)
++    # temperature/top_p/top_k intentionally omitted (rejected by Sonnet 5 / Opus 4.8).
++    return payload
++
++
++def new_completion_id() -> str:
++    return "chatcmpl-" + uuid.uuid4().hex
++
++
++def result_to_openai(result: Any, *, model: str) -> ChatCompletionResponse:
++    return ChatCompletionResponse(
++        id=new_completion_id(),
++        created=int(time.time()),
++        model=model,
++        choices=[
++            Choice(
++                index=0,
++                message=ResponseMessage(content=result.text),
++                finish_reason=FINISH_REASON_MAP.get(result.stop_reason, "stop"),
++            )
++        ],
++        usage=Usage(
++            prompt_tokens=result.input_tokens,
++            completion_tokens=result.output_tokens,
++            total_tokens=result.input_tokens + result.output_tokens,
++        ),
++    )
++
++
++def role_chunk(*, id: str, created: int, model: str) -> ChatCompletionChunk:
++    return ChatCompletionChunk(
++        id=id,
++        created=created,
++        model=model,
++        choices=[ChunkChoice(index=0, delta=DeltaMessage(role="assistant"))],
++    )
++
++
++def text_chunk(text: str, *, id: str, created: int, model: str) -> ChatCompletionChunk:
++    return ChatCompletionChunk(
++        id=id,
++        created=created,
++        model=model,
++        choices=[ChunkChoice(index=0, delta=DeltaMessage(content=text))],
++    )
++
++
++def final_chunk(stop_reason: str | None, *, id: str, created: int, model: str) -> ChatCompletionChunk:
++    return ChatCompletionChunk(
++        id=id,
++        created=created,
++        model=model,
++        choices=[
++            ChunkChoice(
++                index=0,
++                delta=DeltaMessage(),
++                finish_reason=FINISH_REASON_MAP.get(stop_reason, "stop"),
++            )
++        ],
++    )
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+new file mode 100644
+index 0000000..7fbe3cc
+--- /dev/null
++++ b/gatekeep/app.py
+@@ -0,0 +1,94 @@
++from __future__ import annotations
++
++import time
++
++from anthropic import AsyncAnthropic
++from fastapi import Depends, FastAPI
++from fastapi.responses import JSONResponse, StreamingResponse
++
++from gatekeep.api.errors import map_anthropic_error, openai_error
++from gatekeep.api.openai_schemas import ChatCompletionRequest
++from gatekeep.api.translation import (
++    TranslationError,
++    final_chunk,
++    new_completion_id,
++    openai_to_anthropic,
++    result_to_openai,
++    role_chunk,
++    text_chunk,
++)
++from gatekeep.config import get_settings
++from gatekeep.middleware.auth import require_api_key
++from gatekeep.providers.anthropic import AnthropicProvider, StreamEnd, TextDelta
++
++app = FastAPI(title="gatekeep")
++
++
++def get_provider() -> AnthropicProvider:
++    settings = get_settings()
++    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
++    return AnthropicProvider(client)
++
++
++@app.get("/healthz")
++async def healthz() -> dict[str, str]:
++    return {"status": "ok"}
++
++
++@app.post("/v1/chat/completions")
++async def chat_completions(
++    req: ChatCompletionRequest,
++    _key=Depends(require_api_key),
++    provider: AnthropicProvider = Depends(get_provider),
++):
++    settings = get_settings()
++    try:
++        payload = openai_to_anthropic(
++            req,
++            default_max_tokens=settings.default_max_tokens,
++            default_model=settings.default_model,
++            model_aliases=settings.model_aliases,
++        )
++    except TranslationError as exc:
++        return openai_error(400, str(exc), "invalid_request_error")
++
++    model = payload["model"]
++
++    if req.stream:
++        return StreamingResponse(
++            _sse(provider, payload, model),
++            media_type="text/event-stream",
++        )
++
++    try:
++        result = await provider.complete(payload)
++    except Exception as exc:  # anthropic.APIError and friends
++        return map_anthropic_error(exc)
++    return JSONResponse(content=result_to_openai(result, model=model).model_dump())
++
++
++async def _sse(provider: AnthropicProvider, payload: dict, model: str):
++    completion_id = new_completion_id()
++    created = int(time.time())
++    yield _event(role_chunk(id=completion_id, created=created, model=model))
++    try:
++        async for ev in provider.stream(payload):
++            if isinstance(ev, TextDelta):
++                yield _event(text_chunk(ev.text, id=completion_id, created=created, model=model))
++            elif isinstance(ev, StreamEnd):
++                yield _event(
++                    final_chunk(ev.stop_reason, id=completion_id, created=created, model=model)
++                )
++    except Exception as exc:  # surface upstream errors inside the stream
++        yield f'data: {{"error": {{"message": {_json(str(exc))}, "type": "upstream_error"}}}}\n\n'
++    yield "data: [DONE]\n\n"
++
++
++def _event(chunk) -> str:
++    return f"data: {chunk.model_dump_json()}\n\n"
++
++
++def _json(s: str) -> str:
++    import json
++
++    return json.dumps(s)
+diff --git a/gatekeep/auth_keys.py b/gatekeep/auth_keys.py
+new file mode 100644
+index 0000000..4272cc9
+--- /dev/null
++++ b/gatekeep/auth_keys.py
+@@ -0,0 +1,12 @@
++from __future__ import annotations
++
++import hashlib
++import secrets
++
++
++def generate_key() -> str:
++    return "gk-" + secrets.token_urlsafe(32)
++
++
++def hash_key(raw: str) -> str:
++    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+diff --git a/gatekeep/config.py b/gatekeep/config.py
+new file mode 100644
+index 0000000..6a0c8ce
+--- /dev/null
++++ b/gatekeep/config.py
+@@ -0,0 +1,29 @@
++from __future__ import annotations
++
++from functools import lru_cache
++
++from pydantic import Field
++from pydantic_settings import BaseSettings, SettingsConfigDict
++
++
++class Settings(BaseSettings):
++    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
++
++    database_url: str
++    redis_url: str
++    anthropic_api_key: str
++    default_model: str = "claude-sonnet-5"
++    default_max_tokens: int = 4096
++    model_aliases: dict[str, str] = Field(
++        default_factory=lambda: {
++            "gpt-4": "claude-sonnet-5",
++            "gpt-4o": "claude-sonnet-5",
++            "gpt-4o-mini": "claude-haiku-4-5",
++            "gpt-3.5-turbo": "claude-haiku-4-5",
++        }
++    )
++
++
++@lru_cache
++def get_settings() -> Settings:
++    return Settings()
+diff --git a/gatekeep/db.py b/gatekeep/db.py
+new file mode 100644
+index 0000000..4bbed0e
+--- /dev/null
++++ b/gatekeep/db.py
+@@ -0,0 +1,25 @@
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++
++from sqlalchemy.ext.asyncio import (
++    AsyncSession,
++    async_sessionmaker,
++    create_async_engine,
++)
++from sqlalchemy.orm import DeclarativeBase
++
++from gatekeep.config import get_settings
++
++
++class Base(DeclarativeBase):
++    pass
++
++
++engine = create_async_engine(get_settings().database_url, future=True)
++SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
++
++
++async def get_session() -> AsyncIterator[AsyncSession]:
++    async with SessionLocal() as session:
++        yield session
+diff --git a/gatekeep/middleware/__init__.py b/gatekeep/middleware/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/gatekeep/middleware/auth.py b/gatekeep/middleware/auth.py
+new file mode 100644
+index 0000000..77ee65e
+--- /dev/null
++++ b/gatekeep/middleware/auth.py
+@@ -0,0 +1,43 @@
++from __future__ import annotations
++
++from fastapi import Depends, Header, HTTPException
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from gatekeep.auth_keys import hash_key
++from gatekeep.db import get_session
++from gatekeep.models import ApiKey
++
++
++def extract_bearer(authorization: str | None, x_api_key: str | None) -> str | None:
++    if authorization:
++        prefix = "Bearer "
++        if authorization.startswith(prefix):
++            return authorization[len(prefix):].strip()
++        return authorization.strip()
++    if x_api_key:
++        return x_api_key.strip()
++    return None
++
++
++def _unauthorized(message: str) -> HTTPException:
++    return HTTPException(
++        status_code=401,
++        detail={"error": {"message": message, "type": "authentication_error", "code": None}},
++    )
++
++
++async def require_api_key(
++    authorization: str | None = Header(default=None),
++    x_api_key: str | None = Header(default=None, alias="x-api-key"),
++    session: AsyncSession = Depends(get_session),
++) -> ApiKey:
++    raw = extract_bearer(authorization, x_api_key)
++    if not raw:
++        raise _unauthorized("Missing API key. Provide 'Authorization: Bearer <key>'.")
++    row = (
++        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw)))
++    ).scalar_one_or_none()
++    if row is None or not row.active:
++        raise _unauthorized("Invalid or inactive API key.")
++    return row
+diff --git a/gatekeep/models.py b/gatekeep/models.py
+new file mode 100644
+index 0000000..4593e4b
+--- /dev/null
++++ b/gatekeep/models.py
+@@ -0,0 +1,24 @@
++from __future__ import annotations
++
++from datetime import datetime, timezone
++
++from sqlalchemy import Boolean, DateTime, Integer, String
++from sqlalchemy.orm import Mapped, mapped_column
++
++from gatekeep.db import Base
++
++
++def _utcnow() -> datetime:
++    return datetime.now(timezone.utc)
++
++
++class ApiKey(Base):
++    __tablename__ = "api_keys"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True)
++    name: Mapped[str] = mapped_column(String(255), nullable=False)
++    key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
++    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), nullable=False, default=_utcnow
++    )
+diff --git a/gatekeep/providers/__init__.py b/gatekeep/providers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/gatekeep/providers/anthropic.py b/gatekeep/providers/anthropic.py
+new file mode 100644
+index 0000000..4f6eb4e
+--- /dev/null
++++ b/gatekeep/providers/anthropic.py
+@@ -0,0 +1,58 @@
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++from dataclasses import dataclass
++from typing import Any
++
++
++@dataclass
++class CompletionResult:
++    text: str
++    input_tokens: int
++    output_tokens: int
++    stop_reason: str | None
++
++
++@dataclass
++class TextDelta:
++    text: str
++
++
++@dataclass
++class StreamEnd:
++    stop_reason: str | None
++    input_tokens: int
++    output_tokens: int
++
++
++class AnthropicProvider:
++    """Thin async wrapper over the Anthropic SDK client.
++
++    The client is injected so the mapping is testable with a fake.
++    """
++
++    def __init__(self, client: Any) -> None:
++        self._client = client
++
++    async def complete(self, payload: dict[str, Any]) -> CompletionResult:
++        message = await self._client.messages.create(**payload)
++        text = "".join(
++            block.text for block in message.content if getattr(block, "type", None) == "text"
++        )
++        return CompletionResult(
++            text=text,
++            input_tokens=message.usage.input_tokens,
++            output_tokens=message.usage.output_tokens,
++            stop_reason=message.stop_reason,
++        )
++
++    async def stream(self, payload: dict[str, Any]) -> AsyncIterator[TextDelta | StreamEnd]:
++        async with self._client.messages.stream(**payload) as stream:
++            async for text in stream.text_stream:
++                yield TextDelta(text=text)
++            final = await stream.get_final_message()
++            yield StreamEnd(
++                stop_reason=final.stop_reason,
++                input_tokens=final.usage.input_tokens,
++                output_tokens=final.usage.output_tokens,
++            )
+diff --git a/migrations/env.py b/migrations/env.py
+new file mode 100644
+index 0000000..7e4e285
+--- /dev/null
++++ b/migrations/env.py
+@@ -0,0 +1,47 @@
++from logging.config import fileConfig
++
++from alembic import context
++from sqlalchemy import engine_from_config, pool
++
++from gatekeep.config import get_settings
++from gatekeep.db import Base
++import gatekeep.models  # noqa: F401  (register tables)
++
++config = context.config
++
++# Alembic runs synchronously; convert the async URL to a sync psycopg2 one.
++sync_url = get_settings().database_url.replace("+asyncpg", "")
++config.set_main_option("sqlalchemy.url", sync_url)
++
++if config.config_file_name is not None:
++    fileConfig(config.config_file_name)
++
++target_metadata = Base.metadata
++
++
++def run_migrations_offline() -> None:
++    context.configure(
++        url=config.get_main_option("sqlalchemy.url"),
++        target_metadata=target_metadata,
++        literal_binds=True,
++    )
++    with context.begin_transaction():
++        context.run_migrations()
++
++
++def run_migrations_online() -> None:
++    connectable = engine_from_config(
++        config.get_section(config.config_ini_section, {}),
++        prefix="sqlalchemy.",
++        poolclass=pool.NullPool,
++    )
++    with connectable.connect() as connection:
++        context.configure(connection=connection, target_metadata=target_metadata)
++        with context.begin_transaction():
++            context.run_migrations()
++
++
++if context.is_offline_mode():
++    run_migrations_offline()
++else:
++    run_migrations_online()
+diff --git a/migrations/versions/0001_api_keys.py b/migrations/versions/0001_api_keys.py
+new file mode 100644
+index 0000000..29ce042
+--- /dev/null
++++ b/migrations/versions/0001_api_keys.py
+@@ -0,0 +1,34 @@
++"""api_keys table
++
++Revision ID: 0001
++Revises:
++Create Date: 2026-07-05
++"""
++
++import sqlalchemy as sa
++from alembic import op
++
++revision = "0001"
++down_revision = None
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "api_keys",
++        sa.Column("id", sa.Integer(), primary_key=True),
++        sa.Column("name", sa.String(length=255), nullable=False),
++        sa.Column("key_hash", sa.String(length=64), nullable=False, unique=True),
++        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.true()),
++        sa.Column(
++            "created_at",
++            sa.DateTime(timezone=True),
++            nullable=False,
++            server_default=sa.func.now(),
++        ),
++    )
++
++
++def downgrade() -> None:
++    op.drop_table("api_keys")
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..f88d8b5
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,35 @@
++[project]
++name = "gatekeep"
++version = "0.1.0"
++description = "Self-hosted OpenAI-compatible LLM gateway with prompt-eval gating"
++requires-python = ">=3.11"
++dependencies = [
++    "fastapi>=0.115",
++    "uvicorn[standard]>=0.30",
++    "sqlalchemy[asyncio]>=2.0",
++    "asyncpg>=0.29",
++    "alembic>=1.13",
++    "pydantic>=2.7",
++    "pydantic-settings>=2.3",
++    "anthropic>=0.40",
++    "redis>=5.0",
++]
++
++[project.optional-dependencies]
++dev = [
++    "pytest>=8.2",
++    "pytest-asyncio>=0.24",
++    "httpx>=0.27",
++    "psycopg2-binary>=2.9",
++]
++
++[build-system]
++requires = ["setuptools>=68"]
++build-backend = "setuptools.build_meta"
++
++[tool.setuptools.packages.find]
++include = ["gatekeep*"]
++
++[tool.pytest.ini_options]
++asyncio_mode = "auto"
++asyncio_default_fixture_loop_scope = "function"
+diff --git a/scripts/create_key.py b/scripts/create_key.py
+new file mode 100644
+index 0000000..898a256
+--- /dev/null
++++ b/scripts/create_key.py
+@@ -0,0 +1,26 @@
++"""Insert an API key and print the raw key exactly once.
++
++Usage: python scripts/create_key.py "my client name"
++"""
++
++import asyncio
++import sys
++
++from gatekeep.auth_keys import generate_key, hash_key
++from gatekeep.db import SessionLocal
++from gatekeep.models import ApiKey
++
++
++async def main(name: str) -> None:
++    raw = generate_key()
++    async with SessionLocal() as session:
++        session.add(ApiKey(name=name, key_hash=hash_key(raw)))
++        await session.commit()
++    print(raw)
++
++
++if __name__ == "__main__":
++    if len(sys.argv) != 2:
++        print('usage: python scripts/create_key.py "client name"', file=sys.stderr)
++        raise SystemExit(1)
++    asyncio.run(main(sys.argv[1]))
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/conftest.py b/tests/conftest.py
+new file mode 100644
+index 0000000..b1c6337
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,31 @@
++import pytest_asyncio
++from sqlalchemy import text
++
++from gatekeep.db import Base, SessionLocal, engine
++
++
++@pytest_asyncio.fixture(autouse=True)
++async def _create_schema():
++    # Import models so their tables register on Base.metadata.
++    import gatekeep.models  # noqa: F401
++
++    async with engine.begin() as conn:
++        await conn.run_sync(Base.metadata.drop_all)
++        await conn.run_sync(Base.metadata.create_all)
++    yield
++    async with engine.begin() as conn:
++        await conn.run_sync(Base.metadata.drop_all)
++    await engine.dispose()
++
++
++@pytest_asyncio.fixture
++async def session():
++    async with SessionLocal() as s:
++        yield s
++
++
++@pytest_asyncio.fixture
++async def db_ping():
++    async with SessionLocal() as s:
++        result = await s.execute(text("SELECT 1"))
++        return result.scalar_one()
+diff --git a/tests/test_auth.py b/tests/test_auth.py
+new file mode 100644
+index 0000000..469fe7a
+--- /dev/null
++++ b/tests/test_auth.py
+@@ -0,0 +1,72 @@
++import json
++
++import pytest
++from fastapi import HTTPException
++
++from gatekeep.api.errors import map_anthropic_error
++from gatekeep.auth_keys import generate_key, hash_key
++from gatekeep.middleware.auth import extract_bearer, require_api_key
++from gatekeep.models import ApiKey
++
++
++def test_extract_bearer_prefers_authorization():
++    assert extract_bearer("Bearer abc", None) == "abc"
++    assert extract_bearer(None, "xyz") == "xyz"
++    assert extract_bearer(None, None) is None
++
++
++async def test_require_api_key_accepts_valid(session):
++    raw = generate_key()
++    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
++    await session.commit()
++
++    key = await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
++    assert key.name == "c"
++
++
++async def test_require_api_key_rejects_missing(session):
++    with pytest.raises(HTTPException) as ei:
++        await require_api_key(authorization=None, x_api_key=None, session=session)
++    assert ei.value.status_code == 401
++    assert ei.value.detail["error"]["type"] == "authentication_error"
++
++
++async def test_require_api_key_rejects_unknown(session):
++    with pytest.raises(HTTPException) as ei:
++        await require_api_key(authorization="Bearer nope", x_api_key=None, session=session)
++    assert ei.value.status_code == 401
++    assert ei.value.detail["error"]["type"] == "authentication_error"
++
++
++async def test_require_api_key_rejects_inactive(session):
++    raw = generate_key()
++    session.add(ApiKey(name="c", key_hash=hash_key(raw), active=False))
++    await session.commit()
++    with pytest.raises(HTTPException) as ei:
++        await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
++    assert ei.value.status_code == 401
++    assert ei.value.detail["error"]["type"] == "authentication_error"
++
++
++def test_map_anthropic_error_with_status_and_message():
++    class FakeAnthropicError(Exception):
++        def __init__(self, status_code, message):
++            super().__init__(message)
++            self.status_code = status_code
++            self.message = message
++
++    exc = FakeAnthropicError(429, "rate limited")
++    response = map_anthropic_error(exc)
++    assert response.status_code == 429
++    body = json.loads(response.body)
++    assert body["error"]["message"] == "rate limited"
++    assert body["error"]["type"] == "upstream_error"
++
++
++def test_map_anthropic_error_fallback_defaults():
++    exc = Exception("boom")
++    response = map_anthropic_error(exc)
++    assert response.status_code == 502
++    body = json.loads(response.body)
++    assert body["error"]["message"] == "boom"
++    assert body["error"]["type"] == "upstream_error"
+diff --git a/tests/test_config.py b/tests/test_config.py
+new file mode 100644
+index 0000000..5374ac8
+--- /dev/null
++++ b/tests/test_config.py
+@@ -0,0 +1,23 @@
++import gatekeep.config as config_module
++from gatekeep.config import Settings, get_settings
++
++
++def test_settings_reads_env(monkeypatch):
++    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
++    monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
++    get_settings.cache_clear()
++    s = get_settings()
++    assert isinstance(s, Settings)
++    assert s.database_url.endswith("/db")
++    assert s.default_model == "claude-sonnet-5"
++    assert s.default_max_tokens == 4096
++
++
++def test_unknown_model_alias_default(monkeypatch):
++    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
++    monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
++    get_settings.cache_clear()
++    s = get_settings()
++    assert s.model_aliases["gpt-4"] == "claude-sonnet-5"
+diff --git a/tests/test_db.py b/tests/test_db.py
+new file mode 100644
+index 0000000..28aa225
+--- /dev/null
++++ b/tests/test_db.py
+@@ -0,0 +1,2 @@
++async def test_database_reachable(db_ping):
++    assert db_ping == 1
+diff --git a/tests/test_endpoint.py b/tests/test_endpoint.py
+new file mode 100644
+index 0000000..941d8b8
+--- /dev/null
++++ b/tests/test_endpoint.py
+@@ -0,0 +1,86 @@
++import httpx
++import pytest_asyncio
++from httpx import ASGITransport
++
++from gatekeep.app import app, get_provider
++from gatekeep.auth_keys import generate_key, hash_key
++from gatekeep.models import ApiKey
++from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
++
++
++class FakeProvider:
++    async def complete(self, payload):
++        assert "temperature" not in payload
++        return CompletionResult(text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn")
++
++    async def stream(self, payload):
++        for t in ["po", "ng"]:
++            yield TextDelta(text=t)
++        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
++
++
++@pytest_asyncio.fixture
++async def raw_key(session):
++    raw = generate_key()
++    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
++    await session.commit()
++    return raw
++
++
++@pytest_asyncio.fixture
++async def client():
++    app.dependency_overrides[get_provider] = lambda: FakeProvider()
++    transport = ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
++        yield c
++    app.dependency_overrides.clear()
++
++
++async def test_healthz(client):
++    r = await client.get("/healthz")
++    assert r.status_code == 200
++    assert r.json() == {"status": "ok"}
++
++
++async def test_requires_auth(client):
++    r = await client.post(
++        "/v1/chat/completions",
++        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
++    )
++    assert r.status_code == 401
++
++
++async def test_non_streaming_completion(client, raw_key):
++    r = await client.post(
++        "/v1/chat/completions",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "gpt-4o",
++            "temperature": 0.7,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    )
++    assert r.status_code == 200
++    body = r.json()
++    assert body["object"] == "chat.completion"
++    assert body["choices"][0]["message"]["content"] == "pong"
++    assert body["usage"]["total_tokens"] == 4
++
++
++async def test_streaming_completion(client, raw_key):
++    async with client.stream(
++        "POST",
++        "/v1/chat/completions",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "gpt-4o",
++            "stream": True,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    ) as r:
++        assert r.status_code == 200
++        chunks = [line async for line in r.aiter_lines()]
++    text = "".join(chunks)
++    assert "chat.completion.chunk" in text
++    assert '"content":"po"' in text
++    assert "[DONE]" in text
+diff --git a/tests/test_models.py b/tests/test_models.py
+new file mode 100644
+index 0000000..cbe9662
+--- /dev/null
++++ b/tests/test_models.py
+@@ -0,0 +1,24 @@
++from sqlalchemy import select
++
++from gatekeep.auth_keys import generate_key, hash_key
++from gatekeep.models import ApiKey
++
++
++def test_generate_and_hash_are_stable():
++    raw = generate_key()
++    assert raw.startswith("gk-")
++    assert hash_key(raw) == hash_key(raw)
++    assert hash_key(raw) != hash_key(generate_key())
++
++
++async def test_api_key_persists(session):
++    raw = generate_key()
++    session.add(ApiKey(name="test", key_hash=hash_key(raw)))
++    await session.commit()
++
++    found = (
++        await session.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw)))
++    ).scalar_one()
++    assert found.name == "test"
++    assert found.active is True
++    assert found.created_at is not None
+diff --git a/tests/test_openai_schemas.py b/tests/test_openai_schemas.py
+new file mode 100644
+index 0000000..376d3a9
+--- /dev/null
++++ b/tests/test_openai_schemas.py
+@@ -0,0 +1,31 @@
++from gatekeep.api.openai_schemas import (
++    ChatCompletionRequest,
++    ChatCompletionResponse,
++    Choice,
++    ResponseMessage,
++    Usage,
++)
++
++
++def test_parses_minimal_request():
++    req = ChatCompletionRequest.model_validate(
++        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
++    )
++    assert req.model == "gpt-4o"
++    assert req.stream is False
++    assert req.messages[0].content == "hi"
++
++
++def test_response_serializes_openai_shape():
++    resp = ChatCompletionResponse(
++        id="chatcmpl-x",
++        created=1,
++        model="claude-sonnet-5",
++        choices=[Choice(message=ResponseMessage(content="hello"), finish_reason="stop")],
++        usage=Usage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
++    )
++    data = resp.model_dump()
++    assert data["object"] == "chat.completion"
++    assert data["choices"][0]["message"]["role"] == "assistant"
++    assert data["choices"][0]["finish_reason"] == "stop"
++    assert data["usage"]["total_tokens"] == 4
+diff --git a/tests/test_provider.py b/tests/test_provider.py
+new file mode 100644
+index 0000000..eab636d
+--- /dev/null
++++ b/tests/test_provider.py
+@@ -0,0 +1,93 @@
++from types import SimpleNamespace
++
++from gatekeep.providers.anthropic import (
++    AnthropicProvider,
++    CompletionResult,
++    StreamEnd,
++    TextDelta,
++)
++
++
++class FakeMessages:
++    async def create(self, **payload):
++        return SimpleNamespace(
++            content=[SimpleNamespace(type="text", text="hello world")],
++            usage=SimpleNamespace(input_tokens=5, output_tokens=2),
++            stop_reason="end_turn",
++        )
++
++    def stream(self, **payload):
++        return FakeStream()
++
++
++class FakeStream:
++    async def __aenter__(self):
++        return self
++
++    async def __aexit__(self, *exc):
++        return False
++
++    @property
++    async def text_stream(self):  # not used; iteration below via __aiter__ shim
++        raise NotImplementedError
++
++    def __aiter__(self):
++        raise NotImplementedError
++
++
++class FakeStreamCtx:
++    """Async context manager whose .text_stream yields deltas."""
++
++    def __init__(self):
++        self._deltas = ["hel", "lo"]
++
++    async def __aenter__(self):
++        return self
++
++    async def __aexit__(self, *exc):
++        return False
++
++    @property
++    def text_stream(self):
++        async def gen():
++            for d in self._deltas:
++                yield d
++
++        return gen()
++
++    async def get_final_message(self):
++        return SimpleNamespace(
++            usage=SimpleNamespace(input_tokens=4, output_tokens=2),
++            stop_reason="max_tokens",
++        )
++
++
++class FakeMessagesStreaming(FakeMessages):
++    def stream(self, **payload):
++        return FakeStreamCtx()
++
++
++class FakeClient:
++    def __init__(self, messages):
++        self.messages = messages
++
++
++async def test_complete_returns_normalized_result():
++    provider = AnthropicProvider(FakeClient(FakeMessages()))
++    result = await provider.complete({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})
++    assert isinstance(result, CompletionResult)
++    assert result.text == "hello world"
++    assert result.input_tokens == 5
++    assert result.output_tokens == 2
++    assert result.stop_reason == "end_turn"
++
++
++async def test_stream_yields_deltas_then_end():
++    provider = AnthropicProvider(FakeClient(FakeMessagesStreaming()))
++    events = [e async for e in provider.stream({"model": "claude-sonnet-5", "messages": [], "max_tokens": 10})]
++    deltas = [e for e in events if isinstance(e, TextDelta)]
++    ends = [e for e in events if isinstance(e, StreamEnd)]
++    assert "".join(d.text for d in deltas) == "hello"
++    assert len(ends) == 1
++    assert ends[0].stop_reason == "max_tokens"
++    assert ends[0].output_tokens == 2
+diff --git a/tests/test_translation.py b/tests/test_translation.py
+new file mode 100644
+index 0000000..7f3b5c0
+--- /dev/null
++++ b/tests/test_translation.py
+@@ -0,0 +1,94 @@
++from dataclasses import dataclass
++
++import pytest
++
++from gatekeep.api.openai_schemas import ChatCompletionRequest
++from gatekeep.api.translation import (
++    TranslationError,
++    final_chunk,
++    openai_to_anthropic,
++    resolve_model,
++    result_to_openai,
++    role_chunk,
++    text_chunk,
++)
++
++
++@dataclass
++class FakeResult:
++    text: str
++    input_tokens: int
++    output_tokens: int
++    stop_reason: str | None
++
++
++ALIASES = {"gpt-4o": "claude-sonnet-5"}
++
++
++def _req(**kw):
++    base = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
++    base.update(kw)
++    return ChatCompletionRequest.model_validate(base)
++
++
++def test_resolve_model_alias_passthrough_default():
++    assert resolve_model("gpt-4o", default_model="claude-sonnet-5", aliases=ALIASES) == "claude-sonnet-5"
++    assert resolve_model("claude-opus-4-8", default_model="claude-sonnet-5", aliases=ALIASES) == "claude-opus-4-8"
++    assert resolve_model("mystery", default_model="claude-sonnet-5", aliases=ALIASES) == "claude-sonnet-5"
++
++
++def test_system_message_lifted_and_sampling_dropped():
++    req = _req(
++        messages=[
++            {"role": "system", "content": "be terse"},
++            {"role": "user", "content": "hi"},
++        ],
++        temperature=0.9,
++        top_p=0.5,
++        max_tokens=100,
++    )
++    payload = openai_to_anthropic(
++        req, default_max_tokens=4096, default_model="claude-sonnet-5", model_aliases=ALIASES
++    )
++    assert payload["system"] == "be terse"
++    assert payload["messages"] == [{"role": "user", "content": "hi"}]
++    assert payload["max_tokens"] == 100
++    assert payload["model"] == "claude-sonnet-5"
++    assert "temperature" not in payload
++    assert "top_p" not in payload
++
++
++def test_default_max_tokens_applied():
++    payload = openai_to_anthropic(
++        _req(), default_max_tokens=777, default_model="claude-sonnet-5", model_aliases=ALIASES
++    )
++    assert payload["max_tokens"] == 777
++
++
++def test_no_conversational_message_raises():
++    req = _req(messages=[{"role": "system", "content": "only system"}])
++    with pytest.raises(TranslationError):
++        openai_to_anthropic(
++            req, default_max_tokens=10, default_model="claude-sonnet-5", model_aliases=ALIASES
++        )
++
++
++def test_result_to_openai_maps_usage_and_finish_reason():
++    result = FakeResult(text="hello", input_tokens=3, output_tokens=2, stop_reason="end_turn")
++    resp = result_to_openai(result, model="claude-sonnet-5")
++    assert resp.choices[0].message.content == "hello"
++    assert resp.choices[0].finish_reason == "stop"
++    assert resp.usage.prompt_tokens == 3
++    assert resp.usage.completion_tokens == 2
++    assert resp.usage.total_tokens == 5
++    assert resp.id.startswith("chatcmpl-")
++
++
++def test_stream_chunk_helpers():
++    rc = role_chunk(id="chatcmpl-1", created=1, model="claude-sonnet-5")
++    assert rc.choices[0].delta.role == "assistant"
++    tc = text_chunk("hi", id="chatcmpl-1", created=1, model="claude-sonnet-5")
++    assert tc.choices[0].delta.content == "hi"
++    fc = final_chunk("max_tokens", id="chatcmpl-1", created=1, model="claude-sonnet-5")
++    assert fc.choices[0].finish_reason == "length"
++    assert fc.choices[0].delta.content is None

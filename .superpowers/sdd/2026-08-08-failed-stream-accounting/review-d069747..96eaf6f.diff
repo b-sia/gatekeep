@@ -1,0 +1,108 @@
+# Review package: d069747..96eaf6f
+
+## Commits
+96eaf6f feat(accounting): add estimate_tokens heuristic for failed-stream cost accounting
+
+## Files changed
+ gatekeep/accounting.py   | 23 +++++++++++++++++++++++
+ tests/test_accounting.py | 20 +++++++++++++++++++-
+ 2 files changed, 42 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/gatekeep/accounting.py b/gatekeep/accounting.py
+index 3988f06..6bfb10c 100644
+--- a/gatekeep/accounting.py
++++ b/gatekeep/accounting.py
+@@ -23,20 +23,43 @@ logger = logging.getLogger(__name__)
+ MODEL_PRICING: dict[str, tuple[float, float]] = {
+     "claude-sonnet-5": (2.0, 10.0),
+     "claude-haiku-4-5-20251001": (1.0, 5.0),
+     "gpt-4o": (2.5, 10.0),
+     "gpt-4o-mini": (0.15, 0.6),
+     "gemini-2.5-pro": (1.25, 10.0),
+     "gemini-flash-latest": (1.5, 9.0),  # gemini-3.5-flash pricing as of 2026-07-21
+ }
+ 
+ 
++def estimate_tokens(text: str) -> int:
++    """Estimate a token count for `text` using the ~4-characters-per-token
++    heuristic, matching the proxy limit `gatekeep.embeddings` already uses
++    for the same reason: this codebase has no real tokenizer.
++
++    Used only where an authoritative provider-reported token count is
++    unavailable - a mid-stream provider error or client disconnect never
++    reaches `StreamEnd`, so the failed row's tokens/cost are approximate.
++
++    Rounds up so any non-empty text counts as at least one token; empty
++    text is zero tokens.
++
++    Args:
++        text: The text to estimate a token count for.
++
++    Returns:
++        The estimated token count, always >= 0, and >= 1 for any non-empty text.
++    """
++    if not text:
++        return 0
++    return -(-len(text) // 4)
++
++
+ def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+     """Calculate the USD cost of a completion from its model and token counts.
+ 
+     Looks up per-million-token input/output pricing in MODEL_PRICING; models
+     with no listed pricing (e.g. local Ollama models) are treated as free.
+     """
+     input_price, output_price = MODEL_PRICING.get(model, (0.0, 0.0))
+     return (prompt_tokens / 1_000_000 * input_price) + (
+         completion_tokens / 1_000_000 * output_price
+     )
+diff --git a/tests/test_accounting.py b/tests/test_accounting.py
+index 4ee15dc..fd56121 100644
+--- a/tests/test_accounting.py
++++ b/tests/test_accounting.py
+@@ -1,14 +1,16 @@
++from __future__ import annotations
++
+ import pytest
+ from sqlalchemy import select
+ 
+-from gatekeep.accounting import calculate_cost, log_request
++from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
+ from gatekeep.auth_keys import generate_key, hash_key
+ from gatekeep.models import ApiKey, RequestLog
+ 
+ 
+ def test_calculate_cost_known_model():
+     cost = calculate_cost(
+         "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+     )
+     assert cost == 12.0
+ 
+@@ -193,10 +195,26 @@ async def test_log_request_path_defaults_to_none(session):
+ 
+     log = await log_request(
+         session,
+         key_id=key.id,
+         model="gpt-4o",
+         prompt_tokens=10,
+         completion_tokens=5,
+         response_id="resp-no-path",
+     )
+     assert log.path is None
++
++
++def test_estimate_tokens_empty_string_is_zero():
++    assert estimate_tokens("") == 0
++
++
++def test_estimate_tokens_rounds_up_to_at_least_one_token():
++    assert estimate_tokens("hi") == 1
++
++
++def test_estimate_tokens_matches_four_chars_per_token_on_exact_multiples():
++    assert estimate_tokens("a" * 8) == 2
++
++
++def test_estimate_tokens_rounds_up_on_a_partial_final_token():
++    assert estimate_tokens("a" * 9) == 3

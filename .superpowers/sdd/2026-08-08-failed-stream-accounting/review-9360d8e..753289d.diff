@@ -1,0 +1,106 @@
+# Review package: 9360d8e..753289d
+
+## Commits
+753289d feat(dashboard): add success rate stat tile
+
+## Files changed
+ dashboard/src/api/types.ts           |  2 ++
+ dashboard/src/components/StatRow.tsx | 24 +++++++++++++++++-------
+ 2 files changed, 19 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/dashboard/src/api/types.ts b/dashboard/src/api/types.ts
+index d133085..588181f 100644
+--- a/dashboard/src/api/types.ts
++++ b/dashboard/src/api/types.ts
+@@ -15,20 +15,22 @@ export interface UsageSummaryResponse {
+   end: string;
+   request_count: number;
+   total_tokens: number;
+   prompt_tokens: number;
+   completion_tokens: number;
+   cost_usd: number;
+   spend_usd: number;
+   savings_usd: number;
+   cache_hit_count: number;
+   cache_hit_rate: number;
++  failed_count: number;
++  success_rate: number;
+   by_model: UsageBreakdownRow[];
+   by_key: UsageBreakdownRow[];
+   by_prompt: UsageBreakdownRow[];
+ }
+ 
+ /** One bucket of a usage timeseries (requests/cache hits/cost/tokens within
+  * a single minute, hour, or day interval). */
+ export interface TimeseriesBucket {
+   bucket_start: string;
+   request_count: number;
+diff --git a/dashboard/src/components/StatRow.tsx b/dashboard/src/components/StatRow.tsx
+index 669073f..3da5479 100644
+--- a/dashboard/src/components/StatRow.tsx
++++ b/dashboard/src/components/StatRow.tsx
+@@ -23,32 +23,37 @@ function StatCard({ label, value, context }: { label: string; value: string; con
+     </div>
+   );
+ }
+ 
+ /** Row of headline stat tiles (requests, cost, tokens, savings, cache hit rate) for
+  * the current filter selection. Renders loading placeholders until
+  * `summary` is available. */
+ export default function StatRow({ summary }: StatRowProps) {
+   if (!summary) {
+     return (
+-      <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-5">
+-        {["Requests", "Total cost", "Total tokens", "Total savings", "Cache hit rate"].map(
+-          (label) => (
+-            <StatCard key={label} label={label} value="-" context="Loading..." />
+-          ),
+-        )}
++      <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-6">
++        {[
++          "Requests",
++          "Total cost",
++          "Total tokens",
++          "Total savings",
++          "Cache hit rate",
++          "Success rate",
++        ].map((label) => (
++          <StatCard key={label} label={label} value="-" context="Loading..." />
++        ))}
+       </div>
+     );
+   }
+ 
+   return (
+-    <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-5">
++    <div className="grid grid-cols-1 gap-4 px-6 py-4 sm:grid-cols-2 lg:grid-cols-6">
+       <StatCard
+         label="Requests"
+         value={summary.request_count.toLocaleString()}
+         context={`${summary.cache_hit_count} cache hits`}
+       />
+       <StatCard label="Total cost" value={formatUsd(summary.cost_usd)} context="Across all models" />
+       <StatCard
+         label="Total tokens"
+         value={formatTokens(summary.total_tokens)}
+         context={`${formatTokens(summary.prompt_tokens)} in / ${formatTokens(summary.completion_tokens)} out`}
+@@ -56,13 +61,18 @@ export default function StatRow({ summary }: StatRowProps) {
+       <StatCard
+         label="Total savings"
+         value={formatUsd(summary.savings_usd)}
+         context={`${formatUsd(summary.spend_usd)} spent`}
+       />
+       <StatCard
+         label="Cache hit rate"
+         value={`${(summary.cache_hit_rate * 100).toFixed(1)}%`}
+         context="Of total requests"
+       />
++      <StatCard
++        label="Success rate"
++        value={`${(summary.success_rate * 100).toFixed(1)}%`}
++        context={`${summary.failed_count} failed`}
++      />
+     </div>
+   );
+ }

@@ -1,0 +1,203 @@
+# Review package: 5bae837..5d12bfa
+
+## Commits
+5d12bfa feat: fastapi app with /v1/chat/completions (streaming + non-streaming)
+
+## Files changed
+ gatekeep/app.py        | 94 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_endpoint.py | 86 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 180 insertions(+)
+
+## Diff
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+new file mode 100644
+index 0000000..7fbe3cc
+--- /dev/null
++++ b/gatekeep/app.py
+@@ -0,0 +1,94 @@
++from __future__ import annotations
++
++import time
++
++from anthropic import AsyncAnthropic
++from fastapi import Depends, FastAPI
++from fastapi.responses import JSONResponse, StreamingResponse
++
++from gatekeep.api.errors import map_anthropic_error, openai_error
++from gatekeep.api.openai_schemas import ChatCompletionRequest
++from gatekeep.api.translation import (
++    TranslationError,
++    final_chunk,
++    new_completion_id,
++    openai_to_anthropic,
++    result_to_openai,
++    role_chunk,
++    text_chunk,
++)
++from gatekeep.config import get_settings
++from gatekeep.middleware.auth import require_api_key
++from gatekeep.providers.anthropic import AnthropicProvider, StreamEnd, TextDelta
++
++app = FastAPI(title="gatekeep")
++
++
++def get_provider() -> AnthropicProvider:
++    settings = get_settings()
++    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
++    return AnthropicProvider(client)
++
++
++@app.get("/healthz")
++async def healthz() -> dict[str, str]:
++    return {"status": "ok"}
++
++
++@app.post("/v1/chat/completions")
++async def chat_completions(
++    req: ChatCompletionRequest,
++    _key=Depends(require_api_key),
++    provider: AnthropicProvider = Depends(get_provider),
++):
++    settings = get_settings()
++    try:
++        payload = openai_to_anthropic(
++            req,
++            default_max_tokens=settings.default_max_tokens,
++            default_model=settings.default_model,
++            model_aliases=settings.model_aliases,
++        )
++    except TranslationError as exc:
++        return openai_error(400, str(exc), "invalid_request_error")
++
++    model = payload["model"]
++
++    if req.stream:
++        return StreamingResponse(
++            _sse(provider, payload, model),
++            media_type="text/event-stream",
++        )
++
++    try:
++        result = await provider.complete(payload)
++    except Exception as exc:  # anthropic.APIError and friends
++        return map_anthropic_error(exc)
++    return JSONResponse(content=result_to_openai(result, model=model).model_dump())
++
++
++async def _sse(provider: AnthropicProvider, payload: dict, model: str):
++    completion_id = new_completion_id()
++    created = int(time.time())
++    yield _event(role_chunk(id=completion_id, created=created, model=model))
++    try:
++        async for ev in provider.stream(payload):
++            if isinstance(ev, TextDelta):
++                yield _event(text_chunk(ev.text, id=completion_id, created=created, model=model))
++            elif isinstance(ev, StreamEnd):
++                yield _event(
++                    final_chunk(ev.stop_reason, id=completion_id, created=created, model=model)
++                )
++    except Exception as exc:  # surface upstream errors inside the stream
++        yield f'data: {{"error": {{"message": {_json(str(exc))}, "type": "upstream_error"}}}}\n\n'
++    yield "data: [DONE]\n\n"
++
++
++def _event(chunk) -> str:
++    return f"data: {chunk.model_dump_json()}\n\n"
++
++
++def _json(s: str) -> str:
++    import json
++
++    return json.dumps(s)
+diff --git a/tests/test_endpoint.py b/tests/test_endpoint.py
+new file mode 100644
+index 0000000..941d8b8
+--- /dev/null
++++ b/tests/test_endpoint.py
+@@ -0,0 +1,86 @@
++import httpx
++import pytest_asyncio
++from httpx import ASGITransport
++
++from gatekeep.app import app, get_provider
++from gatekeep.auth_keys import generate_key, hash_key
++from gatekeep.models import ApiKey
++from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
++
++
++class FakeProvider:
++    async def complete(self, payload):
++        assert "temperature" not in payload
++        return CompletionResult(text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn")
++
++    async def stream(self, payload):
++        for t in ["po", "ng"]:
++            yield TextDelta(text=t)
++        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
++
++
++@pytest_asyncio.fixture
++async def raw_key(session):
++    raw = generate_key()
++    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
++    await session.commit()
++    return raw
++
++
++@pytest_asyncio.fixture
++async def client():
++    app.dependency_overrides[get_provider] = lambda: FakeProvider()
++    transport = ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
++        yield c
++    app.dependency_overrides.clear()
++
++
++async def test_healthz(client):
++    r = await client.get("/healthz")
++    assert r.status_code == 200
++    assert r.json() == {"status": "ok"}
++
++
++async def test_requires_auth(client):
++    r = await client.post(
++        "/v1/chat/completions",
++        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
++    )
++    assert r.status_code == 401
++
++
++async def test_non_streaming_completion(client, raw_key):
++    r = await client.post(
++        "/v1/chat/completions",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "gpt-4o",
++            "temperature": 0.7,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    )
++    assert r.status_code == 200
++    body = r.json()
++    assert body["object"] == "chat.completion"
++    assert body["choices"][0]["message"]["content"] == "pong"
++    assert body["usage"]["total_tokens"] == 4
++
++
++async def test_streaming_completion(client, raw_key):
++    async with client.stream(
++        "POST",
++        "/v1/chat/completions",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "gpt-4o",
++            "stream": True,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    ) as r:
++        assert r.status_code == 200
++        chunks = [line async for line in r.aiter_lines()]
++    text = "".join(chunks)
++    assert "chat.completion.chunk" in text
++    assert '"content":"po"' in text
++    assert "[DONE]" in text

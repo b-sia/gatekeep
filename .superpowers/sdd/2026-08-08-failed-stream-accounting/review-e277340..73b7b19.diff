@@ -1,0 +1,349 @@
+# Review package: e277340..73b7b19
+
+## Commits
+73b7b19 fix(app): _messages_sse records outcome-tagged accounting on every exit path
+
+## Files changed
+ gatekeep/app.py                 |  98 +++++++++++++++++++++------------
+ tests/test_messages_endpoint.py | 116 ++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 177 insertions(+), 37 deletions(-)
+
+## Diff
+diff --git a/gatekeep/app.py b/gatekeep/app.py
+index 3e1ad8d..58cfe8d 100644
+--- a/gatekeep/app.py
++++ b/gatekeep/app.py
+@@ -786,85 +786,115 @@ async def _messages_sse(
+     key_id: int,
+     prompt_name: str | None = None,
+     routed_from: str | None = None,
+     prompt_version_num: int | None = None,
+     state: dict | None = None,
+ ):
+     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
+ 
+     Emits message_start, content_block_start, a content_block_delta per text
+     delta, content_block_stop, message_delta (carrying the authoritative
+-    final usage and stop_reason), then message_stop. Logs the request via
+-    `log_request` once the stream ends, using its own DB session for the
+-    same reason `_sse` does (the request-scoped session dependency is
+-    already closed by the time this generator keeps running).
++    final usage and stop_reason on a clean finish), then message_stop.
++    Accounting runs in a `finally` block so it fires on every exit path -
++    see `_sse`'s docstring for the full outcome-tagging rationale (`ok` /
++    `provider_error` / `client_disconnect`), which applies identically here.
++
++    Uses its own DB session for the same reason `_sse` does (the
++    request-scoped session dependency is already closed by the time this
++    generator keeps running), and wraps the accounting write in
++    `_run_shielded` for the same cancellation-safety reason.
+ 
+     `state` is `request.scope["state"]`, passed in because the generator runs
+     after the endpoint has returned and can no longer reach the `request`
+     object itself. It doubles as the channel back to the middleware:
+     `StreamTimer.finish()` writes `provider_ms` onto it so the middleware can
+-    derive `gateway_overhead_seconds` once the stream closes. The middleware
+-    still records end-to-end for this request; what the generator adds is
+-    TTFT, inter-token gaps, and time-to-last-token.
++    derive `gateway_overhead_seconds` once the stream closes, on every exit
++    path including a failed one. The middleware still records end-to-end for
++    this request; what the generator adds is TTFT, inter-token gaps, and
++    time-to-last-token.
+     """
+     message_id = new_message_id()
+     timer = StreamTimer(state, model=model)
+-    yield _anthropic_event(
+-        "message_start", message_start_event(id=message_id, model=model)
+-    )
+-    yield _anthropic_event("content_block_start", content_block_start_event())
++
++    outcome = "ok"
++    input_tokens = output_tokens = 0
++    accumulated: list[str] = []
+     try:
++        yield _anthropic_event(
++            "message_start", message_start_event(id=message_id, model=model)
++        )
++        yield _anthropic_event("content_block_start", content_block_start_event())
+         timer.provider_started()
+         async for ev in provider.stream(payload):
+             if isinstance(ev, TextDelta):
+                 timer.delta()
++                accumulated.append(ev.text)
+                 yield _anthropic_event(
+                     "content_block_delta", content_block_delta_event(ev.text)
+                 )
+             elif isinstance(ev, StreamEnd):
++                outcome = "ok"
++                input_tokens, output_tokens = ev.input_tokens, ev.output_tokens
+                 yield _anthropic_event("content_block_stop", content_block_stop_event())
+                 yield _anthropic_event(
+                     "message_delta",
+                     message_delta_event(
+                         stop_reason=reverse_finish_reason(ev.stop_reason),
+                         input_tokens=ev.input_tokens,
+                         output_tokens=ev.output_tokens,
+                     ),
+                 )
+-                timings = timer.finish()
+-                async with SessionLocal() as session:
+-                    await log_request(
+-                        session,
+-                        key_id=key_id,
+-                        model=model,
+-                        prompt_tokens=ev.input_tokens,
+-                        completion_tokens=ev.output_tokens,
+-                        response_id=message_id,
+-                        prompt_name=prompt_name,
+-                        routed_from=routed_from,
+-                        prompt_version_num=prompt_version_num,
+-                        path=_STREAM_PATH,
+-                        duration_ms=timings.duration_ms,
+-                        provider_ms=timings.provider_ms,
+-                        ttft_ms=timings.ttft_ms,
+-                    )
+-                observe_request(
+-                    model=model,
+-                    prompt_tokens=ev.input_tokens,
+-                    completion_tokens=ev.output_tokens,
+-                    cost_usd=calculate_cost(model, ev.input_tokens, ev.output_tokens),
+-                )
++    except (GeneratorExit, asyncio.CancelledError):
++        outcome = "client_disconnect"
++        input_tokens = estimate_tokens(_payload_text(payload))
++        output_tokens = estimate_tokens("".join(accumulated))
++        raise
+     except Exception as exc:  # surface upstream errors inside the stream
++        outcome = "provider_error"
++        input_tokens = estimate_tokens(_payload_text(payload))
++        output_tokens = estimate_tokens("".join(accumulated))
+         yield _anthropic_event(
+             "error",
+             {"type": "error", "error": {"type": "api_error", "message": str(exc)}},
+         )
++    finally:
++        # NEVER yield here - illegal during GeneratorExit.
++        timings = timer.finish(succeeded=(outcome == "ok"))
++        cost_usd = calculate_cost(model, input_tokens, output_tokens)
++
++        async def _record() -> None:
++            async with SessionLocal() as session:
++                await log_request(
++                    session,
++                    key_id=key_id,
++                    model=model,
++                    prompt_tokens=input_tokens,
++                    completion_tokens=output_tokens,
++                    response_id=message_id,
++                    prompt_name=prompt_name,
++                    routed_from=routed_from,
++                    prompt_version_num=prompt_version_num,
++                    path=_STREAM_PATH,
++                    outcome=outcome,
++                    duration_ms=timings.duration_ms,
++                    provider_ms=timings.provider_ms,
++                    ttft_ms=timings.ttft_ms,
++                )
++            observe_request(
++                model=model,
++                prompt_tokens=input_tokens,
++                completion_tokens=output_tokens,
++                cost_usd=cost_usd,
++            )
++
++        await _run_shielded(_record())
++    # Unreachable on the client-disconnect path, same as _sse.
+     yield _anthropic_event("message_stop", message_stop_event())
+ 
+ 
+ def _anthropic_event(event_type: str, data: dict) -> str:
+     """Format one named Anthropic-style SSE event (`event: <type>` line + `data: <json>` line)."""
+     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+ 
+ 
+ async def _run_shielded(coro):
+     """Await `coro` to completion, even if the calling task is cancelled one
+diff --git a/tests/test_messages_endpoint.py b/tests/test_messages_endpoint.py
+index 284b8f7..f810f68 100644
+--- a/tests/test_messages_endpoint.py
++++ b/tests/test_messages_endpoint.py
+@@ -1,10 +1,13 @@
++import asyncio
++import time
++
+ import httpx
+ import pytest
+ import pytest_asyncio
+ from httpx import ASGITransport
+ from sqlalchemy import select
+ 
+ import gatekeep.app as app_module
+ from gatekeep.app import app
+ from gatekeep.auth_keys import generate_key, hash_key
+ from gatekeep.middleware.ratelimit import get_redis
+@@ -50,20 +53,43 @@ async def raw_key(session):
+ @pytest_asyncio.fixture
+ async def client(monkeypatch):
+     fake = FakeProvider()
+     monkeypatch.setitem(app_module._providers, "anthropic", fake)
+     monkeypatch.setitem(app_module._providers, "ollama", fake)
+     transport = ASGITransport(app=app)
+     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+         yield c
+ 
+ 
++class MidStreamFailureProvider:
++    """Yields some deltas, then raises - mirrors test_endpoint.py's provider
++    of the same name for the Anthropic-shaped streaming path."""
++
++    async def complete(self, payload):
++        raise RuntimeError("upstream exploded mid non-stream")
++
++    async def stream(self, payload):
++        yield TextDelta(text="po")
++        yield TextDelta(text="ng")
++        raise RuntimeError("upstream exploded mid-stream")
++
++
++@pytest_asyncio.fixture
++async def mid_stream_failure_client(monkeypatch):
++    failing = MidStreamFailureProvider()
++    monkeypatch.setitem(app_module._providers, "anthropic", failing)
++    monkeypatch.setitem(app_module._providers, "ollama", failing)
++    transport = ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
++        yield c
++
++
+ async def test_non_streaming_message(client, raw_key):
+     r = await client.post(
+         "/v1/messages",
+         headers={"Authorization": f"Bearer {raw_key}"},
+         json={
+             "model": "claude-sonnet-5",
+             "max_tokens": 50,
+             "messages": [{"role": "user", "content": "ping"}],
+         },
+     )
+@@ -295,23 +321,21 @@ async def test_messages_streaming_records_ttft(client, raw_key, session):
+     ) as response:
+         assert response.status_code == 200
+         async for _ in response.aiter_lines():
+             pass
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.ttft_ms is not None
+     assert log.duration_ms is not None
+     assert log.ttft_ms <= log.duration_ms
+ 
+ 
+-async def test_messages_non_streaming_records_provider_path(
+-    client, raw_key, session
+-):
++async def test_messages_non_streaming_records_provider_path(client, raw_key, session):
+     response = await client.post(
+         "/v1/messages",
+         headers={"Authorization": f"Bearer {raw_key}"},
+         json={
+             "model": "claude-sonnet-5",
+             "max_tokens": 16,
+             "messages": [{"role": "user", "content": "ping"}],
+         },
+     )
+     assert response.status_code == 200
+@@ -329,10 +353,96 @@ async def test_messages_streaming_records_stream_path(client, raw_key, session):
+             "max_tokens": 16,
+             "messages": [{"role": "user", "content": "ping"}],
+             "stream": True,
+         },
+     ) as response:
+         assert response.status_code == 200
+         async for _ in response.aiter_lines():
+             pass
+     log = (await session.execute(select(RequestLog))).scalars().one()
+     assert log.path == "stream"
++
++
++async def test_provider_error_mid_stream_logs_failed_row_with_estimated_tokens(
++    mid_stream_failure_client, raw_key, session
++):
++    async with mid_stream_failure_client.stream(
++        "POST",
++        "/v1/messages",
++        headers={"Authorization": f"Bearer {raw_key}"},
++        json={
++            "model": "claude-sonnet-5",
++            "max_tokens": 50,
++            "stream": True,
++            "messages": [{"role": "user", "content": "ping"}],
++        },
++    ) as r:
++        assert r.status_code == 200
++        body = b"".join([chunk async for chunk in r.aiter_bytes()]).decode()
++    assert "event: error" in body
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "provider_error"
++    assert log.completion_tokens == 1  # "po" + "ng" -> ceil(4/4)
++    assert log.prompt_tokens > 0
++    assert log.cost_usd > 0
++    assert log.duration_ms is not None
++    assert log.provider_ms is not None
++
++
++async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
++    key = ApiKey(name="messages-disconnect-test", key_hash=hash_key(generate_key()))
++    session.add(key)
++    await session.commit()
++    await session.refresh(key)
++
++    state = {"started_at": time.perf_counter()}
++    gen = app_module._messages_sse(
++        FakeProvider(),
++        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
++        "claude-sonnet-5",
++        key_id=key.id,
++        state=state,
++    )
++    await gen.__anext__()  # message_start
++    await gen.__anext__()  # content_block_start
++    await gen.__anext__()  # first content_block_delta, "po"
++
++    with pytest.raises(asyncio.CancelledError):
++        await gen.athrow(asyncio.CancelledError())
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "client_disconnect"
++    assert log.completion_tokens == 1
++    assert log.prompt_tokens > 0
++    assert log.duration_ms is not None
++
++
++async def test_client_disconnect_before_first_token_has_null_duration(session, raw_key):
++    """Cancelling right after the very first yield (message_start, before
++    content_block_start or any delta) must still be caught by the try block
++    and log a row - this is the same boundary condition Task 5 found a bug
++    at for _sse, fixed the same way here."""
++    key = ApiKey(
++        name="messages-disconnect-early-test", key_hash=hash_key(generate_key())
++    )
++    session.add(key)
++    await session.commit()
++    await session.refresh(key)
++
++    state = {"started_at": time.perf_counter()}
++    gen = app_module._messages_sse(
++        FakeProvider(),
++        {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
++        "claude-sonnet-5",
++        key_id=key.id,
++        state=state,
++    )
++    await gen.__anext__()  # message_start only - no content_block_start yet
++
++    with pytest.raises(asyncio.CancelledError):
++        await gen.athrow(asyncio.CancelledError())
++
++    log = (await session.execute(select(RequestLog))).scalars().one()
++    assert log.outcome == "client_disconnect"
++    assert log.completion_tokens == 0
++    assert log.duration_ms is None

@@ -1,0 +1,183 @@
+# Review package: 01fd6e5..9360d8e
+
+## Commits
+9360d8e feat(dashboard): add failed_count/success_rate to usage summary
+
+## Files changed
+ gatekeep/api/dashboard.py | 16 ++++++++++++++++
+ tests/test_dashboard.py   | 31 +++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+## Diff
+diff --git a/gatekeep/api/dashboard.py b/gatekeep/api/dashboard.py
+index 538a199..333a203 100644
+--- a/gatekeep/api/dashboard.py
++++ b/gatekeep/api/dashboard.py
+@@ -16,20 +16,21 @@ from gatekeep.models import (
+     EvalSuite,
+     Prompt,
+     PromptVersion,
+     RequestLog,
+ )
+ from gatekeep.prompts import PromptNotFoundError, _get_prompt_row
+ 
+ router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
+ 
+ _NO_PROMPT_LABEL = "(none)"
++_FAILED_OUTCOMES = ("provider_error", "client_disconnect")
+ 
+ 
+ def _default_window() -> tuple[datetime, datetime]:
+     """Return a (start, end) pair spanning the trailing 7 days up to now (UTC).
+ 
+     Used as the default reporting window for endpoints where the caller
+     doesn't supply explicit `start`/`end` query parameters.
+     """
+     end = datetime.now(timezone.utc)
+     return end - timedelta(days=7), end
+@@ -55,20 +56,22 @@ class UsageSummaryResponse(BaseModel):
+     end: datetime
+     request_count: int
+     total_tokens: int
+     prompt_tokens: int
+     completion_tokens: int
+     cost_usd: float
+     spend_usd: float
+     savings_usd: float
+     cache_hit_count: int
+     cache_hit_rate: float
++    failed_count: int
++    success_rate: float
+     by_model: list[UsageBreakdownRow]
+     by_key: list[UsageBreakdownRow]
+     by_prompt: list[UsageBreakdownRow]
+ 
+ 
+ def _base_filters(
+     start: datetime,
+     end: datetime,
+     *,
+     model: str | None,
+@@ -205,53 +208,66 @@ async def usage_summary(
+                     0.0,
+                 ),
+                 func.coalesce(
+                     func.sum(case((RequestLog.cached, RequestLog.cost_usd), else_=0.0)),
+                     0.0,
+                 ),
+                 func.coalesce(
+                     func.sum(func.cast(RequestLog.cached, Integer)),
+                     0,
+                 ),
++                func.coalesce(
++                    func.sum(
++                        case((RequestLog.outcome.in_(_FAILED_OUTCOMES), 1), else_=0)
++                    ),
++                    0,
++                ),
+             ).where(*filters)
+         )
+     ).one()
+     (
+         request_count,
+         total_tokens,
+         prompt_tokens,
+         completion_tokens,
+         cost_usd,
+         spend_usd,
+         savings_usd,
+         cache_hit_count,
++        failed_count,
+     ) = totals_row
+     request_count = int(request_count)
+     cache_hit_count = int(cache_hit_count)
++    failed_count = int(failed_count)
+     cache_hit_rate = (cache_hit_count / request_count) if request_count else 0.0
++    success_rate = (
++        (request_count - failed_count) / request_count if request_count else 0.0
++    )
+ 
+     by_model = await _breakdown(session, RequestLog.model, filters)
+     by_key = await _key_breakdown(session, filters)
+     by_prompt = await _breakdown(session, RequestLog.prompt_name, filters)
+ 
+     return UsageSummaryResponse(
+         start=start,
+         end=end,
+         request_count=request_count,
+         total_tokens=int(total_tokens),
+         prompt_tokens=int(prompt_tokens),
+         completion_tokens=int(completion_tokens),
+         cost_usd=float(cost_usd),
+         spend_usd=float(spend_usd),
+         savings_usd=float(savings_usd),
+         cache_hit_count=cache_hit_count,
+         cache_hit_rate=cache_hit_rate,
++        failed_count=failed_count,
++        success_rate=success_rate,
+         by_model=by_model,
+         by_key=by_key,
+         by_prompt=by_prompt,
+     )
+ 
+ 
+ class TimeseriesBucket(BaseModel):
+     """One time bucket of request volume/cache-hit/cost/token data."""
+ 
+     bucket_start: datetime
+diff --git a/tests/test_dashboard.py b/tests/test_dashboard.py
+index 0c80ee7..49d164e 100644
+--- a/tests/test_dashboard.py
++++ b/tests/test_dashboard.py
+@@ -245,20 +245,51 @@ async def test_usage_summary_includes_cost_of_failed_rows(client, raw_key, sessi
+         "/dashboard/api/usage/summary",
+         headers={"Authorization": f"Bearer {raw_key}"},
+     )
+     body = r.json()
+ 
+     assert body["request_count"] == 2
+     assert body["cost_usd"] == pytest.approx(0.75)
+     assert body["spend_usd"] == pytest.approx(0.75)
+ 
+ 
++async def test_usage_summary_includes_failed_count_and_success_rate(
++    client, raw_key, session
++):
++    key_id = await _key_id(session, raw_key)
++    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="ok")
++    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome=None)
++    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="provider_error")
++    await _seed_log(session, key_id=key_id, model="gpt-4o", outcome="client_disconnect")
++
++    r = await client.get(
++        "/dashboard/api/usage/summary",
++        headers={"Authorization": f"Bearer {raw_key}"},
++    )
++    body = r.json()
++
++    assert body["request_count"] == 4
++    assert body["failed_count"] == 2
++    assert body["success_rate"] == pytest.approx(0.5)
++
++
++async def test_usage_summary_success_rate_is_zero_for_an_empty_window(client, raw_key):
++    r = await client.get(
++        "/dashboard/api/usage/summary",
++        headers={"Authorization": f"Bearer {raw_key}"},
++    )
++    body = r.json()
++    assert body["request_count"] == 0
++    assert body["failed_count"] == 0
++    assert body["success_rate"] == 0.0
++
++
+ # -- usage timeseries ---------------------------------------------------
+ 
+ 
+ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
+     key_row = (
+         await session.execute(
+             select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+         )
+     ).scalar_one()
+ 

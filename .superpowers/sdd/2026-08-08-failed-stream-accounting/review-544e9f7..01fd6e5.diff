@@ -1,0 +1,60 @@
+# Review package: 544e9f7..01fd6e5
+
+## Commits
+01fd6e5 test(dashboard): pin cost aggregates as unaffected by failed-row outcome tagging
+
+## Files changed
+ tests/test_dashboard.py | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+## Diff
+diff --git a/tests/test_dashboard.py b/tests/test_dashboard.py
+index e2145ba..0c80ee7 100644
+--- a/tests/test_dashboard.py
++++ b/tests/test_dashboard.py
+@@ -220,20 +220,45 @@ async def test_usage_summary_filters_by_model(client, raw_key, session):
+         "/dashboard/api/usage/summary",
+         headers={"Authorization": f"Bearer {raw_key}"},
+         params={"model": "gpt-4o"},
+     )
+     assert r.status_code == 200
+     body = r.json()
+     assert body["request_count"] == 1
+     assert body["cost_usd"] == 1.0
+ 
+ 
++async def test_usage_summary_includes_cost_of_failed_rows(client, raw_key, session):
++    """Cost/spend aggregates are unchanged by #17: a failed row's estimated
++    cost still counts (the money was spent), unlike the latency percentiles
++    Task 8 excludes it from."""
++    key_id = await _key_id(session, raw_key)
++    await _seed_log(session, key_id=key_id, model="gpt-4o", cost_usd=0.5, outcome="ok")
++    await _seed_log(
++        session,
++        key_id=key_id,
++        model="gpt-4o",
++        cost_usd=0.25,
++        outcome="provider_error",
++    )
++
++    r = await client.get(
++        "/dashboard/api/usage/summary",
++        headers={"Authorization": f"Bearer {raw_key}"},
++    )
++    body = r.json()
++
++    assert body["request_count"] == 2
++    assert body["cost_usd"] == pytest.approx(0.75)
++    assert body["spend_usd"] == pytest.approx(0.75)
++
++
+ # -- usage timeseries ---------------------------------------------------
+ 
+ 
+ async def test_usage_timeseries_buckets_by_day(client, raw_key, session):
+     key_row = (
+         await session.execute(
+             select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))
+         )
+     ).scalar_one()
+ 
