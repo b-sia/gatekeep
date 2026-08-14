@@ -53,3 +53,13 @@ async def test_account_defaults(session):
     await session.commit()
     assert acct.is_operator is False
     assert acct.monthly_budget_usd is None
+
+
+async def test_account_name_is_globally_unique(session):
+    session.add(Account(name="only-one"))
+    await session.commit()
+
+    session.add(Account(name="only-one"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()

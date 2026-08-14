@@ -35,13 +35,15 @@ class Account(Base):
     server-side from the authenticated key. `monthly_budget_usd` is the
     account's shared monthly spend pool (None means unlimited); `is_operator`
     grants the fleet-wide dashboard view (decision 6). There is deliberately
-    no role hierarchy or RBAC - operator status is a single boolean.
+    no role hierarchy or RBAC - operator status is a single boolean. `name` is
+    globally unique, since it is the human-facing identifier used to look an
+    account up (e.g. `gatekeep key set-budget <name>`).
     """
 
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     # Shared monthly USD spend cap for the whole account; None means unlimited.
     # Enforced by gatekeep.middleware.budget against cumulative
     # request_logs.cost_usd for the account in the current UTC calendar month.
