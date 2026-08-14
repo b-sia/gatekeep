@@ -36,7 +36,6 @@ async def create_key(
     *,
     name: str = "c",
     key_hash: str = "h",
-    monthly_budget_usd: float | None = None,
     active: bool = True,
 ) -> ApiKey:
     """Create and flush an ApiKey attached to `account`, returning it with its id.
@@ -46,7 +45,6 @@ async def create_key(
         account: The Account the key belongs to.
         name: The key's display name (unique per account).
         key_hash: The stored sha256 hash of the raw key.
-        monthly_budget_usd: Deprecated per-key cap; kept until Task 5.
         active: Whether the key is active.
 
     Returns:
@@ -56,7 +54,6 @@ async def create_key(
         name=name,
         key_hash=key_hash,
         account_id=account.id,
-        monthly_budget_usd=monthly_budget_usd,
         active=active,
     )
     session.add(key)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.cli import (
     _clear_candidate,
     _eval_review,
@@ -15,7 +14,7 @@ from gatekeep.cli import (
     main,
 )
 from gatekeep.evals import add_case, create_suite
-from gatekeep.models import ApiKey
+from gatekeep.models import Account
 from gatekeep.prompts import add_prompt_version, create_prompt
 from tests.helpers import FakeProvider as _FakeProvider
 from tests.helpers import create_account
@@ -202,67 +201,54 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(session, monk
     assert case.reviewed is False
 
 
-# --- key set-budget: does it set/clear monthly_budget_usd? -----------------------
+# --- account set-budget: does it set/clear the account's monthly_budget_usd? -----
 
 
-async def test_set_budget_sets_amount_on_existing_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
+async def test_set_budget_sets_amount_on_existing_account(session):
+    account = await create_account(session, name="budget-account")
     await session.commit()
+    account_id = account.id
 
-    await _set_budget("budget-key", 25.0, unlimited=False)
+    await _set_budget("budget-account", 25.0, unlimited=False)
 
     session.expire_all()
-    key = await session.get(ApiKey, 1)
-    assert key.monthly_budget_usd == 25.0
+    refreshed = await session.get(Account, account_id)
+    assert refreshed.monthly_budget_usd == 25.0
 
 
 async def test_set_budget_unlimited_clears_amount(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(
-        ApiKey(
-            name="budget-key",
-            key_hash=hash_key(raw),
-            monthly_budget_usd=10.0,
-            account_id=account.id,
-        )
-    )
+    account = await create_account(session, name="budget-account", monthly_budget_usd=10.0)
     await session.commit()
+    account_id = account.id
 
-    await _set_budget("budget-key", None, unlimited=True)
+    await _set_budget("budget-account", None, unlimited=True)
 
     session.expire_all()
-    key = await session.get(ApiKey, 1)
-    assert key.monthly_budget_usd is None
+    refreshed = await session.get(Account, account_id)
+    assert refreshed.monthly_budget_usd is None
 
 
-async def test_set_budget_raises_for_unknown_key_name():
-    with pytest.raises(ValueError, match="no API key named"):
+async def test_set_budget_raises_for_unknown_account_name():
+    with pytest.raises(ValueError, match="no account named"):
         await _set_budget("does-not-exist", 5.0, unlimited=False)
 
 
 async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
+    await create_account(session, name="budget-account")
     await session.commit()
 
     with pytest.raises(ValueError, match="must provide an amount"):
-        await _set_budget("budget-key", None, unlimited=False)
+        await _set_budget("budget-account", None, unlimited=False)
 
 
 async def test_set_budget_raises_for_non_positive_amount(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
+    await create_account(session, name="budget-account")
     await session.commit()
 
     with pytest.raises(ValueError, match="amount must be positive"):
-        await _set_budget("budget-key", -5.0, unlimited=False)
+        await _set_budget("budget-account", -5.0, unlimited=False)
     with pytest.raises(ValueError, match="amount must be positive"):
-        await _set_budget("budget-key", 0.0, unlimited=False)
+        await _set_budget("budget-account", 0.0, unlimited=False)
 
 
 def test_main_key_set_budget_dispatches(monkeypatch):

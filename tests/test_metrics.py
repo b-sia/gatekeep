@@ -75,7 +75,7 @@ async def test_check_rate_limit_returns_raw_token_math():
     require_rate_limit dependency. This just documents the raw values used."""
     redis = get_redis()
     allowed, tokens = await check_rate_limit(
-        redis, key_id=12345, capacity=3, refill_rate=0.001, now=1000.0
+        redis, account_id=12345, capacity=3, refill_rate=0.001, now=1000.0
     )
     assert allowed is True
     assert tokens == pytest.approx(2.0)

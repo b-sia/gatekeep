@@ -582,21 +582,14 @@ async def test_rate_limit_exhaustion_returns_429_with_retry_after(client, raw_ke
 
 @pytest_asyncio.fixture
 async def budgeted_raw_key(session):
-    """A key whose monthly_budget_usd is set to half of one FakeProvider
+    """A key on an account whose monthly_budget_usd is half of one FakeProvider
     completion's cost, so the first request is allowed (spend starts at $0)
     but the second is rejected once the first request's full cost has been
-    recorded."""
+    recorded. Budget is pooled at the account (decision 5)."""
     raw = generate_key()
     one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
-    account = await create_account(session)
-    session.add(
-        ApiKey(
-            name="b",
-            key_hash=hash_key(raw),
-            monthly_budget_usd=one_call_cost / 2,
-            account_id=account.id,
-        )
-    )
+    account = await create_account(session, monthly_budget_usd=one_call_cost / 2)
+    session.add(ApiKey(name="b", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

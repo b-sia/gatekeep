@@ -21,7 +21,7 @@ from gatekeep.evals import (
 )
 from gatekeep.fixtures import load_fixtures_dir
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, PromptVersion
+from gatekeep.models import Account, PromptVersion
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -278,29 +278,32 @@ async def _eval_review(name: str) -> None:
 
 
 async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
-    """Set or clear an API key's monthly USD spend cap, looked up by name.
+    """Set or clear an account's monthly USD spend cap, looked up by name.
+
+    Budget is pooled at the account (decision 5): the cap is the shared quota
+    every key on the account draws from.
 
     Args:
-        name: The api_keys.name of the key to update.
+        name: The accounts.name of the account to update.
         amount: The new monthly_budget_usd value, or None if `unlimited` is set.
         unlimited: If True, clears the cap (monthly_budget_usd = None),
             ignoring `amount`.
 
     Raises:
         ValueError: if neither `amount` nor `unlimited` was given, if
-            `amount` is not positive, or if no key with that name exists.
+            `amount` is not positive, or if no account with that name exists.
     """
     if not unlimited and amount is None:
         raise ValueError("must provide an amount, or pass --unlimited to clear it")
     if not unlimited and amount <= 0:
         raise ValueError("amount must be positive")
     async with SessionLocal() as session:
-        key = (
-            await session.execute(select(ApiKey).where(ApiKey.name == name))
+        account = (
+            await session.execute(select(Account).where(Account.name == name))
         ).scalar_one_or_none()
-        if key is None:
-            raise ValueError(f"no API key named {name!r}")
-        key.monthly_budget_usd = None if unlimited else amount
+        if account is None:
+            raise ValueError(f"no account named {name!r}")
+        account.monthly_budget_usd = None if unlimited else amount
         await session.commit()
     if unlimited:
         print(f"cleared budget cap for {name!r} (unlimited)")
@@ -372,9 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     key_subparsers = key_parser.add_subparsers(dest="key_command", required=True)
 
     set_budget_parser = key_subparsers.add_parser(
-        "set-budget", help="set or clear a key's monthly USD spend cap"
+        "set-budget", help="set or clear an account's monthly USD spend cap"
     )
-    set_budget_parser.add_argument("name")
+    set_budget_parser.add_argument("name", help="the account name")
     set_budget_parser.add_argument(
         "amount", type=float, nargs="?", default=None, help="new monthly cap in USD"
     )

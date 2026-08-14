@@ -71,9 +71,6 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    # Deprecated: superseded by Account.monthly_budget_usd. Retained until
-    # Task 5 flips enforcement to the account pool, then dropped.
-    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (UniqueConstraint("account_id", "name", name="uq_api_keys_account_id_name"),)
 
