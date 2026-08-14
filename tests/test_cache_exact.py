@@ -23,6 +23,7 @@ from gatekeep.middleware.cache_exact import (
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -115,32 +116,42 @@ def test_hash_request_includes_system_when_present():
 
 async def test_get_cached_response_miss_returns_none():
     redis = get_redis()
-    assert await get_cached_response(redis, "nonexistent") is None
+    assert await get_cached_response(redis, 1, "nonexistent") is None
 
 
 async def test_set_then_get_round_trips():
     redis = get_redis()
     h = hash_request(_payload())
     response = _response()
-    await set_cached_response(redis, h, response, ttl_seconds=60)
-    cached = await get_cached_response(redis, h)
+    await set_cached_response(redis, 1, h, response, ttl_seconds=60)
+    cached = await get_cached_response(redis, 1, h)
     assert cached == response
+
+
+async def test_exact_cache_is_account_scoped():
+    """One account's exact-cache entry is never visible to another."""
+    redis = get_redis()
+    h = hash_request(_payload())
+    response = _response()
+    await set_cached_response(redis, 1, h, response, ttl_seconds=60)
+    assert await get_cached_response(redis, 1, h) is not None
+    assert await get_cached_response(redis, 2, h) is None
 
 
 async def test_set_cached_response_sets_ttl():
     redis = get_redis()
     h = hash_request(_payload())
-    await set_cached_response(redis, h, _response(), ttl_seconds=60)
-    ttl = await redis.ttl(f"cache:exact:{h}")
+    await set_cached_response(redis, 1, h, _response(), ttl_seconds=60)
+    ttl = await redis.ttl(f"cache:exact:1:{h}")
     assert 0 < ttl <= 60
 
 
 async def test_clear_cached_response_removes_key():
     redis = get_redis()
     h = hash_request(_payload())
-    await set_cached_response(redis, h, _response(), ttl_seconds=60)
-    await clear_cached_response(redis, h)
-    assert await get_cached_response(redis, h) is None
+    await set_cached_response(redis, 1, h, _response(), ttl_seconds=60)
+    await clear_cached_response(redis, 1, h)
+    assert await get_cached_response(redis, 1, h) is None
 
 
 # -- wired into /v1/chat/completions --------------------------------------
@@ -171,7 +182,8 @@ class CountingProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

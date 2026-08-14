@@ -15,6 +15,7 @@ from gatekeep.middleware.ratelimit import check_rate_limit, get_redis
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import observe_request
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +75,7 @@ async def test_check_rate_limit_returns_raw_token_math():
     require_rate_limit dependency. This just documents the raw values used."""
     redis = get_redis()
     allowed, tokens = await check_rate_limit(
-        redis, key_id=12345, capacity=3, refill_rate=0.001, now=1000.0
+        redis, account_id=12345, capacity=3, refill_rate=0.001, now=1000.0
     )
     assert allowed is True
     assert tokens == pytest.approx(2.0)
@@ -86,9 +87,11 @@ async def test_check_rate_limit_returns_raw_token_math():
 async def test_find_semantic_match_returns_similarity_score(session):
     from gatekeep.embeddings import embed_text
 
+    account = await create_account(session)
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="metrics-hash-a",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -99,6 +102,7 @@ async def test_find_semantic_match_returns_similarity_score(session):
     match = await find_semantic_match(
         session,
         embed_text(stored_text),
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.5,
         max_age_seconds=604800,
@@ -136,7 +140,8 @@ class CountingProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="metrics-test", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="metrics-test", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

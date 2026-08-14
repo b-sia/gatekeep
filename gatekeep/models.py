@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,22 +27,54 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class Account(Base):
+    """A tenant (team) that owns API keys and all data captured through them.
+
+    Accounts are the tenancy root: keys are disposable credentials onto an
+    account, and every content/usage row is scoped to the account derived
+    server-side from the authenticated key. `monthly_budget_usd` is the
+    account's shared monthly spend pool (None means unlimited); `is_operator`
+    grants the fleet-wide dashboard view. There is deliberately
+    no role hierarchy or RBAC - operator status is a single boolean. `name` is
+    globally unique, since it is the human-facing identifier used to look an
+    account up (e.g. `gatekeep key set-budget <name>`).
+    """
+
+    __tablename__ = "accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Shared monthly USD spend cap for the whole account; None means unlimited.
+    # Enforced by gatekeep.middleware.budget against cumulative
+    # request_logs.cost_usd for the account in the current UTC calendar month.
+    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_operator: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class ApiKey(Base):
-    """A client's gateway API key, stored as a salted hash rather than plaintext."""
+    """A client's gateway API key, stored as a salted hash rather than plaintext.
+
+    A key is a disposable credential onto its `Account`: rotating or revoking
+    it never orphans history, which hangs off the account. `name` is unique
+    only within an account, so one tenant's labels never collide
+    with another's namespace.
+    """
 
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    # Hard cap on USD spend per calendar month; None means unlimited. Enforced
-    # by gatekeep.middleware.budget.require_budget, tracked against cumulative
-    # request_logs.cost_usd for the key in the current UTC calendar month.
-    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (UniqueConstraint("account_id", "name", name="uq_api_keys_account_id_name"),)
 
 
 class RequestLog(Base):
@@ -59,6 +92,11 @@ class RequestLog(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
+    # Denormalized tenant attribution, written at capture time from the
+    # authenticated key. Kept on the row rather than joined through
+    # key_id so attribution survives key rotation or revocation, and so
+    # account-scoped dashboard/budget aggregates need no join.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -112,6 +150,9 @@ class RequestLog(Base):
         # scans (key_id is the leading column), and percentile_cont sorts
         # every row it is handed, so narrowing the window cheaply matters.
         Index("ix_request_logs_created_at", "created_at"),
+        # Account-scoped dashboard and budget aggregates
+        # filter by account_id + created_at; this composite serves them.
+        Index("ix_request_logs_account_id_created_at", "account_id", "created_at"),
     )
 
 
@@ -198,7 +239,11 @@ class CachedResponse(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    exact_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # Tenant the cached response belongs to. Partitions the cache
+    # so one caller's completion is never served verbatim to another; exact_hash
+    # is unique per (account_id, exact_hash), not globally.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    exact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     user_messages_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -215,6 +260,13 @@ class CachedResponse(Base):
             "ix_cached_responses_model_prompt_version_num",
             "model",
             "prompt_version_num",
+        ),
+        # exact_hash is unique per account, not globally, so two
+        # tenants can independently cache the same request.
+        UniqueConstraint(
+            "account_id",
+            "exact_hash",
+            name="uq_cached_responses_account_id_exact_hash",
         ),
     )
 
@@ -235,6 +287,11 @@ class RequestSample(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
+    # Denormalized tenant attribution written at capture time.
+    # Kept on the row rather than joined through key_id so provenance filtering
+    # and per-tenant deletion survive key rotation or revocation; this is the
+    # substrate the eval-case provenance tags are derived from.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     input_messages: Mapped[list[dict]] = mapped_column(JSONB, nullable=False)
@@ -268,6 +325,9 @@ class EvalCase(Base):
     judge_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    # The account whose sample this case was curated from.
+    # NULL for manually authored cases, which have no originating tenant.
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

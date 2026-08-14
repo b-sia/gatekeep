@@ -33,19 +33,30 @@ def hash_request(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _redis_key(request_hash: str) -> str:
-    """Build the namespaced Redis key for a request hash."""
-    return f"{_KEY_PREFIX}{request_hash}"
+def _redis_key(account_id: int, request_hash: str) -> str:
+    """Build the namespaced, account-scoped Redis key for a request hash.
+
+    Partitioning by account keeps one tenant's exact-cache hit
+    from ever being served to another.
+    """
+    return f"{_KEY_PREFIX}{account_id}:{request_hash}"
+
+
+def _member(account_id: int, request_hash: str) -> str:
+    """Return the (account_id, request_hash) pair stored in a prompt's invalidation set."""
+    return f"{account_id}:{request_hash}"
 
 
 def _by_prompt_key(prompt_name: str) -> str:
-    """Build the Redis key of the set indexing cache hashes tagged with a prompt name."""
+    """Build the Redis key of the set indexing cache entries tagged with a prompt name."""
     return f"{_KEY_PREFIX}by-prompt:{prompt_name}"
 
 
-async def get_cached_response(redis: Redis, request_hash: str) -> ChatCompletionResponse | None:
-    """Look up a cached chat completion response by request hash, or None on a miss."""
-    raw = await redis.get(_redis_key(request_hash))
+async def get_cached_response(
+    redis: Redis, account_id: int, request_hash: str
+) -> ChatCompletionResponse | None:
+    """Look up a cached response for `account_id` by request hash, or None on a miss."""
+    raw = await redis.get(_redis_key(account_id, request_hash))
     if raw is None:
         return None
     return ChatCompletionResponse.model_validate_json(raw)
@@ -53,35 +64,42 @@ async def get_cached_response(redis: Redis, request_hash: str) -> ChatCompletion
 
 async def set_cached_response(
     redis: Redis,
+    account_id: int,
     request_hash: str,
     response: ChatCompletionResponse,
     *,
     ttl_seconds: int,
     prompt_name: str | None = None,
 ) -> None:
-    """Store a chat completion response in the exact-match cache with a TTL.
+    """Store a chat completion response in the account's exact-match cache with a TTL.
 
-    If `prompt_name` is set, the request hash is also added to a per-prompt
-    Redis set (`cache:exact:by-prompt:{prompt_name}`) so a later prompt
-    promotion can find and invalidate every exact-cache entry it produced.
+    If `prompt_name` is set, the (account_id, request_hash) pair is also added
+    to a per-prompt Redis set (`cache:exact:by-prompt:{prompt_name}`) so a
+    later prompt promotion can find and invalidate every exact-cache entry it
+    produced, across all accounts.
     """
-    await redis.set(_redis_key(request_hash), response.model_dump_json(), ex=ttl_seconds)
+    await redis.set(
+        _redis_key(account_id, request_hash), response.model_dump_json(), ex=ttl_seconds
+    )
     if prompt_name is not None:
-        await redis.sadd(_by_prompt_key(prompt_name), request_hash)
+        await redis.sadd(_by_prompt_key(prompt_name), _member(account_id, request_hash))
 
 
-async def clear_cached_response(redis: Redis, request_hash: str) -> None:
-    """Manually invalidate one cached response by request hash."""
-    await redis.delete(_redis_key(request_hash))
+async def clear_cached_response(redis: Redis, account_id: int, request_hash: str) -> None:
+    """Manually invalidate one cached response for `account_id` by request hash."""
+    await redis.delete(_redis_key(account_id, request_hash))
 
 
 async def invalidate_prompt_cache(redis: Redis, prompt_name: str) -> None:
-    """Delete every exact-cache entry tagged with `prompt_name`, plus its index set.
+    """Delete every exact-cache entry tagged with `prompt_name`, across all accounts.
 
-    No-op if no cache entries have ever been tagged with this prompt name.
+    Prompt promotion is a global operator action, so this spans
+    tenants. The invalidation set stores `account_id:request_hash` members;
+    each maps back to its account-scoped Redis key. No-op if no cache entries
+    have ever been tagged with this prompt name.
     """
     index_key = _by_prompt_key(prompt_name)
-    hashes = await redis.smembers(index_key)
-    if hashes:
-        await redis.delete(*(_redis_key(h) for h in hashes))
+    members = await redis.smembers(index_key)
+    if members:
+        await redis.delete(*(f"{_KEY_PREFIX}{m}" for m in members))
     await redis.delete(index_key)

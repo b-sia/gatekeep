@@ -10,6 +10,7 @@ async def record_request_sample(
     session: AsyncSession,
     *,
     key_id: int,
+    account_id: int,
     prompt_name: str,
     model: str,
     input_messages: list[dict],
@@ -19,9 +20,14 @@ async def record_request_sample(
 
     Only called for prompt-scoped, provider-served requests so the corpus
     stays a representative, append-only record of fresh traffic per prompt.
+
+    `account_id` is the tenant the sample belongs to, derived server-side from
+    the authenticated key and denormalized onto the row so per-tenant deletion
+    and eval-case provenance survive key rotation or revocation.
     """
     sample = RequestSample(
         key_id=key_id,
+        account_id=account_id,
         prompt_name=prompt_name,
         model=model,
         input_messages=input_messages,

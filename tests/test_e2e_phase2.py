@@ -24,6 +24,7 @@ from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, CachedResponse, RequestLog
 from gatekeep.prompts import create_prompt, promote_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +71,8 @@ class CountingProvider:
 async def raw_key(session):
     """Create and return a raw API key backed by a fresh ApiKey row."""
     raw = generate_key()
-    session.add(ApiKey(name="e2e", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="e2e", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 
@@ -265,8 +267,10 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
     by_prompt_key = "cache:exact:by-prompt:greeting"
     tagged_hashes = await redis.smembers(by_prompt_key)
     assert tagged_hashes, "expected the exact-cache write to tag a hash under greeting"
-    for h in tagged_hashes:
-        assert await get_cached_response(redis, h) is not None
+    # Members are now "{account_id}:{request_hash}" composites.
+    for member in tagged_hashes:
+        acct_str, _, req_hash = member.partition(":")
+        assert await get_cached_response(redis, int(acct_str), req_hash) is not None
 
     tagged_rows = (
         (
@@ -296,8 +300,9 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
 
     # -- Directly verify invalidation cleared both caches' tagged entries. --
     assert await redis.smembers(by_prompt_key) == set()
-    for h in tagged_hashes:
-        assert await get_cached_response(redis, h) is None
+    for member in tagged_hashes:
+        acct_str, _, req_hash = member.partition(":")
+        assert await get_cached_response(redis, int(acct_str), req_hash) is None
 
     remaining_rows = (
         (

@@ -9,14 +9,17 @@ from gatekeep.models import (
     PromptVersion,
     RequestSample,
 )
+from tests.helpers import create_account
 
 
 async def test_request_sample_round_trips_structured_messages(session):
-    key = ApiKey(name="k", key_hash="h")
+    account = await create_account(session)
+    key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
     await session.flush()
     sample = RequestSample(
         key_id=key.id,
+        account_id=account.id,
         prompt_name="system-context",
         model="claude-sonnet-5",
         input_messages=[{"role": "user", "content": "hi"}],
@@ -70,11 +73,13 @@ async def test_eval_suite_case_and_run_persist(session):
 async def test_request_log_has_prompt_name_and_routed_from(session):
     from gatekeep.models import RequestLog
 
-    key = ApiKey(name="k", key_hash="h")
+    account = await create_account(session)
+    key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
     await session.flush()
     log = RequestLog(
         key_id=key.id,
+        account_id=account.id,
         model="claude-haiku-4-5-20251001",
         prompt_tokens=1,
         completion_tokens=1,

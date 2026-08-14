@@ -14,6 +14,7 @@ from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.prompts import add_prompt_version, create_prompt, set_candidate_version
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +46,8 @@ class FakeProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 
@@ -442,7 +444,12 @@ async def test_stream_ending_without_streamend_marker_logs_ok_with_estimates(
 
 
 async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
-    key = ApiKey(name="messages-disconnect-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(
+        name="messages-disconnect-test",
+        key_hash=hash_key(generate_key()),
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -453,6 +460,7 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # message_start
@@ -477,7 +485,12 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
     must return normally (the generator catches and re-raises GeneratorExit,
     which is the successful-close case per the async generator protocol,
     not an error) and the row must still be written."""
-    key = ApiKey(name="messages-aclose-disconnect-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(
+        name="messages-aclose-disconnect-test",
+        key_hash=hash_key(generate_key()),
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -488,6 +501,7 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # message_start
@@ -506,7 +520,12 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
     content_block_start or any delta) must still be caught by the try block
     and log a row - this is the same boundary condition Task 5 found a bug
     at for _sse, fixed the same way here."""
-    key = ApiKey(name="messages-disconnect-early-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(
+        name="messages-disconnect-early-test",
+        key_hash=hash_key(generate_key()),
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -517,6 +536,7 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # message_start only - no content_block_start yet

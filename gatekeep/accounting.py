@@ -69,6 +69,7 @@ async def log_request(
     session: AsyncSession,
     *,
     key_id: int,
+    account_id: int,
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
@@ -87,6 +88,11 @@ async def log_request(
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
 
+    `account_id` is the tenant the request is attributed to, derived
+    server-side from the authenticated key. It is denormalized onto the row
+    (rather than joined through `key_id`) so attribution survives key rotation
+    or revocation.
+
     Cost is derived via calculate_cost, unless `cost_usd_override` is given,
     in which case that value is used directly (e.g. a semantic-cache hit
     logging the original generation's cost instead of $0). `cached`/
@@ -96,9 +102,10 @@ async def log_request(
     PromptVersion (active or A/B candidate) actually served the request, so
     cost/eval/quality can later be compared active-vs-candidate by version.
 
-    Also best-effort increments the key's current-period Redis spend counter
-    (`budget.record_spend`) so `require_budget` can enforce a monthly cap
-    without aggregating `request_logs` on every request. A Redis outage here
+    Also best-effort increments the account's current-period Redis spend
+    counter (`budget.record_spend`) so `require_budget` can enforce a monthly
+    cap without aggregating `request_logs` on every request; budget is pooled
+    at the account. A Redis outage here
     only degrades that accelerator (the next budget check falls back to a
     DB aggregate) - it never fails this call or drops the RequestLog row.
 
@@ -135,6 +142,7 @@ async def log_request(
     )
     log = RequestLog(
         key_id=key_id,
+        account_id=account_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -155,13 +163,13 @@ async def log_request(
     session.add(log)
     await session.commit()
     try:
-        await record_spend(get_redis(), key_id=key_id, cost_usd=0.0 if cached else cost_usd)
+        await record_spend(get_redis(), account_id=account_id, cost_usd=0.0 if cached else cost_usd)
     except RedisError:
         # Best-effort accelerator: a missed increment here just means the
         # next budget check falls back to a DB aggregate (get_period_spend),
         # not that spend goes untracked or the request fails.
         logger.warning(
             "Failed to record spend for budget tracking (Redis unavailable).",
-            extra={"key_id": key_id},
+            extra={"account_id": account_id},
         )
     return log

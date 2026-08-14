@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.config import get_settings
 from gatekeep.db import get_session
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
-from gatekeep.models import ApiKey, RequestLog
+from gatekeep.models import Account, ApiKey, RequestLog
 from gatekeep.observability.metrics import budget_alerts_total
 
 logger = logging.getLogger(__name__)
@@ -41,27 +41,29 @@ def _period_start(period: str) -> dt.datetime:
     return dt.datetime(year, month, 1, tzinfo=dt.UTC)
 
 
-def _spend_redis_key(key_id: int, period: str) -> str:
-    """Return the Redis key holding a key's cumulative USD spend for a period."""
-    return f"budget:spend:{key_id}:{period}"
+def _spend_redis_key(account_id: int, period: str) -> str:
+    """Return the Redis key holding an account's cumulative USD spend for a period."""
+    return f"budget:spend:{account_id}:{period}"
 
 
-def _alert_redis_key(key_id: int, period: str, label: str) -> str:
+def _alert_redis_key(account_id: int, period: str, label: str) -> str:
     """Return the Redis key used as a once-per-period marker for a given alert label."""
-    return f"budget:alerted:{key_id}:{period}:{label}"
+    return f"budget:alerted:{account_id}:{period}:{label}"
 
 
 async def record_spend(
-    redis: Redis, *, key_id: int, cost_usd: float, now: dt.datetime | None = None
+    redis: Redis, *, account_id: int, cost_usd: float, now: dt.datetime | None = None
 ) -> float:
-    """Add `cost_usd` to a key's running Redis spend counter for the current period.
+    """Add `cost_usd` to an account's running Redis spend counter for the period.
 
     Called from `accounting.log_request` right after a request is persisted,
     so the counter tracks spend as an accelerator for `get_period_spend`
-    without a full-table aggregation on every request. Uses INCRBYFLOAT,
+    without a full-table aggregation on every request. Budget is pooled at
+    the account, so the counter is keyed by `account_id`: every
+    key on the account draws down the same shared quota. Uses INCRBYFLOAT,
     which is atomic per-key in Redis, so concurrent requests for the same
-    key can't race each other's increments. Refreshes the key's TTL on every
-    write so an active key's counter doesn't expire mid-month.
+    account can't race each other's increments. Refreshes the TTL on every
+    write so an active account's counter doesn't expire mid-month.
 
     Raises:
         redis.exceptions.RedisError: if Redis is unreachable. Callers should
@@ -71,16 +73,16 @@ async def record_spend(
     """
     now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
-    redis_key = _spend_redis_key(key_id, period)
+    redis_key = _spend_redis_key(account_id, period)
     total = await redis.incrbyfloat(redis_key, cost_usd)
     await redis.expire(redis_key, _PERIOD_TTL_SECONDS)
     return float(total)
 
 
 async def _aggregate_spend_from_db(
-    session: AsyncSession, key_id: int, period_start: dt.datetime
+    session: AsyncSession, account_id: int, period_start: dt.datetime
 ) -> float:
-    """Sum non-cached `request_logs.cost_usd` for a key from `period_start` onward.
+    """Sum non-cached `request_logs.cost_usd` for an account from `period_start` on.
 
     The safety-net path when the Redis spend counter is missing or
     unreachable: slower (a table scan/index scan per call) but always
@@ -93,7 +95,7 @@ async def _aggregate_spend_from_db(
     """
     result = await session.execute(
         select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0)).where(
-            RequestLog.key_id == key_id,
+            RequestLog.account_id == account_id,
             RequestLog.created_at >= period_start,
             RequestLog.cached.is_(False),
         )
@@ -105,12 +107,12 @@ async def get_period_spend(
     session: AsyncSession | None,
     redis: Redis,
     *,
-    key_id: int,
+    account_id: int,
     now: dt.datetime | None = None,
 ) -> float:
-    """Return a key's cumulative USD spend for the current period.
+    """Return an account's cumulative USD spend for the current period.
 
-    Reads the Redis counter first (fast path). On a cache miss (key never
+    Reads the Redis counter first (fast path). On a cache miss (account never
     written this period, e.g. right after Redis was flushed) or a Redis
     error, falls back to aggregating `request_logs` directly and seeds
     Redis with the result so subsequent calls hit the fast path again.
@@ -120,17 +122,17 @@ async def get_period_spend(
     Unlike rate limiting, this never fails closed on a Redis outage: a
     budget check that can't reach its accelerator falls back to a slower
     but still-correct DB read rather than blocking (or wrongly allowing)
-    every request for the key.
+    every request for the account.
     """
     now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
-    redis_key = _spend_redis_key(key_id, period)
+    redis_key = _spend_redis_key(account_id, period)
     try:
         cached = await redis.get(redis_key)
     except RedisError:
         logger.warning(
             "Budget spend lookup failed (Redis unavailable); falling back to DB aggregate.",
-            extra={"key_id": key_id},
+            extra={"account_id": account_id},
         )
         cached = None
         redis = None  # avoid a second failing call below when seeding
@@ -139,31 +141,31 @@ async def get_period_spend(
 
     if session is None:
         raise ValueError("session is required on a Redis cache miss")
-    spent = await _aggregate_spend_from_db(session, key_id, _period_start(period))
+    spent = await _aggregate_spend_from_db(session, account_id, _period_start(period))
     if redis is not None:
         try:
             await redis.set(redis_key, spent, ex=_PERIOD_TTL_SECONDS)
         except RedisError:
             logger.warning(
                 "Failed to seed budget spend cache after DB fallback (Redis unavailable).",
-                extra={"key_id": key_id},
+                extra={"account_id": account_id},
             )
     return spent
 
 
-async def _fire_alert_if_new(redis: Redis, key_id: int, period: str, label: str) -> bool:
-    """Mark an alert as fired for this key/period/label, returning True the first time.
+async def _fire_alert_if_new(redis: Redis, account_id: int, period: str, label: str) -> bool:
+    """Mark an alert as fired for this account/period/label, True the first time.
 
-    Uses SET NX so concurrent requests for the same key can't both fire the
-    same alert; returns False (no-op) on every call after the first one per
-    period, and also treats a Redis error as "already fired" (fails toward
+    Uses SET NX so concurrent requests for the same account can't both fire
+    the same alert; returns False (no-op) on every call after the first one
+    per period, and also treats a Redis error as "already fired" (fails toward
     under-alerting, not spamming, since alerting is observability rather
     than an enforcement path).
     """
     try:
         return bool(
             await redis.set(
-                _alert_redis_key(key_id, period, label),
+                _alert_redis_key(account_id, period, label),
                 "1",
                 nx=True,
                 ex=_PERIOD_TTL_SECONDS,
@@ -175,7 +177,7 @@ async def _fire_alert_if_new(redis: Redis, key_id: int, period: str, label: str)
 
 async def _maybe_alert(
     redis: Redis,
-    key_id: int,
+    account_id: int,
     period: str,
     spent: float,
     budget: float,
@@ -183,27 +185,27 @@ async def _maybe_alert(
 ) -> None:
     """Fire the "warning" and/or "exceeded" alert hooks if spend just crossed them.
 
-    Each label fires at most once per key per period (see
+    Each label fires at most once per account per period (see
     `_fire_alert_if_new`). An alert is a structured log line plus a
     Prometheus counter increment - deliberately not a full notification
     system (no email/Slack), per the scoped-down design for this feature.
     """
     if spent >= budget:
-        if await _fire_alert_if_new(redis, key_id, period, "exceeded"):
+        if await _fire_alert_if_new(redis, account_id, period, "exceeded"):
             logger.warning(
-                "Budget exceeded for key %s: spent $%.4f of $%.4f budget (period %s)",
-                key_id,
+                "Budget exceeded for account %s: spent $%.4f of $%.4f budget (period %s)",
+                account_id,
                 spent,
                 budget,
                 period,
             )
             budget_alerts_total.labels(threshold="exceeded").inc()
     elif spent >= budget * alert_threshold:
-        if await _fire_alert_if_new(redis, key_id, period, "warning"):
+        if await _fire_alert_if_new(redis, account_id, period, "warning"):
             logger.warning(
-                "Budget warning for key %s: spent $%.4f of $%.4f budget "
+                "Budget warning for account %s: spent $%.4f of $%.4f budget "
                 "(%.0f%% threshold, period %s)",
-                key_id,
+                account_id,
                 spent,
                 budget,
                 alert_threshold * 100,
@@ -215,16 +217,17 @@ async def _maybe_alert(
 async def check_budget(
     session: AsyncSession,
     redis: Redis,
-    key: ApiKey,
+    account: Account,
     alert_threshold: float | None = None,
     now: dt.datetime | None = None,
 ) -> tuple[bool, float | None]:
-    """Check whether a key is within its monthly budget, firing alert hooks along the way.
+    """Check whether an account is within its monthly budget, firing alert hooks.
 
-    Returns (allowed, spent). `spent` is None (and allowed is always True)
-    when `key.monthly_budget_usd` is None (unlimited): unlimited keys skip
-    the spend lookup entirely rather than paying for one that can never
-    matter.
+    Budget is pooled at the account: every key on the account
+    draws down one shared quota. Returns (allowed, spent). `spent` is None
+    (and allowed is always True) when `account.monthly_budget_usd` is None
+    (unlimited): unlimited accounts skip the spend lookup entirely rather
+    than paying for one that can never matter.
 
     The hard cap check is `spent < budget`: since a request's cost is only
     known after it completes, this only ever blocks a request *after* an
@@ -242,19 +245,19 @@ async def check_budget(
     cap is a business control, not a correctness-of-service guarantee, but
     worth knowing if this is ever relied on as a hard ceiling.
     """
-    if key.monthly_budget_usd is None:
+    if account.monthly_budget_usd is None:
         return True, None
 
     now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
-    spent = await get_period_spend(session, redis, key_id=key.id, now=now)
+    spent = await get_period_spend(session, redis, account_id=account.id, now=now)
 
     threshold = (
         alert_threshold if alert_threshold is not None else get_settings().budget_alert_threshold
     )
-    await _maybe_alert(redis, key.id, period, spent, key.monthly_budget_usd, threshold)
+    await _maybe_alert(redis, account.id, period, spent, account.monthly_budget_usd, threshold)
 
-    return spent < key.monthly_budget_usd, spent
+    return spent < account.monthly_budget_usd, spent
 
 
 def _budget_exceeded(budget: float, spent: float) -> HTTPException:
@@ -283,22 +286,25 @@ async def require_budget(
     key: ApiKey = Depends(require_rate_limit),
     session: AsyncSession = Depends(get_session),
 ) -> ApiKey:
-    """FastAPI dependency enforcing a per-key monthly USD spend cap.
+    """FastAPI dependency enforcing the account's monthly USD spend cap.
 
     Chains after `require_rate_limit` (itself chained after `require_api_key`),
-    so auth and rate limiting are checked first. Raises `HTTPException(429)`
-    once the key's current-period spend reaches its `monthly_budget_usd`.
-    Keys with no budget set (None) are unaffected.
+    so auth and rate limiting are checked first. Loads the caller's Account
+    (the shared budget pool) and raises `HTTPException(429)` once
+    the account's current-period spend reaches its `monthly_budget_usd`.
+    Accounts with no budget set (None) are unaffected. Returns the ApiKey
+    unchanged so downstream handlers keep the same dependency contract.
 
     Deliberately does not fail closed on a Redis outage the way rate
     limiting does: `check_budget`/`get_period_spend` fall back to a DB
     aggregate instead, since a spend cap is a business control, not a
     correctness-of-service concern - the risk of over-spend during a brief
     outage is far smaller than the risk of blocking all traffic for every
-    budgeted key because of it.
+    budgeted account because of it.
     """
     redis = get_redis(get_settings())
-    allowed, spent = await check_budget(session, redis, key)
+    account = await session.get(Account, key.account_id)
+    allowed, spent = await check_budget(session, redis, account)
     if not allowed:
-        raise _budget_exceeded(key.monthly_budget_usd, spent)
+        raise _budget_exceeded(account.monthly_budget_usd, spent)
     return key

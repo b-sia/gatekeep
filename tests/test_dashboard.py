@@ -14,13 +14,15 @@ from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.evals import add_case, create_suite, run_eval_suite
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
+from tests.helpers import create_account, create_key
 
 
 @pytest_asyncio.fixture
 async def raw_key(session):
     """Create and return a raw (unhashed) active API key for auth in requests."""
     raw = generate_key()
-    session.add(ApiKey(name="dashboard-test", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="dashboard-test", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 
@@ -37,6 +39,7 @@ async def _seed_log(
     session,
     *,
     key_id: int,
+    account_id: int | None = None,
     model: str,
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
@@ -55,10 +58,17 @@ async def _seed_log(
     `path`/`duration_ms`/`provider_ms`/`ttft_ms` default to None, matching a
     pre-0012 row: such rows are deliberately excluded from every latency
     query, so latency tests must pass `path` explicitly. `outcome` defaults
-    to None, matching a pre-0013 (or successful) row.
+    to None, matching a pre-0013 (or successful) row. `account_id` defaults to
+    the account that owns `key_id` (looked up), so single-tenant tests need
+    not pass it; multi-account scoping tests pass it explicitly.
     """
+    if account_id is None:
+        account_id = (
+            await session.execute(select(ApiKey.account_id).where(ApiKey.id == key_id))
+        ).scalar_one()
     log = RequestLog(
         key_id=key_id,
+        account_id=account_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -105,6 +115,74 @@ async def test_evals_requires_auth(client):
 async def test_prompts_requires_auth(client):
     r = await client.get("/dashboard/api/prompts")
     assert r.status_code == 401
+
+
+# -- account scoping ---------------------------------------------------------
+
+
+async def _account_with_key(session, *, name, is_operator=False):
+    """Create an account and one key on it, returning (raw_key, key_id, account_id)."""
+    account = await create_account(session, name=name, is_operator=is_operator)
+    raw = generate_key()
+    key = await create_key(session, account, name=name, key_hash=hash_key(raw))
+    return raw, key.id, account.id
+
+
+async def test_usage_summary_scopes_to_caller_account(client, session):
+    """A non-operator account's dashboard reads only its own usage."""
+    raw_a, key_a, acct_a = await _account_with_key(session, name="A")
+    raw_b, key_b, acct_b = await _account_with_key(session, name="B")
+    await session.commit()
+
+    await _seed_log(session, key_id=key_a, account_id=acct_a, model="gpt-4o", cost_usd=1.0)
+    await _seed_log(session, key_id=key_b, account_id=acct_b, model="gpt-4o", cost_usd=5.0)
+
+    r = await client.get(
+        "/dashboard/api/usage/summary", headers={"Authorization": f"Bearer {raw_a}"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # A sees only its own $1.0, not B's $5.0.
+    assert body["cost_usd"] == pytest.approx(1.0)
+    assert body["request_count"] == 1
+    assert {row["key"] for row in body["by_key"]} == {str(key_a)}
+
+
+async def test_operator_sees_fleet_wide(client, session):
+    """An is_operator account's dashboard aggregates across every account."""
+    raw_a, key_a, acct_a = await _account_with_key(session, name="A")
+    raw_b, key_b, acct_b = await _account_with_key(session, name="B")
+    raw_op, key_op, acct_op = await _account_with_key(session, name="ops", is_operator=True)
+    await session.commit()
+
+    await _seed_log(session, key_id=key_a, account_id=acct_a, model="gpt-4o", cost_usd=1.0)
+    await _seed_log(session, key_id=key_b, account_id=acct_b, model="gpt-4o", cost_usd=5.0)
+
+    r = await client.get(
+        "/dashboard/api/usage/summary", headers={"Authorization": f"Bearer {raw_op}"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # An operator account sees both accounts' totals.
+    assert body["cost_usd"] == pytest.approx(6.0)
+    assert {str(key_a), str(key_b)} <= {row["key"] for row in body["by_key"]}
+
+
+async def test_non_operator_cannot_read_other_account_by_key_id(client, session):
+    """A client-supplied key_id for another account can't leak its data."""
+    raw_a, key_a, acct_a = await _account_with_key(session, name="A")
+    raw_b, key_b, acct_b = await _account_with_key(session, name="B")
+    await session.commit()
+
+    await _seed_log(session, key_id=key_b, account_id=acct_b, model="gpt-4o", cost_usd=5.0)
+
+    # A passes B's key_id as a filter; the account scope ANDs to empty, no leak.
+    r = await client.get(
+        f"/dashboard/api/usage/summary?key_id={key_b}",
+        headers={"Authorization": f"Bearer {raw_a}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["request_count"] == 0
 
 
 # -- usage summary ----------------------------------------------------------

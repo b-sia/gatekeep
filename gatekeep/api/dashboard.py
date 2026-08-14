@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.db import get_session
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.models import (
+    Account,
     ApiKey,
     EvalRun,
     EvalSuite,
@@ -24,6 +25,31 @@ router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
 _NO_PROMPT_LABEL = "(none)"
 _FAILED_OUTCOMES = ("provider_error", "client_disconnect")
+
+
+async def _require_caller_account(
+    caller: ApiKey = Depends(require_api_key),
+    session: AsyncSession = Depends(get_session),
+) -> Account:
+    """Resolve the authenticated key's Account, for account-scoped dashboards.
+
+    `account_id` is always derived server-side from the authenticated key,
+    never accepted as a client-supplied parameter.
+    """
+    return await session.get(Account, caller.account_id)
+
+
+def _account_scope(caller_account: Account) -> list:
+    """Return the WHERE clauses restricting a usage query to the caller's account.
+
+    A non-operator account sees only its own rows; an operator
+    account sees the whole fleet, so this returns no clause. The scope is
+    ANDed onto every query, so a non-operator passing another account's
+    `key_id` filter gets an empty result rather than a cross-tenant read.
+    """
+    if caller_account.is_operator:
+        return []
+    return [RequestLog.account_id == caller_account.id]
 
 
 def _default_window() -> tuple[datetime, datetime]:
@@ -175,7 +201,7 @@ async def usage_summary(
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    caller_account: Account = Depends(_require_caller_account),
 ) -> UsageSummaryResponse:
     """Return cost/usage totals over a time range, broken down by model, key,
     and prompt name.
@@ -188,6 +214,7 @@ async def usage_summary(
     start = start or default_start
     end = end or default_end
     filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
+    filters += _account_scope(caller_account)
 
     totals_row = (
         await session.execute(
@@ -294,7 +321,7 @@ async def usage_timeseries(
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    caller_account: Account = Depends(_require_caller_account),
 ) -> TimeseriesResponse:
     """Return request volume, cache-hit count, cost, and token/spend/savings
     totals, bucketed by minute, hour, or day.
@@ -307,6 +334,7 @@ async def usage_timeseries(
     start = start or default_start
     end = end or default_end
     filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
+    filters += _account_scope(caller_account)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (
@@ -400,7 +428,7 @@ async def usage_timeseries_by_model(
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    caller_account: Account = Depends(_require_caller_account),
 ) -> UsageByModelTimeseriesResponse:
     """Return request volume, tokens, and cost, bucketed by both time and
     model, for the per-model usage-over-time panel.
@@ -412,6 +440,7 @@ async def usage_timeseries_by_model(
     start = start or default_start
     end = end or default_end
     filters = _base_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
+    filters += _account_scope(caller_account)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (
@@ -683,7 +712,7 @@ async def latency_summary(
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    caller_account: Account = Depends(_require_caller_account),
 ) -> LatencySummaryResponse:
     """Return latency percentiles over a time range, broken down by path,
     model, key, and prompt name.
@@ -698,6 +727,7 @@ async def latency_summary(
     start = start or default_start
     end = end or default_end
     filters = _latency_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
+    filters += _account_scope(caller_account)
 
     row = (
         await session.execute(
@@ -799,7 +829,7 @@ async def latency_timeseries(
     key_id: int | None = Query(default=None),
     prompt_name: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    caller_account: Account = Depends(_require_caller_account),
 ) -> LatencyTimeseriesResponse:
     """Return end-to-end, provider, gateway-overhead, and TTFT percentiles
     bucketed by minute, hour, or day.
@@ -829,6 +859,7 @@ async def latency_timeseries(
     start = start or default_start
     end = end or default_end
     filters = _latency_filters(start, end, model=model, key_id=key_id, prompt_name=prompt_name)
+    filters += _account_scope(caller_account)
 
     bucket = func.date_trunc(interval, RequestLog.created_at)
     rows = (

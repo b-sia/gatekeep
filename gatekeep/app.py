@@ -219,6 +219,7 @@ async def _finish_request(
     path: str,
     provider_ms: float | None,
     key_id: int,
+    account_id: int,
     prompt_tokens: int,
     completion_tokens: int,
     response_id: str,
@@ -271,6 +272,7 @@ async def _finish_request(
     await log_request(
         session,
         key_id=key_id,
+        account_id=account_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -302,6 +304,7 @@ async def _finish_failed_request(
     model: str,
     provider_started: float,
     key_id: int,
+    account_id: int,
     response_id: str,
     prompt_name: str | None,
     routed_from: str | None,
@@ -357,6 +360,7 @@ async def _finish_failed_request(
         await log_request(
             session,
             key_id=key_id,
+            account_id=account_id,
             model=model,
             prompt_tokens=0,
             completion_tokens=0,
@@ -477,6 +481,7 @@ async def chat_completions(
     # implicit lazy refresh that async SQLAlchemy forbids, raising
     # MissingGreenlet and turning a benign cache race into a 500.
     key_id = key.id
+    account_id = key.account_id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -517,6 +522,7 @@ async def chat_completions(
                 payload,
                 model,
                 key_id=key_id,
+                account_id=account_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
@@ -528,7 +534,7 @@ async def chat_completions(
     redis = get_redis(settings)
     request_hash = hash_request(payload)
     try:
-        cached = await get_cached_response(redis, request_hash)
+        cached = await get_cached_response(redis, account_id, request_hash)
     except RedisError:
         logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
@@ -543,6 +549,7 @@ async def chat_completions(
             path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
+            account_id=account_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
@@ -561,6 +568,7 @@ async def chat_completions(
         semantic_match = await find_semantic_match(
             session,
             embedding,
+            account_id=account_id,
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
@@ -578,6 +586,7 @@ async def chat_completions(
                 path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
+                account_id=account_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
@@ -603,6 +612,7 @@ async def chat_completions(
             model=model,
             provider_started=provider_started,
             key_id=key_id,
+            account_id=account_id,
             response_id=new_completion_id(),
             prompt_name=req.prompt_name,
             routed_from=routed_from,
@@ -614,6 +624,7 @@ async def chat_completions(
     try:
         await set_cached_response(
             redis,
+            account_id,
             request_hash,
             response,
             ttl_seconds=settings.cache_exact_ttl_seconds,
@@ -624,6 +635,7 @@ async def chat_completions(
     if embedding is not None:
         await store_cached_response(
             session,
+            account_id=account_id,
             exact_hash=request_hash,
             user_messages_text=embeddable_text,
             embedding=embedding,
@@ -637,6 +649,7 @@ async def chat_completions(
         await record_request_sample(
             session,
             key_id=key_id,
+            account_id=account_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
@@ -649,6 +662,7 @@ async def chat_completions(
         path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
+        account_id=account_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
@@ -690,6 +704,7 @@ async def messages(
     # implicit lazy refresh that async SQLAlchemy forbids, raising
     # MissingGreenlet and turning a benign cache race into a 500.
     key_id = key.id
+    account_id = key.account_id
     served_prompt_version: int | None = None
     if req.prompt_name is not None:
         try:
@@ -726,6 +741,7 @@ async def messages(
                 payload,
                 model,
                 key_id=key_id,
+                account_id=account_id,
                 prompt_name=req.prompt_name,
                 routed_from=routed_from,
                 prompt_version_num=served_prompt_version,
@@ -737,7 +753,7 @@ async def messages(
     redis = get_redis(settings)
     request_hash = hash_request(payload)
     try:
-        cached = await get_cached_response(redis, request_hash)
+        cached = await get_cached_response(redis, account_id, request_hash)
     except RedisError:
         logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
@@ -752,6 +768,7 @@ async def messages(
             path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
+            account_id=account_id,
             prompt_tokens=cached.usage.prompt_tokens,
             completion_tokens=cached.usage.completion_tokens,
             response_id=cached.id,
@@ -770,6 +787,7 @@ async def messages(
         semantic_match = await find_semantic_match(
             session,
             embedding,
+            account_id=account_id,
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
@@ -787,6 +805,7 @@ async def messages(
                 path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
+                account_id=account_id,
                 prompt_tokens=semantic_response.usage.prompt_tokens,
                 completion_tokens=semantic_response.usage.completion_tokens,
                 response_id=semantic_response.id,
@@ -812,6 +831,7 @@ async def messages(
             model=model,
             provider_started=provider_started,
             key_id=key_id,
+            account_id=account_id,
             response_id=new_message_id(),
             prompt_name=req.prompt_name,
             routed_from=routed_from,
@@ -824,6 +844,7 @@ async def messages(
     try:
         await set_cached_response(
             redis,
+            account_id,
             request_hash,
             openai_shaped,
             ttl_seconds=settings.cache_exact_ttl_seconds,
@@ -834,6 +855,7 @@ async def messages(
     if embedding is not None:
         await store_cached_response(
             session,
+            account_id=account_id,
             exact_hash=request_hash,
             user_messages_text=embeddable_text,
             embedding=embedding,
@@ -847,6 +869,7 @@ async def messages(
         await record_request_sample(
             session,
             key_id=key_id,
+            account_id=account_id,
             prompt_name=req.prompt_name,
             model=model,
             input_messages=payload["messages"],
@@ -859,6 +882,7 @@ async def messages(
         path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
+        account_id=account_id,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=messages_response.id,
@@ -876,6 +900,7 @@ async def _messages_sse(
     model: str,
     *,
     key_id: int,
+    account_id: int,
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
@@ -981,6 +1006,7 @@ async def _messages_sse(
                 await log_request(
                     session,
                     key_id=key_id,
+                    account_id=account_id,
                     model=model,
                     prompt_tokens=input_tokens,
                     completion_tokens=output_tokens,
@@ -1083,6 +1109,7 @@ async def _sse(
     model: str,
     *,
     key_id: int,
+    account_id: int,
     prompt_name: str | None = None,
     routed_from: str | None = None,
     prompt_version_num: int | None = None,
@@ -1198,6 +1225,7 @@ async def _sse(
                 await log_request(
                     session,
                     key_id=key_id,
+                    account_id=account_id,
                     model=model,
                     prompt_tokens=input_tokens,
                     completion_tokens=output_tokens,

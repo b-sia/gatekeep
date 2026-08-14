@@ -100,22 +100,24 @@ def _rate_limiter_unavailable() -> HTTPException:
 
 async def check_rate_limit(
     redis: Redis,
-    key_id: int,
+    account_id: int,
     capacity: int,
     refill_rate: float,
     now: float | None = None,
 ) -> tuple[bool, float]:
-    """Check and, if allowed, consume one token from a key's Redis token bucket.
+    """Check and, if allowed, consume one token from an account's Redis token bucket.
 
     Runs the token-bucket refill/consume logic as a single Lua script so
-    concurrent requests for the same `key_id` can't race. `now` defaults to
-    the current time and is only overridable for tests.
+    concurrent requests for the same `account_id` can't race. Rate limiting
+    is pooled at the account: every key on the account draws from
+    one shared bucket. `now` defaults to the current time and is only
+    overridable for tests.
     Returns (allowed, tokens_remaining_after_this_request).
     """
     allowed, tokens = await redis.eval(
         _TOKEN_BUCKET_SCRIPT,
         1,
-        f"ratelimit:{key_id}",
+        f"ratelimit:{account_id}",
         capacity,
         refill_rate,
         now if now is not None else time.time(),
@@ -124,14 +126,15 @@ async def check_rate_limit(
 
 
 async def require_rate_limit(key: ApiKey = Depends(require_api_key)) -> ApiKey:
-    """FastAPI dependency enforcing a per-key token-bucket rate limit.
+    """FastAPI dependency enforcing a per-account token-bucket rate limit.
 
-    Chains after `require_api_key` so it has the resolved `ApiKey.id` to use
-    as the Redis bucket key. Raises `HTTPException(429)` with a Retry-After
-    header when the key's bucket has no tokens left. Fails closed: if Redis
-    itself is unreachable, raises `HTTPException(503)` rather than either
-    silently letting the request through or crashing with an unhandled 500,
-    since fail-open on spend controls during an outage is the bigger risk.
+    Chains after `require_api_key` so it has the resolved `ApiKey.account_id`
+    to use as the Redis bucket key (rate limiting is pooled at the account).
+    Raises `HTTPException(429)` with a Retry-After header when the
+    account's bucket has no tokens left. Fails closed: if Redis itself is
+    unreachable, raises `HTTPException(503)` rather than either silently
+    letting the request through or crashing with an unhandled 500, since
+    fail-open on spend controls during an outage is the bigger risk.
     """
     settings = get_settings()
     redis = get_redis(settings)
@@ -139,7 +142,7 @@ async def require_rate_limit(key: ApiKey = Depends(require_api_key)) -> ApiKey:
     refill_rate = settings.rate_limit_refill_rate
 
     try:
-        allowed, tokens = await check_rate_limit(redis, key.id, capacity, refill_rate)
+        allowed, tokens = await check_rate_limit(redis, key.account_id, capacity, refill_rate)
     except RedisError:
         raise _rate_limiter_unavailable() from None
     if not allowed:

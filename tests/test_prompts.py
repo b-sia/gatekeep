@@ -33,6 +33,7 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.base import CompletionResult
+from tests.helpers import create_account
 
 
 class _FakeProvider:
@@ -217,21 +218,26 @@ async def test_list_prompts_returns_all_prompts(session):
 async def test_promote_invalidates_exact_cache_entries_tagged_with_prompt(session):
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
+    account = await create_account(session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
+    await set_cached_response(
+        redis, account.id, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
 
     await promote_prompt("system-context", 2, session, redis=redis)
 
-    assert await get_cached_response(redis, h) is None
+    assert await get_cached_response(redis, account.id, h) is None
 
 
 async def test_promote_invalidates_semantic_cache_rows_tagged_with_prompt(session):
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
+    account = await create_account(session)
     embedding = embed_text("hello")
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="tagged-hash",
         user_messages_text="hello",
         embedding=embedding,
@@ -261,6 +267,7 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
     await create_prompt("a", "a1", session)
     await add_prompt_version("a", "a2 text", session)
     await create_prompt("b", "b1", session)
+    account = await create_account(session)
     redis = get_redis()
 
     h_a = hash_request(
@@ -276,13 +283,18 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
             "max_tokens": 1,
         }
     )
-    await set_cached_response(redis, h_a, _response("a"), ttl_seconds=60, prompt_name="a")
-    await set_cached_response(redis, h_b, _response("b"), ttl_seconds=60, prompt_name="b")
-    await set_cached_response(redis, h_plain, _response("plain"), ttl_seconds=60)
+    await set_cached_response(
+        redis, account.id, h_a, _response("a"), ttl_seconds=60, prompt_name="a"
+    )
+    await set_cached_response(
+        redis, account.id, h_b, _response("b"), ttl_seconds=60, prompt_name="b"
+    )
+    await set_cached_response(redis, account.id, h_plain, _response("plain"), ttl_seconds=60)
 
     embedding = embed_text("x")
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="b-hash",
         user_messages_text="x",
         embedding=embedding,
@@ -293,6 +305,7 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
     )
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="plain-hash",
         user_messages_text="x2",
         embedding=embedding,
@@ -303,9 +316,9 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
 
     await promote_prompt("a", 2, session, redis=redis)
 
-    assert await get_cached_response(redis, h_a) is None
-    assert await get_cached_response(redis, h_b) is not None
-    assert await get_cached_response(redis, h_plain) is not None
+    assert await get_cached_response(redis, account.id, h_a) is None
+    assert await get_cached_response(redis, account.id, h_b) is not None
+    assert await get_cached_response(redis, account.id, h_plain) is not None
 
     rows = (await session.execute(select(CachedResponse))).scalars().all()
     hashes = {r.exact_hash for r in rows}
@@ -375,13 +388,16 @@ async def test_rollback_invalidates_cache_for_the_prompt(session):
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
     await promote_prompt("system-context", 2, session)
+    account = await create_account(session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
+    await set_cached_response(
+        redis, account.id, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
 
     await rollback_prompt("system-context", session, redis=redis)
 
-    assert await get_cached_response(redis, h) is None
+    assert await get_cached_response(redis, account.id, h) is None
 
 
 # -- A/B candidate: set_candidate_version / clear_candidate_version --------
@@ -564,12 +580,15 @@ async def test_setting_candidate_does_not_invalidate_cache(session):
     active version (what most traffic still gets) hasn't changed."""
     await create_prompt("system-context", "v1", session)
     await add_prompt_version("system-context", "v2 text", session)
+    account = await create_account(session)
     redis = get_redis()
     h = hash_request({"model": "m", "messages": [], "max_tokens": 1})
-    await set_cached_response(redis, h, _response(), ttl_seconds=60, prompt_name="system-context")
+    await set_cached_response(
+        redis, account.id, h, _response(), ttl_seconds=60, prompt_name="system-context"
+    )
 
     await set_candidate_version("system-context", 2, 10.0, session)
-    assert await get_cached_response(redis, h) is not None
+    assert await get_cached_response(redis, account.id, h) is not None
 
     await clear_candidate_version("system-context", session)
-    assert await get_cached_response(redis, h) is not None
+    assert await get_cached_response(redis, account.id, h) is not None

@@ -37,6 +37,7 @@ def extract_embeddable_text(payload: dict[str, Any]) -> str:
 async def store_cached_response(
     session: AsyncSession,
     *,
+    account_id: int,
     exact_hash: str,
     user_messages_text: str,
     embedding: list[float],
@@ -48,9 +49,13 @@ async def store_cached_response(
 ) -> CachedResponse | None:
     """Insert a new semantic-cache row and commit it.
 
-    If a row with the same `exact_hash` was inserted concurrently by another
-    request (unique-constraint violation), rolls back and returns None
-    instead of raising, since the cache write is best-effort and the
+    `account_id` scopes the row to its tenant; the cache is
+    partitioned per account, so exact_hash is unique per (account_id,
+    exact_hash) rather than globally.
+
+    If a row with the same `(account_id, exact_hash)` was inserted concurrently
+    by another request (unique-constraint violation), rolls back and returns
+    None instead of raising, since the cache write is best-effort and the
     original request's response has already been served. `prompt_name`, if
     set, tags the row so a later prompt promotion can find and delete it.
     `prompt_version_num`, if set, additionally tags the row with which
@@ -59,6 +64,7 @@ async def store_cached_response(
     current request - see that function's docstring for why this matters.
     """
     row = CachedResponse(
+        account_id=account_id,
         exact_hash=exact_hash,
         user_messages_text=user_messages_text,
         embedding=embedding,
@@ -99,6 +105,7 @@ async def find_semantic_match(
     session: AsyncSession,
     embedding: list[float],
     *,
+    account_id: int,
     model: str,
     threshold: float,
     max_age_seconds: int,
@@ -110,7 +117,8 @@ async def find_semantic_match(
     `max_age_seconds` are excluded, matching the exact cache's TTL so both
     caches invalidate together. Only rows cached for the same `model` are
     considered, so a semantically-similar prompt never returns a different
-    model's cached answer.
+    model's cached answer. Only rows belonging to `account_id` are considered,
+    so a match never crosses tenants.
 
     If `prompt_version_num` is given (the caller resolved a `prompt_name` to
     a specific PromptVersion for this request), only rows tagged with that
@@ -131,6 +139,7 @@ async def find_semantic_match(
     distance = CachedResponse.embedding.cosine_distance(embedding)
     stmt = (
         select(CachedResponse, distance.label("distance"))
+        .where(CachedResponse.account_id == account_id)
         .where(CachedResponse.created_at >= cutoff)
         .where(CachedResponse.model == model)
     )

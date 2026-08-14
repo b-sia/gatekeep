@@ -7,6 +7,7 @@ from sqlalchemy import select
 from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.models import ApiKey, RequestLog
+from tests.helpers import create_account, create_key
 
 
 def test_calculate_cost_known_model():
@@ -47,7 +48,8 @@ def test_calculate_cost_google_gemini_flash_is_priced():
 
 async def test_log_request_persists_row(session):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -55,6 +57,7 @@ async def test_log_request_persists_row(session):
     log = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="claude-sonnet-5",
         prompt_tokens=100,
         completion_tokens=50,
@@ -74,9 +77,30 @@ async def test_log_request_persists_row(session):
     assert found.created_at is not None
 
 
+async def test_log_request_stamps_account_id(session):
+    """The row is denormalized with the caller's account_id."""
+    account = await create_account(session)
+    key = await create_key(session, account, key_hash="acct-log")
+    await session.commit()
+
+    await log_request(
+        session,
+        key_id=key.id,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        prompt_tokens=10,
+        completion_tokens=5,
+        response_id="resp-1",
+    )
+    row = (await session.execute(select(RequestLog))).scalar_one()
+    assert row.account_id == account.id
+    assert row.key_id == key.id
+
+
 async def test_log_request_can_record_cache_hit(session):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -84,6 +108,7 @@ async def test_log_request_can_record_cache_hit(session):
     log = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=0,
@@ -99,7 +124,8 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
     session,
 ):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -107,6 +133,7 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
     log = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="claude-sonnet-5",
         prompt_tokens=0,
         completion_tokens=0,
@@ -122,13 +149,15 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
 
 async def test_log_request_records_latency_columns(session):
     """Timing kwargs land on the row; omitting them leaves NULLs."""
-    key = ApiKey(name="latency", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(name="latency", key_hash=hash_key(generate_key()), account_id=account.id)
     session.add(key)
     await session.commit()
 
     timed = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -144,13 +173,15 @@ async def test_log_request_records_latency_columns(session):
 
 async def test_log_request_latency_columns_default_to_none(session):
     """A caller with no timing available must still be able to log."""
-    key = ApiKey(name="untimed", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(name="untimed", key_hash=hash_key(generate_key()), account_id=account.id)
     session.add(key)
     await session.commit()
 
     untimed = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -162,7 +193,8 @@ async def test_log_request_latency_columns_default_to_none(session):
 
 
 async def test_log_request_persists_path(session):
-    key = ApiKey(name="path-key", key_hash="hash-path")
+    account = await create_account(session)
+    key = ApiKey(name="path-key", key_hash="hash-path", account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -170,6 +202,7 @@ async def test_log_request_persists_path(session):
     log = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -181,7 +214,8 @@ async def test_log_request_persists_path(session):
 
 async def test_log_request_path_defaults_to_none(session):
     """A caller with no path available must still be able to log."""
-    key = ApiKey(name="no-path-key", key_hash="hash-no-path")
+    account = await create_account(session)
+    key = ApiKey(name="no-path-key", key_hash="hash-no-path", account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -189,6 +223,7 @@ async def test_log_request_path_defaults_to_none(session):
     log = await log_request(
         session,
         key_id=key.id,
+        account_id=account.id,
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -214,19 +249,24 @@ def test_estimate_tokens_rounds_up_on_a_partial_final_token():
 
 
 @pytest_asyncio.fixture
-async def key_id(session):
+async def key_and_account_id(session):
+    """Return a (key_id, account_id) pair for a freshly created key and account."""
     raw = generate_key()
-    key = ApiKey(name="accounting-test", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="accounting-test", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
-    return key.id
+    return key.id, account.id
 
 
-async def test_log_request_defaults_outcome_to_ok(session, key_id):
+async def test_log_request_defaults_outcome_to_ok(session, key_and_account_id):
+    """`outcome` defaults to "ok" when the caller doesn't pass one."""
+    key_id, account_id = key_and_account_id
     log = await log_request(
         session,
         key_id=key_id,
+        account_id=account_id,
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,
@@ -235,10 +275,13 @@ async def test_log_request_defaults_outcome_to_ok(session, key_id):
     assert log.outcome == "ok"
 
 
-async def test_log_request_persists_explicit_outcome(session, key_id):
+async def test_log_request_persists_explicit_outcome(session, key_and_account_id):
+    """An explicit `outcome` value (e.g. "provider_error") is stored as-is."""
+    key_id, account_id = key_and_account_id
     log = await log_request(
         session,
         key_id=key_id,
+        account_id=account_id,
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,
