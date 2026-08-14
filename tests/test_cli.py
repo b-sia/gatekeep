@@ -205,6 +205,7 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(session, monk
 
 
 async def test_set_budget_sets_amount_on_existing_account(session):
+    """`key set-budget <name> <amount>` sets the account's monthly_budget_usd."""
     account = await create_account(session, name="budget-account")
     await session.commit()
     account_id = account.id
@@ -229,6 +230,7 @@ async def test_set_budget_unlimited_clears_amount(session):
 
 
 async def test_set_budget_raises_for_unknown_account_name():
+    """A name matching no account raises rather than silently no-op'ing."""
     with pytest.raises(ValueError, match="no account named"):
         await _set_budget("does-not-exist", 5.0, unlimited=False)
 

@@ -96,6 +96,7 @@ def test_extract_embeddable_text_multiple_user_messages():
 
 
 async def test_store_cached_response_persists_row(session, account):
+    """A stored row round-trips its fields, including the owning account."""
     embedding = embed_text("what is the capital of France?")
     await store_cached_response(
         session,
@@ -194,6 +195,7 @@ async def test_find_semantic_match_is_account_scoped(session):
 
 
 async def test_find_semantic_match_returns_none_when_empty(session, account):
+    """No cached rows for the account yet, so any lookup is a miss."""
     embedding = embed_text("anything")
     match = await find_semantic_match(
         session,
@@ -207,6 +209,7 @@ async def test_find_semantic_match_returns_none_when_empty(session, account):
 
 
 async def test_find_semantic_match_finds_similar_above_threshold(session, account):
+    """A near-identical query embedding above the threshold matches."""
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
@@ -233,6 +236,7 @@ async def test_find_semantic_match_finds_similar_above_threshold(session, accoun
 
 
 async def test_find_semantic_match_ignores_row_from_different_model(session, account):
+    """A row cached under a different model never matches this model's query."""
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
@@ -291,6 +295,7 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
 
 
 async def test_find_semantic_match_finds_row_from_same_prompt_version(session, account):
+    """A row tagged with the request's own prompt_version_num still matches."""
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
@@ -348,6 +353,7 @@ async def test_find_semantic_match_without_prompt_version_num_is_unscoped(sessio
 
 
 async def test_find_semantic_match_none_below_threshold(session, account):
+    """A dissimilar query embedding falls below threshold and misses."""
     await store_cached_response(
         session,
         account_id=account.id,
@@ -371,6 +377,7 @@ async def test_find_semantic_match_none_below_threshold(session, account):
 
 
 async def test_find_semantic_match_excludes_expired_rows(session, account):
+    """A row older than max_age_seconds is excluded even if otherwise similar."""
     stored_text = "What is the capital of France?"
     row = CachedResponse(
         account_id=account.id,

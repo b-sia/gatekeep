@@ -57,6 +57,7 @@ async def test_check_rate_limit_refills_over_time():
 
 
 async def test_check_rate_limit_buckets_are_independent_per_account():
+    """Exhausting one account's bucket doesn't affect a different account's."""
     redis = get_redis()
     await check_rate_limit(redis, account_id=4, capacity=1, refill_rate=0.001, now=1000.0)
     allowed, _ = await check_rate_limit(

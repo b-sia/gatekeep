@@ -30,6 +30,7 @@ async def test_api_key_persists(session):
 
 
 async def test_account_owns_keys_and_name_unique_per_account(session):
+    """ApiKey.name is unique per (account_id, name), not globally (decision 7)."""
     acct_a = Account(name="team-a")
     acct_b = Account(name="team-b")
     session.add_all([acct_a, acct_b])
@@ -48,6 +49,7 @@ async def test_account_owns_keys_and_name_unique_per_account(session):
 
 
 async def test_account_defaults(session):
+    """A freshly created account defaults to non-operator, unlimited budget."""
     acct = Account(name="team-c")
     session.add(acct)
     await session.commit()
@@ -56,6 +58,7 @@ async def test_account_defaults(session):
 
 
 async def test_account_name_is_globally_unique(session):
+    """Account.name has a global uniqueness constraint, unlike ApiKey.name."""
     session.add(Account(name="only-one"))
     await session.commit()
 

@@ -78,6 +78,7 @@ async def test_log_request_persists_row(session):
 
 
 async def test_log_request_stamps_account_id(session):
+    """The row is denormalized with the caller's account_id (decision 9)."""
     account = await create_account(session)
     key = await create_key(session, account, key_hash="acct-log")
     await session.commit()
@@ -260,6 +261,7 @@ async def key_and_account_id(session):
 
 
 async def test_log_request_defaults_outcome_to_ok(session, key_and_account_id):
+    """`outcome` defaults to "ok" when the caller doesn't pass one."""
     key_id, account_id = key_and_account_id
     log = await log_request(
         session,
@@ -274,6 +276,7 @@ async def test_log_request_defaults_outcome_to_ok(session, key_and_account_id):
 
 
 async def test_log_request_persists_explicit_outcome(session, key_and_account_id):
+    """An explicit `outcome` value (e.g. "provider_error") is stored as-is."""
     key_id, account_id = key_and_account_id
     log = await log_request(
         session,

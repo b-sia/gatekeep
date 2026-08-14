@@ -76,6 +76,7 @@ async def test_get_period_spend_falls_back_to_db_when_redis_cache_miss(session):
 
 
 async def test_get_period_spend_ignores_other_periods_and_accounts(session):
+    """The DB-fallback aggregate sums only the target account's spend."""
     account, key = await _make_account_and_key(session)
     other_account, other_key = await _make_account_and_key(session)
     await log_request(

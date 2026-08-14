@@ -4,6 +4,7 @@ from tests.helpers import create_account
 
 
 async def _key(session):
+    """Create and flush an ApiKey on a freshly created account."""
     account = await create_account(session)
     key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
@@ -53,6 +54,7 @@ async def test_recent_samples_filters_by_prompt_name(session):
 
 
 async def test_record_request_sample_stamps_account(session):
+    """The persisted row carries the caller's account_id (decision 4)."""
     key = await _key(session)
     sample = await record_request_sample(
         session,

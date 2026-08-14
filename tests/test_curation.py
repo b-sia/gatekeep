@@ -16,6 +16,10 @@ from tests.helpers import FakeProvider, create_account
 
 
 async def _seed_samples(session, prompt_name, n):
+    """Create an account/key and record `n` request samples for `prompt_name`.
+
+    Returns the account, so callers can assert curated cases inherit its id.
+    """
     account = await create_account(session)
     key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
@@ -50,6 +54,7 @@ async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
 
 
 async def test_curated_cases_carry_sample_account(session):
+    """Every curated case inherits its source sample's account_id (decision 3)."""
     await create_suite("p", session, pass_threshold=0.9)
     account = await _seed_samples(session, "p", 2)
     provider = FakeProvider(["criteria for q0", "criteria for q1"])
