@@ -298,12 +298,20 @@ async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
     if not unlimited and amount <= 0:
         raise ValueError("amount must be positive")
     async with SessionLocal() as session:
-        account = (
-            await session.execute(select(Account).where(Account.name == name))
-        ).scalar_one_or_none()
-        if account is None:
+        accounts = (
+            (await session.execute(select(Account).where(Account.name == name))).scalars().all()
+        )
+        if not accounts:
             raise ValueError(f"no account named {name!r}")
-        account.monthly_budget_usd = None if unlimited else amount
+        # account names are not globally unique (migration 0014 mints one account
+        # per key, copying the key's non-unique name), so a collision is possible;
+        # fail with a clear message rather than an unhandled MultipleResultsFound.
+        if len(accounts) > 1:
+            raise ValueError(
+                f"account name {name!r} is ambiguous - {len(accounts)} accounts share it; "
+                "rename them so the target is unique before setting a budget"
+            )
+        accounts[0].monthly_budget_usd = None if unlimited else amount
         await session.commit()
     if unlimited:
         print(f"cleared budget cap for {name!r} (unlimited)")

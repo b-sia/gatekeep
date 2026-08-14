@@ -233,6 +233,16 @@ async def test_set_budget_raises_for_unknown_account_name():
         await _set_budget("does-not-exist", 5.0, unlimited=False)
 
 
+async def test_set_budget_raises_for_ambiguous_account_name(session):
+    # Migration 0014 can mint several accounts with the same (key-derived) name.
+    await create_account(session, name="dupe")
+    await create_account(session, name="dupe")
+    await session.commit()
+
+    with pytest.raises(ValueError, match="is ambiguous"):
+        await _set_budget("dupe", 5.0, unlimited=False)
+
+
 async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
     await create_account(session, name="budget-account")
     await session.commit()

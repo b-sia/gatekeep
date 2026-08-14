@@ -38,27 +38,24 @@ def upgrade() -> None:
 
     # One account per existing key (decision 8). The account inherits the key's
     # name and monthly budget so today's per-key behavior is reproduced exactly.
+    # A temporary `_src_key_id` column records exactly which key each account was
+    # created from, so the pairing is deterministic rather than relying on
+    # INSERT...SELECT assigning serial ids in the SELECT's output order (which
+    # Postgres does not guarantee).
+    op.add_column("accounts", sa.Column("_src_key_id", sa.Integer(), nullable=True))
     op.execute(
         """
-        INSERT INTO accounts (name, monthly_budget_usd, is_operator, created_at)
-        SELECT name, monthly_budget_usd, false, now() FROM api_keys ORDER BY id
+        INSERT INTO accounts (name, monthly_budget_usd, is_operator, created_at, _src_key_id)
+        SELECT name, monthly_budget_usd, false, now(), id FROM api_keys
         """
     )
-    # Pair each key with the account created from it. Both were inserted in id
-    # order, so row_number() over each lines them up one-to-one.
     op.execute(
         """
-        WITH k AS (
-            SELECT id AS key_id, row_number() OVER (ORDER BY id) AS rn FROM api_keys
-        ),
-        a AS (
-            SELECT id AS account_id, row_number() OVER (ORDER BY id) AS rn FROM accounts
-        )
-        UPDATE api_keys SET account_id = a.account_id
-        FROM k JOIN a ON k.rn = a.rn
-        WHERE api_keys.id = k.key_id
+        UPDATE api_keys SET account_id = accounts.id
+        FROM accounts WHERE accounts._src_key_id = api_keys.id
         """
     )
+    op.drop_column("accounts", "_src_key_id")
     op.alter_column("api_keys", "account_id", nullable=False)
 
     # api_keys.name had no unique constraint before (spec problem 2); add the
