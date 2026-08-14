@@ -34,7 +34,7 @@ async def _require_caller_account(
     """Resolve the authenticated key's Account, for account-scoped dashboards.
 
     `account_id` is always derived server-side from the authenticated key,
-    never accepted as a client-supplied parameter (decision 6, problem 1).
+    never accepted as a client-supplied parameter.
     """
     return await session.get(Account, caller.account_id)
 
@@ -42,7 +42,7 @@ async def _require_caller_account(
 def _account_scope(caller_account: Account) -> list:
     """Return the WHERE clauses restricting a usage query to the caller's account.
 
-    A non-operator account sees only its own rows (decision 6); an operator
+    A non-operator account sees only its own rows; an operator
     account sees the whole fleet, so this returns no clause. The scope is
     ANDed onto every query, so a non-operator passing another account's
     `key_id` filter gets an empty result rather than a cross-tenant read.

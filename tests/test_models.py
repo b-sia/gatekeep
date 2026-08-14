@@ -30,7 +30,7 @@ async def test_api_key_persists(session):
 
 
 async def test_account_owns_keys_and_name_unique_per_account(session):
-    """ApiKey.name is unique per (account_id, name), not globally (decision 7)."""
+    """ApiKey.name is unique per (account_id, name), not globally."""
     acct_a = Account(name="team-a")
     acct_b = Account(name="team-b")
     session.add_all([acct_a, acct_b])

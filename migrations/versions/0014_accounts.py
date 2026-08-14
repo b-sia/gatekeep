@@ -4,7 +4,7 @@ Revision ID: 0014
 Revises: 0013
 Create Date: 2026-08-14
 
-Introduces the tenancy layer (decisions 5, 7, 8): one account per existing
+Introduces the tenancy layer: one account per existing
 key, account_id backfilled then tightened to NOT NULL, api_keys.name made
 unique per (account_id, name), and each key's monthly budget copied onto its
 new account (enforcement flips to the account pool in migration 0018).
@@ -36,7 +36,7 @@ def upgrade() -> None:
     op.add_column("api_keys", sa.Column("account_id", sa.Integer(), nullable=True))
     op.create_foreign_key("fk_api_keys_account_id", "api_keys", "accounts", ["account_id"], ["id"])
 
-    # One account per existing key (decision 8). The account inherits the key's
+    # One account per existing key. The account inherits the key's
     # name and monthly budget so today's per-key behavior is reproduced exactly.
     # A temporary `_src_key_id` column records exactly which key each account was
     # created from, so the pairing is deterministic rather than relying on
@@ -58,8 +58,8 @@ def upgrade() -> None:
     op.drop_column("accounts", "_src_key_id")
     op.alter_column("api_keys", "account_id", nullable=False)
 
-    # api_keys.name had no unique constraint before (spec problem 2); add the
-    # per-account one (decision 7). There is no global constraint to drop.
+    # api_keys.name had no unique constraint before; add the
+    # per-account one. There is no global constraint to drop.
     op.create_unique_constraint("uq_api_keys_account_id_name", "api_keys", ["account_id", "name"])
 
 

@@ -109,7 +109,7 @@ async def check_rate_limit(
 
     Runs the token-bucket refill/consume logic as a single Lua script so
     concurrent requests for the same `account_id` can't race. Rate limiting
-    is pooled at the account (decision 5): every key on the account draws from
+    is pooled at the account: every key on the account draws from
     one shared bucket. `now` defaults to the current time and is only
     overridable for tests.
     Returns (allowed, tokens_remaining_after_this_request).
@@ -129,8 +129,8 @@ async def require_rate_limit(key: ApiKey = Depends(require_api_key)) -> ApiKey:
     """FastAPI dependency enforcing a per-account token-bucket rate limit.
 
     Chains after `require_api_key` so it has the resolved `ApiKey.account_id`
-    to use as the Redis bucket key (rate limiting is pooled at the account,
-    decision 5). Raises `HTTPException(429)` with a Retry-After header when the
+    to use as the Redis bucket key (rate limiting is pooled at the account).
+    Raises `HTTPException(429)` with a Retry-After header when the
     account's bucket has no tokens left. Fails closed: if Redis itself is
     unreachable, raises `HTTPException(503)` rather than either silently
     letting the request through or crashing with an unhandled 500, since

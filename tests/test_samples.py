@@ -54,7 +54,7 @@ async def test_recent_samples_filters_by_prompt_name(session):
 
 
 async def test_record_request_sample_stamps_account(session):
-    """The persisted row carries the caller's account_id (decision 4)."""
+    """The persisted row carries the caller's account_id."""
     key = await _key(session)
     sample = await record_request_sample(
         session,

@@ -267,7 +267,7 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
     by_prompt_key = "cache:exact:by-prompt:greeting"
     tagged_hashes = await redis.smembers(by_prompt_key)
     assert tagged_hashes, "expected the exact-cache write to tag a hash under greeting"
-    # Members are now "{account_id}:{request_hash}" composites (decision 1).
+    # Members are now "{account_id}:{request_hash}" composites.
     for member in tagged_hashes:
         acct_str, _, req_hash = member.partition(":")
         assert await get_cached_response(redis, int(acct_str), req_hash) is not None

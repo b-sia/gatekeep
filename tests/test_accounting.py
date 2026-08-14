@@ -78,7 +78,7 @@ async def test_log_request_persists_row(session):
 
 
 async def test_log_request_stamps_account_id(session):
-    """The row is denormalized with the caller's account_id (decision 9)."""
+    """The row is denormalized with the caller's account_id."""
     account = await create_account(session)
     key = await create_key(session, account, key_hash="acct-log")
     await session.commit()

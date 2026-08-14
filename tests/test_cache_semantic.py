@@ -157,7 +157,7 @@ async def test_store_cached_response_ignores_duplicate_exact_hash(session, accou
 
 
 async def test_find_semantic_match_is_account_scoped(session):
-    """A semantic hit never crosses accounts (decision 1)."""
+    """A semantic hit never crosses accounts."""
     a1 = await create_account(session, name="a1")
     a2 = await create_account(session, name="a2")
     await session.commit()

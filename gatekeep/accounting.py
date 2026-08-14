@@ -105,7 +105,7 @@ async def log_request(
     Also best-effort increments the account's current-period Redis spend
     counter (`budget.record_spend`) so `require_budget` can enforce a monthly
     cap without aggregating `request_logs` on every request; budget is pooled
-    at the account (decision 5). A Redis outage here
+    at the account. A Redis outage here
     only degrades that accelerator (the next budget check falls back to a
     DB aggregate) - it never fails this call or drops the RequestLog row.
 

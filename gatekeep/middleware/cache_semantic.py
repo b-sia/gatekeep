@@ -49,7 +49,7 @@ async def store_cached_response(
 ) -> CachedResponse | None:
     """Insert a new semantic-cache row and commit it.
 
-    `account_id` scopes the row to its tenant (decision 1); the cache is
+    `account_id` scopes the row to its tenant; the cache is
     partitioned per account, so exact_hash is unique per (account_id,
     exact_hash) rather than globally.
 
@@ -117,8 +117,8 @@ async def find_semantic_match(
     `max_age_seconds` are excluded, matching the exact cache's TTL so both
     caches invalidate together. Only rows cached for the same `model` are
     considered, so a semantically-similar prompt never returns a different
-    model's cached answer. Only rows belonging to `account_id` are considered
-    (decision 1), so a match never crosses tenants.
+    model's cached answer. Only rows belonging to `account_id` are considered,
+    so a match never crosses tenants.
 
     If `prompt_version_num` is given (the caller resolved a `prompt_name` to
     a specific PromptVersion for this request), only rows tagged with that

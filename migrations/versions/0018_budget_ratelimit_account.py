@@ -1,4 +1,4 @@
-"""drop api_keys.monthly_budget_usd (budget pooled at the account, decision 5)
+"""drop api_keys.monthly_budget_usd (budget pooled at the account)
 
 Revision ID: 0018
 Revises: 0017

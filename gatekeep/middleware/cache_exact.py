@@ -36,7 +36,7 @@ def hash_request(payload: dict[str, Any]) -> str:
 def _redis_key(account_id: int, request_hash: str) -> str:
     """Build the namespaced, account-scoped Redis key for a request hash.
 
-    Partitioning by account (decision 1) keeps one tenant's exact-cache hit
+    Partitioning by account keeps one tenant's exact-cache hit
     from ever being served to another.
     """
     return f"{_KEY_PREFIX}{account_id}:{request_hash}"
@@ -93,7 +93,7 @@ async def clear_cached_response(redis: Redis, account_id: int, request_hash: str
 async def invalidate_prompt_cache(redis: Redis, prompt_name: str) -> None:
     """Delete every exact-cache entry tagged with `prompt_name`, across all accounts.
 
-    Prompt promotion is a global operator action (decision 2), so this spans
+    Prompt promotion is a global operator action, so this spans
     tenants. The invalidation set stores `account_id:request_hash` members;
     each maps back to its account-scoped Redis key. No-op if no cache entries
     have ever been tagged with this prompt name.

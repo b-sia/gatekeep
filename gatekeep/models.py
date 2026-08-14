@@ -34,7 +34,7 @@ class Account(Base):
     account, and every content/usage row is scoped to the account derived
     server-side from the authenticated key. `monthly_budget_usd` is the
     account's shared monthly spend pool (None means unlimited); `is_operator`
-    grants the fleet-wide dashboard view (decision 6). There is deliberately
+    grants the fleet-wide dashboard view. There is deliberately
     no role hierarchy or RBAC - operator status is a single boolean. `name` is
     globally unique, since it is the human-facing identifier used to look an
     account up (e.g. `gatekeep key set-budget <name>`).
@@ -59,7 +59,7 @@ class ApiKey(Base):
 
     A key is a disposable credential onto its `Account`: rotating or revoking
     it never orphans history, which hangs off the account. `name` is unique
-    only within an account (decision 7), so one tenant's labels never collide
+    only within an account, so one tenant's labels never collide
     with another's namespace.
     """
 
@@ -93,7 +93,7 @@ class RequestLog(Base):
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
     # Denormalized tenant attribution, written at capture time from the
-    # authenticated key (decision 9). Kept on the row rather than joined through
+    # authenticated key. Kept on the row rather than joined through
     # key_id so attribution survives key rotation or revocation, and so
     # account-scoped dashboard/budget aggregates need no join.
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
@@ -150,7 +150,7 @@ class RequestLog(Base):
         # scans (key_id is the leading column), and percentile_cont sorts
         # every row it is handed, so narrowing the window cheaply matters.
         Index("ix_request_logs_created_at", "created_at"),
-        # Account-scoped dashboard and budget aggregates (decisions 5, 6, 9)
+        # Account-scoped dashboard and budget aggregates
         # filter by account_id + created_at; this composite serves them.
         Index("ix_request_logs_account_id_created_at", "account_id", "created_at"),
     )
@@ -239,7 +239,7 @@ class CachedResponse(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    # Tenant the cached response belongs to (decision 1). Partitions the cache
+    # Tenant the cached response belongs to. Partitions the cache
     # so one caller's completion is never served verbatim to another; exact_hash
     # is unique per (account_id, exact_hash), not globally.
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
@@ -261,7 +261,7 @@ class CachedResponse(Base):
             "model",
             "prompt_version_num",
         ),
-        # exact_hash is unique per account, not globally (decision 1), so two
+        # exact_hash is unique per account, not globally, so two
         # tenants can independently cache the same request.
         UniqueConstraint(
             "account_id",
@@ -287,10 +287,10 @@ class RequestSample(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
-    # Denormalized tenant attribution written at capture time (decision 4).
+    # Denormalized tenant attribution written at capture time.
     # Kept on the row rather than joined through key_id so provenance filtering
     # and per-tenant deletion survive key rotation or revocation; this is the
-    # substrate the eval-case provenance tags (decision 3) are derived from.
+    # substrate the eval-case provenance tags are derived from.
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -325,7 +325,7 @@ class EvalCase(Base):
     judge_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
-    # The account whose sample this case was curated from (decision 3).
+    # The account whose sample this case was curated from.
     # NULL for manually authored cases, which have no originating tenant.
     account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

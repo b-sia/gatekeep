@@ -1,4 +1,4 @@
-"""eval_cases.account_id provenance tag (decision 3)
+"""eval_cases.account_id provenance tag
 
 Revision ID: 0019
 Revises: 0018

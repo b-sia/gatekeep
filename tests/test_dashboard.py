@@ -117,7 +117,7 @@ async def test_prompts_requires_auth(client):
     assert r.status_code == 401
 
 
-# -- account scoping (decision 6, problem 1) --------------------------------
+# -- account scoping ---------------------------------------------------------
 
 
 async def _account_with_key(session, *, name, is_operator=False):
@@ -129,7 +129,7 @@ async def _account_with_key(session, *, name, is_operator=False):
 
 
 async def test_usage_summary_scopes_to_caller_account(client, session):
-    """A non-operator account's dashboard reads only its own usage (decision 6)."""
+    """A non-operator account's dashboard reads only its own usage."""
     raw_a, key_a, acct_a = await _account_with_key(session, name="A")
     raw_b, key_b, acct_b = await _account_with_key(session, name="B")
     await session.commit()
@@ -149,7 +149,7 @@ async def test_usage_summary_scopes_to_caller_account(client, session):
 
 
 async def test_operator_sees_fleet_wide(client, session):
-    """An is_operator account's dashboard aggregates across every account (decision 6)."""
+    """An is_operator account's dashboard aggregates across every account."""
     raw_a, key_a, acct_a = await _account_with_key(session, name="A")
     raw_b, key_b, acct_b = await _account_with_key(session, name="B")
     raw_op, key_op, acct_op = await _account_with_key(session, name="ops", is_operator=True)
@@ -169,7 +169,7 @@ async def test_operator_sees_fleet_wide(client, session):
 
 
 async def test_non_operator_cannot_read_other_account_by_key_id(client, session):
-    """A client-supplied key_id for another account can't leak its data (problem 1)."""
+    """A client-supplied key_id for another account can't leak its data."""
     raw_a, key_a, acct_a = await _account_with_key(session, name="A")
     raw_b, key_b, acct_b = await _account_with_key(session, name="B")
     await session.commit()

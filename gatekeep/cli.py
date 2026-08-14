@@ -280,7 +280,7 @@ async def _eval_review(name: str) -> None:
 async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
     """Set or clear an account's monthly USD spend cap, looked up by name.
 
-    Budget is pooled at the account (decision 5): the cap is the shared quota
+    Budget is pooled at the account: the cap is the shared quota
     every key on the account draws from.
 
     Args:

@@ -1,4 +1,4 @@
-"""request_samples.account_id (denormalized, decision 4)
+"""request_samples.account_id (denormalized)
 
 Revision ID: 0016
 Revises: 0015

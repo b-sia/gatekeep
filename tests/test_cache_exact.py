@@ -129,7 +129,7 @@ async def test_set_then_get_round_trips():
 
 
 async def test_exact_cache_is_account_scoped():
-    """One account's exact-cache entry is never visible to another (decision 1)."""
+    """One account's exact-cache entry is never visible to another."""
     redis = get_redis()
     h = hash_request(_payload())
     response = _response()

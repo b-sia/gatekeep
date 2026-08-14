@@ -1,4 +1,4 @@
-"""request_logs.account_id (denormalized, decision 9)
+"""request_logs.account_id (denormalized)
 
 Revision ID: 0015
 Revises: 0014

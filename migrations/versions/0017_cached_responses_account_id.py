@@ -1,4 +1,4 @@
-"""cached_responses.account_id + per-account exact_hash uniqueness (decision 1)
+"""cached_responses.account_id + per-account exact_hash uniqueness
 
 Revision ID: 0017
 Revises: 0016

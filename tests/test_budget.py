@@ -33,7 +33,7 @@ async def _make_account_and_key(
 ) -> tuple[Account, ApiKey]:
     """Create an account (with the given shared budget) plus one key on it.
 
-    Budget is pooled at the account (decision 5), so the cap lives on the
+    Budget is pooled at the account, so the cap lives on the
     account; the key is the credential used to exercise `require_budget`.
     """
     account = await create_account(session, monthly_budget_usd=monthly_budget_usd)
@@ -103,7 +103,7 @@ async def test_get_period_spend_ignores_other_periods_and_accounts(session):
 
 
 async def test_budget_pools_across_keys_in_one_account(session):
-    """Spend under any key counts against the account's shared pool (decision 5)."""
+    """Spend under any key counts against the account's shared pool."""
     account = await create_account(session, monthly_budget_usd=1.0)
     await create_key(session, account, name="k1", key_hash="bk1")
     await create_key(session, account, name="k2", key_hash="bk2")

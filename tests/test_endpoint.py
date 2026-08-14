@@ -585,7 +585,7 @@ async def budgeted_raw_key(session):
     """A key on an account whose monthly_budget_usd is half of one FakeProvider
     completion's cost, so the first request is allowed (spend starts at $0)
     but the second is rejected once the first request's full cost has been
-    recorded. Budget is pooled at the account (decision 5)."""
+    recorded. Budget is pooled at the account."""
     raw = generate_key()
     one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
     account = await create_account(session, monthly_budget_usd=one_call_cost / 2)

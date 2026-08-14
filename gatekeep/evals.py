@@ -106,7 +106,7 @@ async def add_case(
     """Add one case to a suite.
 
     `account_id` tags the case with the account whose sample it was curated
-    from (decision 3); it stays None for manually authored cases, which have
+    from; it stays None for manually authored cases, which have
     no originating tenant.
 
     Raises ValueError if the check_type/argument combination is invalid:

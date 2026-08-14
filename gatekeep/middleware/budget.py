@@ -59,7 +59,7 @@ async def record_spend(
     Called from `accounting.log_request` right after a request is persisted,
     so the counter tracks spend as an accelerator for `get_period_spend`
     without a full-table aggregation on every request. Budget is pooled at
-    the account (decision 5), so the counter is keyed by `account_id`: every
+    the account, so the counter is keyed by `account_id`: every
     key on the account draws down the same shared quota. Uses INCRBYFLOAT,
     which is atomic per-key in Redis, so concurrent requests for the same
     account can't race each other's increments. Refreshes the TTL on every
@@ -223,7 +223,7 @@ async def check_budget(
 ) -> tuple[bool, float | None]:
     """Check whether an account is within its monthly budget, firing alert hooks.
 
-    Budget is pooled at the account (decision 5): every key on the account
+    Budget is pooled at the account: every key on the account
     draws down one shared quota. Returns (allowed, spent). `spent` is None
     (and allowed is always True) when `account.monthly_budget_usd` is None
     (unlimited): unlimited accounts skip the spend lookup entirely rather
@@ -290,7 +290,7 @@ async def require_budget(
 
     Chains after `require_rate_limit` (itself chained after `require_api_key`),
     so auth and rate limiting are checked first. Loads the caller's Account
-    (the shared budget pool, decision 5) and raises `HTTPException(429)` once
+    (the shared budget pool) and raises `HTTPException(429)` once
     the account's current-period spend reaches its `monthly_budget_usd`.
     Accounts with no budget set (None) are unaffected. Returns the ApiKey
     unchanged so downstream handlers keep the same dependency contract.

@@ -67,7 +67,7 @@ async def test_check_rate_limit_buckets_are_independent_per_account():
 
 
 async def test_require_rate_limit_pools_across_keys_in_one_account(session, monkeypatch):
-    """Two keys on one account share a single token bucket (decision 5)."""
+    """Two keys on one account share a single token bucket."""
     from gatekeep.config import get_settings
     from tests.helpers import create_key
 
