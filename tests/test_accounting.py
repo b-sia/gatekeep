@@ -7,6 +7,7 @@ from sqlalchemy import select
 from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.models import ApiKey, RequestLog
+from tests.helpers import create_account
 
 
 def test_calculate_cost_known_model():
@@ -47,7 +48,8 @@ def test_calculate_cost_google_gemini_flash_is_priced():
 
 async def test_log_request_persists_row(session):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -76,7 +78,8 @@ async def test_log_request_persists_row(session):
 
 async def test_log_request_can_record_cache_hit(session):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -99,7 +102,8 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
     session,
 ):
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -122,7 +126,8 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
 
 async def test_log_request_records_latency_columns(session):
     """Timing kwargs land on the row; omitting them leaves NULLs."""
-    key = ApiKey(name="latency", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(name="latency", key_hash=hash_key(generate_key()), account_id=account.id)
     session.add(key)
     await session.commit()
 
@@ -144,7 +149,8 @@ async def test_log_request_records_latency_columns(session):
 
 async def test_log_request_latency_columns_default_to_none(session):
     """A caller with no timing available must still be able to log."""
-    key = ApiKey(name="untimed", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(name="untimed", key_hash=hash_key(generate_key()), account_id=account.id)
     session.add(key)
     await session.commit()
 
@@ -162,7 +168,8 @@ async def test_log_request_latency_columns_default_to_none(session):
 
 
 async def test_log_request_persists_path(session):
-    key = ApiKey(name="path-key", key_hash="hash-path")
+    account = await create_account(session)
+    key = ApiKey(name="path-key", key_hash="hash-path", account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -181,7 +188,8 @@ async def test_log_request_persists_path(session):
 
 async def test_log_request_path_defaults_to_none(session):
     """A caller with no path available must still be able to log."""
-    key = ApiKey(name="no-path-key", key_hash="hash-no-path")
+    account = await create_account(session)
+    key = ApiKey(name="no-path-key", key_hash="hash-no-path", account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -216,7 +224,8 @@ def test_estimate_tokens_rounds_up_on_a_partial_final_token():
 @pytest_asyncio.fixture
 async def key_id(session):
     raw = generate_key()
-    key = ApiKey(name="accounting-test", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="accounting-test", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)

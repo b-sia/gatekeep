@@ -14,13 +14,15 @@ from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.evals import add_case, create_suite, run_eval_suite
 from gatekeep.models import ApiKey, RequestLog
 from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
+from tests.helpers import create_account
 
 
 @pytest_asyncio.fixture
 async def raw_key(session):
     """Create and return a raw (unhashed) active API key for auth in requests."""
     raw = generate_key()
-    session.add(ApiKey(name="dashboard-test", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="dashboard-test", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

@@ -20,6 +20,7 @@ from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, CachedResponse, RequestLog
 from gatekeep.prompts import add_prompt_version, set_candidate_version
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -383,7 +384,8 @@ class CountingProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

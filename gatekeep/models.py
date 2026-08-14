@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,22 +27,55 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class Account(Base):
+    """A tenant (team) that owns API keys and all data captured through them.
+
+    Accounts are the tenancy root: keys are disposable credentials onto an
+    account, and every content/usage row is scoped to the account derived
+    server-side from the authenticated key. `monthly_budget_usd` is the
+    account's shared monthly spend pool (None means unlimited); `is_operator`
+    grants the fleet-wide dashboard view (decision 6). There is deliberately
+    no role hierarchy or RBAC - operator status is a single boolean.
+    """
+
+    __tablename__ = "accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Shared monthly USD spend cap for the whole account; None means unlimited.
+    # Enforced by gatekeep.middleware.budget against cumulative
+    # request_logs.cost_usd for the account in the current UTC calendar month.
+    monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_operator: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class ApiKey(Base):
-    """A client's gateway API key, stored as a salted hash rather than plaintext."""
+    """A client's gateway API key, stored as a salted hash rather than plaintext.
+
+    A key is a disposable credential onto its `Account`: rotating or revoking
+    it never orphans history, which hangs off the account. `name` is unique
+    only within an account (decision 7), so one tenant's labels never collide
+    with another's namespace.
+    """
 
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    # Hard cap on USD spend per calendar month; None means unlimited. Enforced
-    # by gatekeep.middleware.budget.require_budget, tracked against cumulative
-    # request_logs.cost_usd for the key in the current UTC calendar month.
+    # Deprecated: superseded by Account.monthly_budget_usd. Retained until
+    # Task 5 flips enforcement to the account pool, then dropped.
     monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (UniqueConstraint("account_id", "name", name="uq_api_keys_account_id_name"),)
 
 
 class RequestLog(Base):

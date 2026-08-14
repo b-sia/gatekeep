@@ -15,6 +15,7 @@ from gatekeep.middleware.ratelimit import check_rate_limit, get_redis
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import observe_request
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -136,7 +137,8 @@ class CountingProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="metrics-test", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="metrics-test", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

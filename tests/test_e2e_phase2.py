@@ -24,6 +24,7 @@ from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey, CachedResponse, RequestLog
 from gatekeep.prompts import create_prompt, promote_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +71,8 @@ class CountingProvider:
 async def raw_key(session):
     """Create and return a raw API key backed by a fresh ApiKey row."""
     raw = generate_key()
-    session.add(ApiKey(name="e2e", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="e2e", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 

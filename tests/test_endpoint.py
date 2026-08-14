@@ -22,6 +22,7 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from tests.helpers import create_account
 
 
 async def test_run_shielded_completes_the_coroutine_despite_repeated_cancellation():
@@ -164,7 +165,8 @@ class StreamEndThenRaisesProvider:
 @pytest_asyncio.fixture
 async def raw_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
     return raw
 
@@ -586,7 +588,15 @@ async def budgeted_raw_key(session):
     recorded."""
     raw = generate_key()
     one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
-    session.add(ApiKey(name="b", key_hash=hash_key(raw), monthly_budget_usd=one_call_cost / 2))
+    account = await create_account(session)
+    session.add(
+        ApiKey(
+            name="b",
+            key_hash=hash_key(raw),
+            monthly_budget_usd=one_call_cost / 2,
+            account_id=account.id,
+        )
+    )
     await session.commit()
     return raw
 
@@ -1216,7 +1226,8 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
     reproduction sketch calls for driving the generator directly."""
     import time as time_module
 
-    key = ApiKey(name="disconnect-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(name="disconnect-test", key_hash=hash_key(generate_key()), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -1254,7 +1265,12 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
     not an error) and the row must still be written."""
     import time as time_module
 
-    key = ApiKey(name="aclose-disconnect-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(
+        name="aclose-disconnect-test",
+        key_hash=hash_key(generate_key()),
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -1283,7 +1299,12 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
     outcome."""
     import time as time_module
 
-    key = ApiKey(name="disconnect-early-test", key_hash=hash_key(generate_key()))
+    account = await create_account(session)
+    key = ApiKey(
+        name="disconnect-early-test",
+        key_hash=hash_key(generate_key()),
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)

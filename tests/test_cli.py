@@ -18,6 +18,7 @@ from gatekeep.evals import add_case, create_suite
 from gatekeep.models import ApiKey
 from gatekeep.prompts import add_prompt_version, create_prompt
 from tests.helpers import FakeProvider as _FakeProvider
+from tests.helpers import create_account
 
 
 def _patch_provider(monkeypatch, texts):
@@ -206,7 +207,8 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(session, monk
 
 async def test_set_budget_sets_amount_on_existing_key(session):
     raw = generate_key()
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
 
     await _set_budget("budget-key", 25.0, unlimited=False)
@@ -218,7 +220,15 @@ async def test_set_budget_sets_amount_on_existing_key(session):
 
 async def test_set_budget_unlimited_clears_amount(session):
     raw = generate_key()
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), monthly_budget_usd=10.0))
+    account = await create_account(session)
+    session.add(
+        ApiKey(
+            name="budget-key",
+            key_hash=hash_key(raw),
+            monthly_budget_usd=10.0,
+            account_id=account.id,
+        )
+    )
     await session.commit()
 
     await _set_budget("budget-key", None, unlimited=True)
@@ -235,7 +245,8 @@ async def test_set_budget_raises_for_unknown_key_name():
 
 async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
     raw = generate_key()
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
 
     with pytest.raises(ValueError, match="must provide an amount"):
@@ -244,7 +255,8 @@ async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session
 
 async def test_set_budget_raises_for_non_positive_amount(session):
     raw = generate_key()
-    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="budget-key", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
 
     with pytest.raises(ValueError, match="amount must be positive"):

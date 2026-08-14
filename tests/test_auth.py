@@ -7,6 +7,7 @@ from gatekeep.api.errors import map_provider_error
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.auth import extract_bearer, require_api_key
 from gatekeep.models import ApiKey
+from tests.helpers import create_account
 
 
 def test_extract_bearer_prefers_authorization():
@@ -17,7 +18,8 @@ def test_extract_bearer_prefers_authorization():
 
 async def test_require_api_key_accepts_valid(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw)))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
 
     key = await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)
@@ -40,7 +42,8 @@ async def test_require_api_key_rejects_unknown(session):
 
 async def test_require_api_key_rejects_inactive(session):
     raw = generate_key()
-    session.add(ApiKey(name="c", key_hash=hash_key(raw), active=False))
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), active=False, account_id=account.id))
     await session.commit()
     with pytest.raises(HTTPException) as ei:
         await require_api_key(authorization=f"Bearer {raw}", x_api_key=None, session=session)

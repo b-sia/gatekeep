@@ -1,9 +1,11 @@
 from gatekeep.models import ApiKey
 from gatekeep.samples import recent_samples, record_request_sample
+from tests.helpers import create_account
 
 
 async def _key(session):
-    key = ApiKey(name="k", key_hash="h")
+    account = await create_account(session)
+    key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
     await session.flush()
     return key

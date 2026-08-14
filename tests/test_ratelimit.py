@@ -9,6 +9,7 @@ from gatekeep.middleware.ratelimit import (
 )
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import rate_limit_rejections_total
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +71,8 @@ async def test_require_rate_limit_allows_when_tokens_available(session, monkeypa
     monkeypatch.setattr(settings, "rate_limit_refill_rate", 5 / 60)
 
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -87,7 +89,8 @@ async def test_require_rate_limit_rejects_with_429_and_retry_after(session, monk
     monkeypatch.setattr(settings, "rate_limit_refill_rate", 1 / 60)
 
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)
@@ -115,7 +118,8 @@ async def test_require_rate_limit_fails_closed_with_503_on_redis_outage(session,
     monkeypatch.setattr(redis_client, "eval", _broken_eval)
 
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw))
+    account = await create_account(session)
+    key = ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id)
     session.add(key)
     await session.commit()
     await session.refresh(key)

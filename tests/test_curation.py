@@ -12,11 +12,12 @@ from gatekeep.curation import (
 from gatekeep.evals import create_suite
 from gatekeep.models import ApiKey, EvalCase
 from gatekeep.samples import record_request_sample
-from tests.helpers import FakeProvider
+from tests.helpers import FakeProvider, create_account
 
 
 async def _seed_samples(session, prompt_name, n):
-    key = ApiKey(name="k", key_hash="h")
+    account = await create_account(session)
+    key = ApiKey(name="k", key_hash="h", account_id=account.id)
     session.add(key)
     await session.flush()
     for i in range(n):

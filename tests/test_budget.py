@@ -15,6 +15,7 @@ from gatekeep.middleware.budget import (
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import budget_alerts_total
+from tests.helpers import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +31,13 @@ async def _clean_budget_keys():
 
 async def _make_key(session, monthly_budget_usd: float | None = None) -> ApiKey:
     raw = generate_key()
-    key = ApiKey(name="c", key_hash=hash_key(raw), monthly_budget_usd=monthly_budget_usd)
+    account = await create_account(session)
+    key = ApiKey(
+        name="c",
+        key_hash=hash_key(raw),
+        monthly_budget_usd=monthly_budget_usd,
+        account_id=account.id,
+    )
     session.add(key)
     await session.commit()
     await session.refresh(key)
