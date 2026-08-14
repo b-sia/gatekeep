@@ -87,9 +87,11 @@ async def test_check_rate_limit_returns_raw_token_math():
 async def test_find_semantic_match_returns_similarity_score(session):
     from gatekeep.embeddings import embed_text
 
+    account = await create_account(session)
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="metrics-hash-a",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -100,6 +102,7 @@ async def test_find_semantic_match_returns_similarity_score(session):
     match = await find_semantic_match(
         session,
         embed_text(stored_text),
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.5,
         max_age_seconds=604800,

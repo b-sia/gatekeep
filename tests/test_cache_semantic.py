@@ -38,6 +38,12 @@ async def _clean_cache():
         await redis.delete(key)
 
 
+@pytest_asyncio.fixture
+async def account(session):
+    """A committed Account the cache unit tests scope their rows to."""
+    return await create_account(session)
+
+
 # -- extract_embeddable_text ----------------------------------------------
 
 
@@ -89,10 +95,11 @@ def test_extract_embeddable_text_multiple_user_messages():
 # -- store_cached_response / find_semantic_match against real Postgres ----
 
 
-async def test_store_cached_response_persists_row(session):
+async def test_store_cached_response_persists_row(session, account):
     embedding = embed_text("what is the capital of France?")
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-1",
         user_messages_text="what is the capital of France?",
         embedding=embedding,
@@ -107,12 +114,13 @@ async def test_store_cached_response_persists_row(session):
     assert row.model == "claude-sonnet-5"
 
 
-async def test_store_cached_response_ignores_duplicate_exact_hash(session):
+async def test_store_cached_response_ignores_duplicate_exact_hash(session, account):
     """A concurrent second insert with the same exact_hash must not raise;
     the losing write is simply skipped."""
     embedding = embed_text("what is the capital of France?")
     first = await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="dup-hash",
         user_messages_text="what is the capital of France?",
         embedding=embedding,
@@ -124,6 +132,7 @@ async def test_store_cached_response_ignores_duplicate_exact_hash(session):
 
     second = await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="dup-hash",
         user_messages_text="what is the capital of France?",
         embedding=embedding,
@@ -146,11 +155,50 @@ async def test_store_cached_response_ignores_duplicate_exact_hash(session):
     assert rows[0].response_text == "Paris"
 
 
-async def test_find_semantic_match_returns_none_when_empty(session):
+async def test_find_semantic_match_is_account_scoped(session):
+    """A semantic hit never crosses accounts (decision 1)."""
+    a1 = await create_account(session, name="a1")
+    a2 = await create_account(session, name="a2")
+    await session.commit()
+    emb = embed_text("what is the capital of France?")
+    await store_cached_response(
+        session,
+        account_id=a1.id,
+        exact_hash="h-a1",
+        user_messages_text="what is the capital of France?",
+        embedding=emb,
+        response_text="secret-a1",
+        model="claude-sonnet-5",
+        cost_usd=0.01,
+    )
+    hit = await find_semantic_match(
+        session,
+        emb,
+        account_id=a1.id,
+        model="claude-sonnet-5",
+        threshold=0.5,
+        max_age_seconds=3600,
+    )
+    assert hit is not None
+    assert hit.cached.response_text == "secret-a1"
+
+    miss = await find_semantic_match(
+        session,
+        emb,
+        account_id=a2.id,
+        model="claude-sonnet-5",
+        threshold=0.5,
+        max_age_seconds=3600,
+    )
+    assert miss is None
+
+
+async def test_find_semantic_match_returns_none_when_empty(session, account):
     embedding = embed_text("anything")
     match = await find_semantic_match(
         session,
         embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -158,10 +206,11 @@ async def test_find_semantic_match_returns_none_when_empty(session):
     assert match is None
 
 
-async def test_find_semantic_match_finds_similar_above_threshold(session):
+async def test_find_semantic_match_finds_similar_above_threshold(session, account):
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-a",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -173,6 +222,7 @@ async def test_find_semantic_match_finds_similar_above_threshold(session):
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -182,10 +232,11 @@ async def test_find_semantic_match_finds_similar_above_threshold(session):
     assert match.similarity > 0.95
 
 
-async def test_find_semantic_match_ignores_row_from_different_model(session):
+async def test_find_semantic_match_ignores_row_from_different_model(session, account):
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-diff-model",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -197,6 +248,7 @@ async def test_find_semantic_match_ignores_row_from_different_model(session):
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -204,7 +256,7 @@ async def test_find_semantic_match_ignores_row_from_different_model(session):
     assert match is None
 
 
-async def test_find_semantic_match_ignores_row_from_different_prompt_version(session):
+async def test_find_semantic_match_ignores_row_from_different_prompt_version(session, account):
     """Correctness fix for A/B testing: a semantic-cache row generated by
     one PromptVersion (e.g. an A/B candidate) must never be served to a
     request that resolved to a *different* PromptVersion of the same
@@ -215,6 +267,7 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-v1",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -228,6 +281,7 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -236,10 +290,11 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
     assert match is None
 
 
-async def test_find_semantic_match_finds_row_from_same_prompt_version(session):
+async def test_find_semantic_match_finds_row_from_same_prompt_version(session, account):
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-v2",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -253,6 +308,7 @@ async def test_find_semantic_match_finds_row_from_same_prompt_version(session):
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -262,13 +318,14 @@ async def test_find_semantic_match_finds_row_from_same_prompt_version(session):
     assert match.cached.response_text == "Paris"
 
 
-async def test_find_semantic_match_without_prompt_version_num_is_unscoped(session):
+async def test_find_semantic_match_without_prompt_version_num_is_unscoped(session, account):
     """When the caller passes no prompt_version_num (e.g. the request had no
     prompt_name at all), behavior is unchanged from before this parameter
     existed: any matching row is considered regardless of its tag."""
     stored_text = "What is the capital of France?"
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-untagged",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -282,6 +339,7 @@ async def test_find_semantic_match_without_prompt_version_num_is_unscoped(sessio
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -289,9 +347,10 @@ async def test_find_semantic_match_without_prompt_version_num_is_unscoped(sessio
     assert match is not None
 
 
-async def test_find_semantic_match_none_below_threshold(session):
+async def test_find_semantic_match_none_below_threshold(session, account):
     await store_cached_response(
         session,
+        account_id=account.id,
         exact_hash="hash-b",
         user_messages_text="What is the capital of France?",
         embedding=embed_text("What is the capital of France?"),
@@ -303,6 +362,7 @@ async def test_find_semantic_match_none_below_threshold(session):
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
@@ -310,9 +370,10 @@ async def test_find_semantic_match_none_below_threshold(session):
     assert match is None
 
 
-async def test_find_semantic_match_excludes_expired_rows(session):
+async def test_find_semantic_match_excludes_expired_rows(session, account):
     stored_text = "What is the capital of France?"
     row = CachedResponse(
+        account_id=account.id,
         exact_hash="hash-c",
         user_messages_text=stored_text,
         embedding=embed_text(stored_text),
@@ -328,6 +389,7 @@ async def test_find_semantic_match_excludes_expired_rows(session):
     match = await find_semantic_match(
         session,
         query_embedding,
+        account_id=account.id,
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=500,

@@ -240,7 +240,11 @@ class CachedResponse(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
-    exact_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # Tenant the cached response belongs to (decision 1). Partitions the cache
+    # so one caller's completion is never served verbatim to another; exact_hash
+    # is unique per (account_id, exact_hash), not globally.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    exact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     user_messages_text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -257,6 +261,13 @@ class CachedResponse(Base):
             "ix_cached_responses_model_prompt_version_num",
             "model",
             "prompt_version_num",
+        ),
+        # exact_hash is unique per account, not globally (decision 1), so two
+        # tenants can independently cache the same request.
+        UniqueConstraint(
+            "account_id",
+            "exact_hash",
+            name="uq_cached_responses_account_id_exact_hash",
         ),
     )
 

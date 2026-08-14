@@ -534,7 +534,7 @@ async def chat_completions(
     redis = get_redis(settings)
     request_hash = hash_request(payload)
     try:
-        cached = await get_cached_response(redis, request_hash)
+        cached = await get_cached_response(redis, account_id, request_hash)
     except RedisError:
         logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
@@ -568,6 +568,7 @@ async def chat_completions(
         semantic_match = await find_semantic_match(
             session,
             embedding,
+            account_id=account_id,
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
@@ -623,6 +624,7 @@ async def chat_completions(
     try:
         await set_cached_response(
             redis,
+            account_id,
             request_hash,
             response,
             ttl_seconds=settings.cache_exact_ttl_seconds,
@@ -633,6 +635,7 @@ async def chat_completions(
     if embedding is not None:
         await store_cached_response(
             session,
+            account_id=account_id,
             exact_hash=request_hash,
             user_messages_text=embeddable_text,
             embedding=embedding,
@@ -750,7 +753,7 @@ async def messages(
     redis = get_redis(settings)
     request_hash = hash_request(payload)
     try:
-        cached = await get_cached_response(redis, request_hash)
+        cached = await get_cached_response(redis, account_id, request_hash)
     except RedisError:
         logger.warning("Exact cache lookup failed (Redis unavailable); treating as a cache miss.")
         cached = None
@@ -784,6 +787,7 @@ async def messages(
         semantic_match = await find_semantic_match(
             session,
             embedding,
+            account_id=account_id,
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
@@ -840,6 +844,7 @@ async def messages(
     try:
         await set_cached_response(
             redis,
+            account_id,
             request_hash,
             openai_shaped,
             ttl_seconds=settings.cache_exact_ttl_seconds,
@@ -850,6 +855,7 @@ async def messages(
     if embedding is not None:
         await store_cached_response(
             session,
+            account_id=account_id,
             exact_hash=request_hash,
             user_messages_text=embeddable_text,
             embedding=embedding,
