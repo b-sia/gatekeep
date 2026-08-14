@@ -30,6 +30,7 @@ async def _seed_samples(session, prompt_name, n):
             input_messages=[{"role": "user", "content": f"q{i}"}],
             output_text=f"a{i}",
         )
+    return account
 
 
 async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
@@ -46,6 +47,16 @@ async def test_curate_writes_unreviewed_llm_judge_cases_with_generated_criteria(
         assert c.source == "curated"
         assert c.check_type == "llm_judge"
         assert c.judge_criteria == expected_criteria
+
+
+async def test_curated_cases_carry_sample_account(session):
+    await create_suite("p", session, pass_threshold=0.9)
+    account = await _seed_samples(session, "p", 2)
+    provider = FakeProvider(["criteria for q0", "criteria for q1"])
+
+    cases = await curate_cases("p", session, limit=2, provider=provider, generate_model="m")
+    assert cases
+    assert all(c.account_id == account.id for c in cases)
 
 
 async def test_curate_falls_back_to_generic_criteria_on_generation_failure(session):

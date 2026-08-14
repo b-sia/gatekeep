@@ -67,6 +67,7 @@ async def curate_cases(
             judge_criteria=judge_criteria,
             reviewed=False,
             source="curated",
+            account_id=sample.account_id,
         )
         cases.append(case)
     return cases

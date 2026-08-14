@@ -101,8 +101,13 @@ async def add_case(
     judge_criteria: str | None = None,
     reviewed: bool = True,
     source: str = "manual",
+    account_id: int | None = None,
 ) -> EvalCase:
     """Add one case to a suite.
+
+    `account_id` tags the case with the account whose sample it was curated
+    from (decision 3); it stays None for manually authored cases, which have
+    no originating tenant.
 
     Raises ValueError if the check_type/argument combination is invalid:
     `exact`/`contains` require `expected`; `llm_judge` requires `judge_criteria`.
@@ -121,6 +126,7 @@ async def add_case(
         judge_criteria=judge_criteria,
         reviewed=reviewed,
         source=source,
+        account_id=account_id,
     )
     session.add(case)
     await session.commit()
