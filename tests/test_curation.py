@@ -24,6 +24,7 @@ async def _seed_samples(session, prompt_name, n):
         await record_request_sample(
             session,
             key_id=key.id,
+            account_id=account.id,
             prompt_name=prompt_name,
             model="m",
             input_messages=[{"role": "user", "content": f"q{i}"}],

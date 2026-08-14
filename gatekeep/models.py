@@ -93,6 +93,11 @@ class RequestLog(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
+    # Denormalized tenant attribution, written at capture time from the
+    # authenticated key (decision 9). Kept on the row rather than joined through
+    # key_id so attribution survives key rotation or revocation, and so
+    # account-scoped dashboard/budget aggregates need no join.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -146,6 +151,9 @@ class RequestLog(Base):
         # scans (key_id is the leading column), and percentile_cont sorts
         # every row it is handed, so narrowing the window cheaply matters.
         Index("ix_request_logs_created_at", "created_at"),
+        # Account-scoped dashboard and budget aggregates (decisions 5, 6, 9)
+        # filter by account_id + created_at; this composite serves them.
+        Index("ix_request_logs_account_id_created_at", "account_id", "created_at"),
     )
 
 
@@ -269,6 +277,11 @@ class RequestSample(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), nullable=False)
+    # Denormalized tenant attribution written at capture time (decision 4).
+    # Kept on the row rather than joined through key_id so provenance filtering
+    # and per-tenant deletion survive key rotation or revocation; this is the
+    # substrate the eval-case provenance tags (decision 3) are derived from.
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model: Mapped[str] = mapped_column(String(255), nullable=False)
     input_messages: Mapped[list[dict]] = mapped_column(JSONB, nullable=False)

@@ -1238,6 +1238,7 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # role chunk
@@ -1281,6 +1282,7 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # role chunk
@@ -1315,6 +1317,7 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
+        account_id=account.id,
         state=state,
     )
     await gen.__anext__()  # role chunk only - no delta consumed yet

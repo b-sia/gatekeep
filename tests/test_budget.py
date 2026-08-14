@@ -64,6 +64,7 @@ async def test_get_period_spend_falls_back_to_db_when_redis_cache_miss(session):
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=1_000_000,
         completion_tokens=0,
@@ -82,6 +83,7 @@ async def test_get_period_spend_ignores_other_periods_and_keys(session):
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=1_000_000,
         completion_tokens=0,
@@ -90,6 +92,7 @@ async def test_get_period_spend_ignores_other_periods_and_keys(session):
     await log_request(
         session,
         key_id=other_key.id,
+        account_id=other_key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=1_000_000,
         completion_tokens=0,
@@ -105,6 +108,7 @@ async def test_log_request_does_not_record_spend_for_cached_hits(session):
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=1_000_000,
         completion_tokens=0,
@@ -125,6 +129,7 @@ async def test_get_period_spend_excludes_cached_requests_on_db_fallback(session)
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=1_000_000,
         completion_tokens=0,
@@ -134,6 +139,7 @@ async def test_get_period_spend_excludes_cached_requests_on_db_fallback(session)
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=500_000,
         completion_tokens=0,
@@ -151,6 +157,7 @@ async def test_get_period_spend_falls_back_to_db_on_redis_error(session, monkeyp
     await log_request(
         session,
         key_id=key.id,
+        account_id=key.account_id,
         model="claude-sonnet-5",
         prompt_tokens=500_000,
         completion_tokens=0,

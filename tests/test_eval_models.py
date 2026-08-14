@@ -19,6 +19,7 @@ async def test_request_sample_round_trips_structured_messages(session):
     await session.flush()
     sample = RequestSample(
         key_id=key.id,
+        account_id=account.id,
         prompt_name="system-context",
         model="claude-sonnet-5",
         input_messages=[{"role": "user", "content": "hi"}],
@@ -78,6 +79,7 @@ async def test_request_log_has_prompt_name_and_routed_from(session):
     await session.flush()
     log = RequestLog(
         key_id=key.id,
+        account_id=account.id,
         model="claude-haiku-4-5-20251001",
         prompt_tokens=1,
         completion_tokens=1,

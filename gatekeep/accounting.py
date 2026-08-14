@@ -69,6 +69,7 @@ async def log_request(
     session: AsyncSession,
     *,
     key_id: int,
+    account_id: int,
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
@@ -86,6 +87,11 @@ async def log_request(
     outcome: str = "ok",
 ) -> RequestLog:
     """Persist one completed request as a `RequestLog` row and commit it.
+
+    `account_id` is the tenant the request is attributed to, derived
+    server-side from the authenticated key. It is denormalized onto the row
+    (rather than joined through `key_id`) so attribution survives key rotation
+    or revocation.
 
     Cost is derived via calculate_cost, unless `cost_usd_override` is given,
     in which case that value is used directly (e.g. a semantic-cache hit
@@ -135,6 +141,7 @@ async def log_request(
     )
     log = RequestLog(
         key_id=key_id,
+        account_id=account_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

@@ -39,6 +39,7 @@ async def _seed_log(
     session,
     *,
     key_id: int,
+    account_id: int | None = None,
     model: str,
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
@@ -57,10 +58,17 @@ async def _seed_log(
     `path`/`duration_ms`/`provider_ms`/`ttft_ms` default to None, matching a
     pre-0012 row: such rows are deliberately excluded from every latency
     query, so latency tests must pass `path` explicitly. `outcome` defaults
-    to None, matching a pre-0013 (or successful) row.
+    to None, matching a pre-0013 (or successful) row. `account_id` defaults to
+    the account that owns `key_id` (looked up), so single-tenant tests need
+    not pass it; multi-account scoping tests pass it explicitly.
     """
+    if account_id is None:
+        account_id = (
+            await session.execute(select(ApiKey.account_id).where(ApiKey.id == key_id))
+        ).scalar_one()
     log = RequestLog(
         key_id=key_id,
+        account_id=account_id,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
