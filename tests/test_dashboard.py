@@ -1433,3 +1433,60 @@ async def test_patch_unknown_account_404(client, operator_key):
         json={"name": "x"},
     )
     assert resp.status_code == 404
+
+
+# -- mutating route denials --------------------------------------------------
+
+
+async def test_non_operator_cannot_mint_key_on_other_account(client, raw_key, session):
+    """A non-operator minting a key on another account is 403."""
+    other = await create_account(session, name="mint-other")
+    await session.commit()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_non_operator_cannot_revoke_key_on_other_account(client, raw_key, session):
+    """A non-operator revoking a key on another account is 403.
+
+    The authorization check runs before the key lookup, so an arbitrary
+    (possibly nonexistent) key id still yields 403, not 404.
+    """
+    other = await create_account(session, name="revoke-other")
+    await session.commit()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{other.id}/keys/1/revoke",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_create_account_operator_only(client, raw_key):
+    """A non-operator hitting POST /accounts is 403."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "nope"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_patch_account_operator_only(client, raw_key):
+    """A non-operator hitting PATCH /accounts/{id} is 403.
+
+    require_operator rejects before any account lookup, so this holds
+    regardless of whether the target id belongs to the caller.
+    """
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{me['account_id']}",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "nope"},
+    )
+    assert resp.status_code == 403
