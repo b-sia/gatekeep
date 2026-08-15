@@ -5,11 +5,15 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from redis.asyncio import Redis
 from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gatekeep import account_service
+from gatekeep.config import get_settings
 from gatekeep.db import get_session
 from gatekeep.middleware.auth import require_api_key
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
     Account,
     ApiKey,
@@ -50,6 +54,53 @@ def _account_scope(caller_account: Account) -> list:
     if caller_account.is_operator:
         return []
     return [RequestLog.account_id == caller_account.id]
+
+
+def _get_redis() -> Redis:
+    """FastAPI dependency yielding the shared async Redis client.
+
+    Management routes need Redis for month-to-date spend via
+    `middleware.budget.get_period_spend`; the analytics routes touch only
+    Postgres, so this is scoped to the routes that need it.
+    """
+    return get_redis(get_settings())
+
+
+def _forbidden(message: str) -> HTTPException:
+    """Build a 403 HTTPException with an OpenAI-shaped error body.
+
+    Args:
+        message: Human-readable explanation of why access was denied.
+
+    Returns:
+        An `HTTPException` with status 403 and the OpenAI-shaped error body.
+    """
+    return HTTPException(
+        status_code=403,
+        detail={"error": {"message": message, "type": "permission_error", "code": None}},
+    )
+
+
+async def require_operator(
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """FastAPI dependency that authorizes only operator accounts.
+
+    Builds on `_require_caller_account`; raises a 403 (OpenAI-shaped body)
+    when the caller's account is not an operator.
+
+    Args:
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        The caller's `Account`, when it is an operator account.
+
+    Raises:
+        HTTPException: 403 when `caller_account.is_operator` is False.
+    """
+    if not caller_account.is_operator:
+        raise _forbidden("Operator access required.")
+    return caller_account
 
 
 def _default_window() -> tuple[datetime, datetime]:
@@ -1086,3 +1137,41 @@ async def prompt_version_timeline(
         for v in rows
     ]
     return PromptVersionTimelineResponse(name=name, versions=versions)
+
+
+class MeResponse(BaseModel):
+    """The caller's own account context, driving tab visibility and the budget card."""
+
+    account_id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    spend_mtd: float
+
+
+@router.get("/me", response_model=MeResponse)
+async def get_me(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    caller_account: Account = Depends(_require_caller_account),
+) -> MeResponse:
+    """Return the caller's account context: id, name, operator flag, budget
+    cap, and current-period budget-relevant spend. Requires a valid API key.
+
+    Args:
+        session: Database session, injected.
+        redis: Shared async Redis client, injected.
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        A `MeResponse` describing the caller's account and its month-to-date
+        budget-relevant spend.
+    """
+    spend = await account_service.get_account_spend(session, redis, caller_account.id)
+    return MeResponse(
+        account_id=caller_account.id,
+        name=caller_account.name,
+        is_operator=caller_account.is_operator,
+        monthly_budget_usd=caller_account.monthly_budget_usd,
+        spend_mtd=spend,
+    )

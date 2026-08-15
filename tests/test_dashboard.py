@@ -1141,3 +1141,37 @@ async def test_latency_timeseries_empty_window_is_not_an_error(client, raw_key, 
     )
     assert r.status_code == 200
     assert r.json()["buckets"] == []
+
+
+# -- me / operator dependency ------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def operator_key(session):
+    """A raw active key on an operator account."""
+    raw = generate_key()
+    account = await create_account(session, name="op-acct", is_operator=True)
+    session.add(ApiKey(name="op-key", key_hash=hash_key(raw), account_id=account.id))
+    await session.commit()
+    return raw
+
+
+async def test_me_returns_caller_shape(client, raw_key):
+    """GET /me returns the caller's account id, name, operator flag, budget, spend."""
+    resp = await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {
+        "account_id",
+        "name",
+        "is_operator",
+        "monthly_budget_usd",
+        "spend_mtd",
+    }
+    assert body["is_operator"] is False
+
+
+async def test_me_requires_auth(client):
+    """GET /me with no key is 401."""
+    resp = await client.get("/dashboard/api/me")
+    assert resp.status_code == 401
