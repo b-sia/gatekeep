@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
+
+from redis.asyncio import Redis
+from sqlalchemy import Integer as sa_Integer
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.models import Account
+from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.middleware.budget import get_period_spend
+from gatekeep.models import Account, ApiKey
 
 
 class AccountServiceError(Exception):
@@ -149,3 +156,133 @@ async def set_operator(session: AsyncSession, account_id: int, value: bool) -> A
     account.is_operator = value
     await session.commit()
     return account
+
+
+@dataclass
+class AccountStats:
+    """An account row plus its key counts and month-to-date spend.
+
+    `spend_mtd` is budget-relevant spend (non-cached provider cost for the
+    current UTC calendar month), the same figure the budget cap enforces -
+    deliberately lower than the Analytics tab's cost, which includes the
+    notional cost of cache hits.
+    """
+
+    id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    created_at: datetime
+    active_key_count: int
+    total_key_count: int
+    spend_mtd: float
+
+
+async def list_keys(session: AsyncSession, account_id: int) -> list[ApiKey]:
+    """Return an account's keys (active and revoked), newest first.
+
+    Raises:
+        AccountNotFoundError: if no account has that id.
+    """
+    await _get_account_or_404(session, account_id)
+    rows = (
+        (
+            await session.execute(
+                select(ApiKey)
+                .where(ApiKey.account_id == account_id)
+                .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows)
+
+
+async def create_key(session: AsyncSession, account_id: int, name: str) -> tuple[ApiKey, str]:
+    """Mint a key for an account, commit, and return (key, raw_key).
+
+    The raw key is returned exactly once; only its sha256 hash is persisted.
+
+    Raises:
+        AccountNotFoundError: if no account has that id.
+        KeyNameConflictError: if the name is already used on that account.
+    """
+    await _get_account_or_404(session, account_id)
+    raw = generate_key()
+    key = ApiKey(account_id=account_id, name=name, key_hash=hash_key(raw), active=True)
+    session.add(key)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise KeyNameConflictError(f"key name {name!r} is already used on this account") from exc
+    return key, raw
+
+
+async def revoke_key(session: AsyncSession, account_id: int, key_id: int) -> ApiKey:
+    """Soft-revoke a key (active = False) that belongs to `account_id`.
+
+    Scoping the lookup by account_id is the guard that a revoke only ever
+    affects a key on the authorized account.
+
+    Raises:
+        KeyNotFoundError: if no active-or-revoked key with that id exists on
+            the account.
+    """
+    key = (
+        await session.execute(
+            select(ApiKey).where(ApiKey.id == key_id, ApiKey.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+    if key is None:
+        raise KeyNotFoundError(f"no key {key_id} on account {account_id}")
+    key.active = False
+    await session.commit()
+    return key
+
+
+async def get_account_spend(session: AsyncSession, redis: Redis, account_id: int) -> float:
+    """Return an account's current-period budget-relevant spend.
+
+    Thin wrapper over `middleware.budget.get_period_spend` so callers never
+    reach for `check_budget` (which would fire alerts on a dashboard read).
+    """
+    return await get_period_spend(session, redis, account_id=account_id)
+
+
+async def list_accounts_with_stats(session: AsyncSession, redis: Redis) -> list[AccountStats]:
+    """Return every account with key counts and month-to-date spend, by name.
+
+    Key counts come from one grouped aggregate over api_keys; spend comes
+    from `get_period_spend` per account (Redis fast path, DB fallback).
+    """
+    accounts = (await session.execute(select(Account).order_by(Account.name))).scalars().all()
+    count_rows = (
+        await session.execute(
+            select(
+                ApiKey.account_id,
+                func.count(ApiKey.id),
+                func.coalesce(func.sum(func.cast(ApiKey.active, sa_Integer)), 0),
+            ).group_by(ApiKey.account_id)
+        )
+    ).all()
+    totals = {aid: int(total) for aid, total, _ in count_rows}
+    actives = {aid: int(active) for aid, _, active in count_rows}
+
+    stats: list[AccountStats] = []
+    for account in accounts:
+        spend = await get_period_spend(session, redis, account_id=account.id)
+        stats.append(
+            AccountStats(
+                id=account.id,
+                name=account.name,
+                is_operator=account.is_operator,
+                monthly_budget_usd=account.monthly_budget_usd,
+                created_at=account.created_at,
+                active_key_count=actives.get(account.id, 0),
+                total_key_count=totals.get(account.id, 0),
+                spend_mtd=spend,
+            )
+        )
+    return stats

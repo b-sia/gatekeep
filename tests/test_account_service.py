@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from gatekeep import account_service as svc
-from gatekeep.models import Account
+from gatekeep.auth_keys import hash_key as _hash_key
+from gatekeep.middleware.ratelimit import get_redis
+from gatekeep.models import Account, ApiKey, RequestLog
 from tests.helpers import create_account
 
 
@@ -98,3 +100,93 @@ async def test_set_operator_off_allowed_with_another_operator(session):
     await session.commit()
     off = await svc.set_operator(session, a.id, False)
     assert off.is_operator is False
+
+
+async def test_create_key_returns_raw_and_stores_hash(session):
+    """create_key returns the raw key once and persists only its sha256 hash."""
+    account = await create_account(session)
+    await session.commit()
+    key, raw = await svc.create_key(session, account.id, "prod")
+    assert raw.startswith("gk-")
+    assert key.name == "prod"
+    assert key.active is True
+    assert key.account_id == account.id
+    assert key.key_hash == _hash_key(raw)
+
+
+async def test_create_key_duplicate_name_conflicts(session):
+    """A duplicate key name within the same account raises KeyNameConflictError."""
+    account = await create_account(session)
+    await session.commit()
+    await svc.create_key(session, account.id, "dup")
+    with pytest.raises(svc.KeyNameConflictError):
+        await svc.create_key(session, account.id, "dup")
+
+
+async def test_create_key_missing_account_raises(session):
+    """Minting for an unknown account raises AccountNotFoundError."""
+    with pytest.raises(svc.AccountNotFoundError):
+        await svc.create_key(session, 999999, "x")
+
+
+async def test_list_keys_returns_account_keys(session):
+    """list_keys returns exactly the target account's keys."""
+    a = await create_account(session, name="a")
+    b = await create_account(session, name="b")
+    await session.commit()
+    await svc.create_key(session, a.id, "a1")
+    await svc.create_key(session, b.id, "b1")
+    keys = await svc.list_keys(session, a.id)
+    assert [k.name for k in keys] == ["a1"]
+
+
+async def test_revoke_key_soft_revokes(session):
+    """revoke_key flips active to False and leaves the row in place."""
+    account = await create_account(session)
+    await session.commit()
+    key, _ = await svc.create_key(session, account.id, "prod")
+    revoked = await svc.revoke_key(session, account.id, key.id)
+    assert revoked.active is False
+    assert await session.get(ApiKey, key.id) is not None
+
+
+async def test_revoke_key_other_account_raises(session):
+    """Revoking a key that belongs to another account raises KeyNotFoundError."""
+    a = await create_account(session, name="a")
+    b = await create_account(session, name="b")
+    await session.commit()
+    key, _ = await svc.create_key(session, b.id, "b1")
+    with pytest.raises(svc.KeyNotFoundError):
+        await svc.revoke_key(session, a.id, key.id)
+
+
+async def test_list_accounts_with_stats_counts_and_spend(session):
+    """Stats include active/total key counts and non-cached MTD spend."""
+    redis = get_redis()
+    await redis.flushdb()
+    account = await create_account(session, name="acme", monthly_budget_usd=100.0)
+    await session.commit()
+    active, _ = await svc.create_key(session, account.id, "k-active")
+    revoked, _ = await svc.create_key(session, account.id, "k-revoked")
+    await svc.revoke_key(session, account.id, revoked.id)
+    session.add(
+        RequestLog(
+            key_id=active.id,
+            account_id=account.id,
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+            cost_usd=3.0,
+            cached=False,
+            response_id="r1",
+        )
+    )
+    await session.commit()
+
+    stats = await svc.list_accounts_with_stats(session, redis)
+    row = next(s for s in stats if s.name == "acme")
+    assert row.active_key_count == 1
+    assert row.total_key_count == 2
+    assert row.spend_mtd == pytest.approx(3.0)
+    assert row.monthly_budget_usd == 100.0
