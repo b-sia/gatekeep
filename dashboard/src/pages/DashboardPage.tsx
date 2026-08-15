@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import Header from "../components/Header";
 import FilterBar, { type DashboardFilters } from "../components/FilterBar";
 import StatRow from "../components/StatRow";
 import UsageChart from "../components/UsageChart";
@@ -133,8 +132,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   }, [loadAllModels]);
 
   return (
-    <div className="min-h-screen bg-slate-950">
-      <Header onClearKey={onUnauthorized} />
+    <div>
       <FilterBar filters={filters} availableModels={allModels} onChange={setFilters} />
       {error && (
         <div className="mx-6 mt-4 flex items-center justify-between rounded-lg border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-300">
