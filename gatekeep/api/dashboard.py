@@ -81,6 +81,19 @@ def _forbidden(message: str) -> HTTPException:
     )
 
 
+def _error_body(message: str, err_type: str = "invalid_request_error") -> dict:
+    """Build an OpenAI-shaped error detail dict for HTTPException(detail=...).
+
+    Args:
+        message: Human-readable explanation of the error.
+        err_type: The OpenAI-style error type tag.
+
+    Returns:
+        A dict of the shape ``{"error": {"message": ..., "type": ..., "code": None}}``.
+    """
+    return {"error": {"message": message, "type": err_type, "code": None}}
+
+
 async def require_operator(
     caller_account: Account = Depends(_require_caller_account),
 ) -> Account:
@@ -101,6 +114,21 @@ async def require_operator(
     if not caller_account.is_operator:
         raise _forbidden("Operator access required.")
     return caller_account
+
+
+def _authorize_account_access(caller_account: Account, account_id: int) -> None:
+    """Authorize an account-scoped action: operator, or the caller's own account.
+
+    Args:
+        caller_account: The authenticated caller's account.
+        account_id: The account id the request targets.
+
+    Raises:
+        HTTPException: 403 when a non-operator targets a different account.
+    """
+    if caller_account.is_operator or caller_account.id == account_id:
+        return
+    raise _forbidden("You can only manage your own account.")
 
 
 def _default_window() -> tuple[datetime, datetime]:
@@ -1175,3 +1203,96 @@ async def get_me(
         monthly_budget_usd=caller_account.monthly_budget_usd,
         spend_mtd=spend,
     )
+
+
+class KeyOut(BaseModel):
+    """One API key as shown in the management UI (no secret material)."""
+
+    id: int
+    name: str
+    active: bool
+    created_at: datetime
+
+
+class KeyListResponse(BaseModel):
+    """An account's keys, active and revoked, newest first."""
+
+    keys: list[KeyOut]
+
+
+class KeyCreateRequest(BaseModel):
+    """Request body for minting a key: the new key's display name."""
+
+    name: str
+
+
+class KeyCreatedResponse(BaseModel):
+    """A freshly minted key. `key` carries the raw secret exactly once."""
+
+    id: int
+    name: str
+    active: bool
+    created_at: datetime
+    key: str
+
+
+@router.get("/accounts/{account_id}/keys", response_model=KeyListResponse)
+async def list_account_keys(
+    account_id: int,
+    session: AsyncSession = Depends(get_session),
+    caller_account: Account = Depends(_require_caller_account),
+) -> KeyListResponse:
+    """List an account's keys. Allowed for the account itself or an operator.
+
+    Raises 403 for a non-operator targeting another account, 404 for an
+    unknown account.
+    """
+    _authorize_account_access(caller_account, account_id)
+    try:
+        keys = await account_service.list_keys(session, account_id)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return KeyListResponse(
+        keys=[KeyOut(id=k.id, name=k.name, active=k.active, created_at=k.created_at) for k in keys]
+    )
+
+
+@router.post("/accounts/{account_id}/keys", response_model=KeyCreatedResponse)
+async def mint_account_key(
+    account_id: int,
+    body: KeyCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    caller_account: Account = Depends(_require_caller_account),
+) -> KeyCreatedResponse:
+    """Mint a key for an account, returning the raw key exactly once.
+
+    Raises 403 (wrong account), 404 (unknown account), 409 (duplicate name).
+    """
+    _authorize_account_access(caller_account, account_id)
+    try:
+        key, raw = await account_service.create_key(session, account_id, body.name)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except account_service.KeyNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    return KeyCreatedResponse(
+        id=key.id, name=key.name, active=key.active, created_at=key.created_at, key=raw
+    )
+
+
+@router.post("/accounts/{account_id}/keys/{key_id}/revoke", response_model=KeyOut)
+async def revoke_account_key(
+    account_id: int,
+    key_id: int,
+    session: AsyncSession = Depends(get_session),
+    caller_account: Account = Depends(_require_caller_account),
+) -> KeyOut:
+    """Soft-revoke a key on an account. Raises 403 (wrong account) or 404
+    (no such key on the account).
+    """
+    _authorize_account_access(caller_account, account_id)
+    try:
+        key = await account_service.revoke_key(session, account_id, key_id)
+    except account_service.KeyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return KeyOut(id=key.id, name=key.name, active=key.active, created_at=key.created_at)

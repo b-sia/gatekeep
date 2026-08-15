@@ -1175,3 +1175,99 @@ async def test_me_requires_auth(client):
     """GET /me with no key is 401."""
     resp = await client.get("/dashboard/api/me")
     assert resp.status_code == 401
+
+
+# -- account-scoped key routes -----------------------------------------------
+
+
+async def test_list_own_keys(client, raw_key, session):
+    """An account can list its own keys via its own account id."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{me['account_id']}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+    names = [k["name"] for k in resp.json()["keys"]]
+    assert "dashboard-test" in names
+
+
+async def test_mint_key_returns_raw_once(client, raw_key):
+    """Minting a key returns the raw key exactly once in the response body."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{me['account_id']}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "minted"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"].startswith("gk-")
+    assert body["name"] == "minted"
+    assert body["active"] is True
+
+
+async def test_mint_duplicate_name_conflicts(client, raw_key):
+    """A duplicate key name maps to 409."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    aid = me["account_id"]
+    await client.post(
+        f"/dashboard/api/accounts/{aid}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "dup"},
+    )
+    resp = await client.post(
+        f"/dashboard/api/accounts/{aid}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "dup"},
+    )
+    assert resp.status_code == 409
+
+
+async def test_revoke_flips_active(client, raw_key):
+    """Revoking a key sets active False; it stays listed."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    aid = me["account_id"]
+    minted = (
+        await client.post(
+            f"/dashboard/api/accounts/{aid}/keys",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={"name": "to-revoke"},
+        )
+    ).json()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{aid}/keys/{minted['id']}/revoke",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+
+
+async def test_non_operator_cannot_touch_other_account_keys(client, raw_key, session):
+    """A non-operator listing another account's keys is 403."""
+    other = await create_account(session, name="other-acct")
+    await session.commit()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_operator_can_list_any_account_keys(client, operator_key, session):
+    """An operator can list another account's keys."""
+    other = await create_account(session, name="tenant-x")
+    await session.commit()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert resp.status_code == 200
