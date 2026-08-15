@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { createKey } from "../api/client";
+import { UnauthorizedError, createKey } from "../api/client";
 
 interface CreateKeyModalProps {
   accountId: number;
   onClose: () => void;
   onCreated: () => void;
+  /** Called when the create request comes back 401, so the app can return
+   * to the key-entry / re-auth screen instead of showing a dead-end modal. */
+  onUnauthorized: () => void;
 }
 
 /**
@@ -13,7 +16,12 @@ interface CreateKeyModalProps {
  *  2. Show the raw key exactly once with a copy button and a can't-undo
  *     warning, gated behind an "I've saved it" checkbox before it can close.
  */
-export default function CreateKeyModal({ accountId, onClose, onCreated }: CreateKeyModalProps) {
+export default function CreateKeyModal({
+  accountId,
+  onClose,
+  onCreated,
+  onUnauthorized,
+}: CreateKeyModalProps) {
   const [name, setName] = useState("");
   const [rawKey, setRawKey] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -28,6 +36,7 @@ export default function CreateKeyModal({ accountId, onClose, onCreated }: Create
       const created = await createKey(accountId, name.trim());
       setRawKey(created.key);
     } catch (err) {
+      if (err instanceof UnauthorizedError) return onUnauthorized();
       setError(err instanceof Error ? err.message : "Failed to create key");
     } finally {
       setBusy(false);

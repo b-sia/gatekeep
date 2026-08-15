@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { patchAccount } from "../api/client";
+import { UnauthorizedError, patchAccount } from "../api/client";
 import type { AccountStatsOut } from "../api/types";
 import KeyTable from "./KeyTable";
 
@@ -25,15 +25,37 @@ export default function AccountDetailPanel({
   );
   const [error, setError] = useState<string | null>(null);
 
-  /** Runs one PATCH mutation, surfaces errors, and refreshes on success. */
+  /** Runs one PATCH mutation, surfaces errors, and refreshes on success.
+   * Only calls `onChanged()` when the request succeeds, so a rejected
+   * mutation (e.g. the last-operator 409) leaves the displayed state
+   * unchanged rather than looking like it was applied. */
   async function apply(body: Parameters<typeof patchAccount>[1]) {
     setError(null);
     try {
       await patchAccount(account.id, body);
       onChanged();
     } catch (err) {
+      if (err instanceof UnauthorizedError) return onUnauthorized();
       if (err instanceof Error) setError(err.message);
     }
+  }
+
+  /** Validates and submits the budget field: a non-blank value that doesn't
+   * parse to a finite number (e.g. "10O" or "1,000") is rejected locally
+   * rather than silently becoming NaN -> null (unlimited) on the wire. A
+   * blank field still means "clear the budget" (unlimited). */
+  function handleSaveBudget() {
+    const trimmed = budget.trim();
+    if (trimmed === "") {
+      apply({ clear_budget: true });
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      setError("Budget must be a number, or blank for unlimited");
+      return;
+    }
+    apply({ monthly_budget_usd: parsed });
   }
 
   return (
@@ -77,13 +99,7 @@ export default function AccountDetailPanel({
             />
           </label>
           <button
-            onClick={() =>
-              apply(
-                budget.trim() === ""
-                  ? { clear_budget: true }
-                  : { monthly_budget_usd: Number(budget.trim()) },
-              )
-            }
+            onClick={handleSaveBudget}
             className="rounded bg-indigo-600 px-3 py-2 text-xs text-white hover:bg-indigo-500"
           >
             Save budget

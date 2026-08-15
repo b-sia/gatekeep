@@ -82,7 +82,11 @@ export default function AccountsTable({ onUnauthorized }: AccountsTableProps) {
         </tbody>
       </table>
       {showCreate && (
-        <CreateAccountModal onClose={() => setShowCreate(false)} onCreated={load} />
+        <CreateAccountModal
+          onClose={() => setShowCreate(false)}
+          onCreated={load}
+          onUnauthorized={onUnauthorized}
+        />
       )}
       {selected && (
         <AccountDetailPanel

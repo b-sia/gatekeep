@@ -1,34 +1,53 @@
 import { useState } from "react";
-import { createAccount } from "../api/client";
+import { UnauthorizedError, createAccount } from "../api/client";
 
 interface CreateAccountModalProps {
   onClose: () => void;
   onCreated: () => void;
+  /** Called when the create request comes back 401, so the app can return
+   * to the key-entry / re-auth screen instead of showing a dead-end modal. */
+  onUnauthorized: () => void;
 }
 
 /** Operator modal to create an account: name, optional budget, optional
  * operator flag. Leaving budget blank means unlimited. */
-export default function CreateAccountModal({ onClose, onCreated }: CreateAccountModalProps) {
+export default function CreateAccountModal({
+  onClose,
+  onCreated,
+  onUnauthorized,
+}: CreateAccountModalProps) {
   const [name, setName] = useState("");
   const [budget, setBudget] = useState("");
   const [operator, setOperator] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  /** Submits the create request, mapping a blank budget to unlimited (null). */
+  /** Submits the create request, mapping a blank budget to unlimited (null).
+   * A non-blank budget that doesn't parse to a finite number (e.g. a typo
+   * like "10O" or "1,000") is rejected locally rather than silently
+   * serialized as NaN -> null (unlimited). */
   async function handleCreate() {
     setError(null);
+    const trimmed = budget.trim();
+    let budgetValue: number | null = null;
+    if (trimmed !== "") {
+      budgetValue = Number(trimmed);
+      if (!Number.isFinite(budgetValue)) {
+        setError("Budget must be a number, or blank for unlimited");
+        return;
+      }
+    }
     setBusy(true);
     try {
-      const trimmed = budget.trim();
       await createAccount({
         name: name.trim(),
-        monthly_budget_usd: trimmed === "" ? null : Number(trimmed),
+        monthly_budget_usd: budgetValue,
         is_operator: operator,
       });
       onCreated();
       onClose();
     } catch (err) {
+      if (err instanceof UnauthorizedError) return onUnauthorized();
       setError(err instanceof Error ? err.message : "Failed to create account");
     } finally {
       setBusy(false);

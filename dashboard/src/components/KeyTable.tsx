@@ -88,6 +88,7 @@ export default function KeyTable({ accountId, onUnauthorized }: KeyTableProps) {
           accountId={accountId}
           onClose={() => setShowCreate(false)}
           onCreated={load}
+          onUnauthorized={onUnauthorized}
         />
       )}
     </section>
