@@ -1,3 +1,4 @@
+import AccountsTable from "../components/AccountsTable";
 import BudgetCard from "../components/BudgetCard";
 import KeyTable from "../components/KeyTable";
 import type { MeResponse } from "../api/types";
@@ -10,7 +11,7 @@ interface ManagementPageProps {
 
 /**
  * Accounts & Keys tab. Every account sees its own budget card and key table;
- * operators additionally see the all-accounts section (added in a later task).
+ * operators additionally see the all-accounts operator section.
  */
 export default function ManagementPage({ me, onUnauthorized }: ManagementPageProps) {
   if (!me) {
@@ -20,9 +21,7 @@ export default function ManagementPage({ me, onUnauthorized }: ManagementPagePro
     <div className="pb-8">
       <BudgetCard me={me} />
       <KeyTable accountId={me.account_id} onUnauthorized={onUnauthorized} />
-      {me.is_operator && (
-        <p className="mx-6 mt-6 text-xs text-slate-600">Operator tools load below.</p>
-      )}
+      {me.is_operator && <AccountsTable onUnauthorized={onUnauthorized} />}
     </div>
   );
 }
