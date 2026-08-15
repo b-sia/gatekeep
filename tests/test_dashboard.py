@@ -1271,3 +1271,113 @@ async def test_operator_can_list_any_account_keys(client, operator_key, session)
         headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert resp.status_code == 200
+
+
+# -- operator account list/create/patch routes -------------------------------
+
+
+async def test_list_accounts_operator_only(client, raw_key):
+    """A non-operator hitting GET /accounts is 403."""
+    resp = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {raw_key}"}
+    )
+    assert resp.status_code == 403
+
+
+async def test_list_accounts_returns_stats(client, operator_key):
+    """An operator gets accounts with counts, budget, and spend fields."""
+    resp = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {operator_key}"}
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["accounts"]
+    assert rows, "expected at least the operator's own account"
+    sample = rows[0]
+    assert set(sample) >= {
+        "id",
+        "name",
+        "is_operator",
+        "monthly_budget_usd",
+        "created_at",
+        "active_key_count",
+        "total_key_count",
+        "spend_mtd",
+    }
+
+
+async def test_create_account_operator(client, operator_key):
+    """An operator can create an account."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "new-tenant", "monthly_budget_usd": 50.0},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "new-tenant"
+
+
+async def test_create_account_name_conflict(client, operator_key):
+    """A duplicate account name maps to 409."""
+    await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe"},
+    )
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe"},
+    )
+    assert resp.status_code == 409
+
+
+async def test_create_account_bad_budget(client, operator_key):
+    """A non-positive budget maps to 422."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "cheapo", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+
+async def test_patch_account_rename_and_budget(client, operator_key, session):
+    """An operator can rename and set budget in one PATCH."""
+    target = await create_account(session, name="patch-me")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "patched", "monthly_budget_usd": 12.5},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "patched"
+    assert body["monthly_budget_usd"] == 12.5
+
+
+async def test_patch_clear_budget(client, operator_key, session):
+    """clear_budget True sets the cap to null."""
+    target = await create_account(session, name="had-budget", monthly_budget_usd=9.0)
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"clear_budget": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["monthly_budget_usd"] is None
+
+
+async def test_patch_last_operator_guard(client, operator_key, session):
+    """Turning off the only operator maps to 409."""
+    # operator_key's own account is the only operator; find its id via /me.
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {operator_key}"})
+    ).json()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{me['account_id']}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"is_operator": False},
+    )
+    assert resp.status_code == 409

@@ -1296,3 +1296,151 @@ async def revoke_account_key(
     except account_service.KeyNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
     return KeyOut(id=key.id, name=key.name, active=key.active, created_at=key.created_at)
+
+
+class AccountStatsOut(BaseModel):
+    """One account row for the operator's all-accounts table."""
+
+    id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    created_at: datetime
+    active_key_count: int
+    total_key_count: int
+    spend_mtd: float
+
+
+class AccountListResponse(BaseModel):
+    """All accounts with stats, ordered by name (operator view)."""
+
+    accounts: list[AccountStatsOut]
+
+
+class AccountOut(BaseModel):
+    """A single account after a create/patch, without stats."""
+
+    id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    created_at: datetime
+
+
+class AccountCreateRequest(BaseModel):
+    """Request body for creating an account."""
+
+    name: str
+    monthly_budget_usd: float | None = None
+    is_operator: bool = False
+
+
+class AccountPatchRequest(BaseModel):
+    """Request body for updating an account.
+
+    Every field is optional so a caller sends only what changes. `clear_budget`
+    is a separate flag because `monthly_budget_usd = null` is indistinguishable
+    from "field omitted" in JSON, and the two must mean different things
+    (clear-the-cap vs. leave-it-alone).
+    """
+
+    name: str | None = None
+    monthly_budget_usd: float | None = None
+    clear_budget: bool = False
+    is_operator: bool | None = None
+
+
+def _account_out(account: Account) -> AccountOut:
+    """Map an Account ORM row to the AccountOut response model."""
+    return AccountOut(
+        id=account.id,
+        name=account.name,
+        is_operator=account.is_operator,
+        monthly_budget_usd=account.monthly_budget_usd,
+        created_at=account.created_at,
+    )
+
+
+@router.get("/accounts", response_model=AccountListResponse)
+async def list_accounts(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    _operator: Account = Depends(require_operator),
+) -> AccountListResponse:
+    """List all accounts with key counts and month-to-date spend. Operator only."""
+    stats = await account_service.list_accounts_with_stats(session, redis)
+    return AccountListResponse(
+        accounts=[
+            AccountStatsOut(
+                id=s.id,
+                name=s.name,
+                is_operator=s.is_operator,
+                monthly_budget_usd=s.monthly_budget_usd,
+                created_at=s.created_at,
+                active_key_count=s.active_key_count,
+                total_key_count=s.total_key_count,
+                spend_mtd=s.spend_mtd,
+            )
+            for s in stats
+        ]
+    )
+
+
+@router.post("/accounts", response_model=AccountOut)
+async def create_account_route(
+    body: AccountCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AccountOut:
+    """Create an account. Operator only. 409 on name collision, 422 on bad budget."""
+    try:
+        account = await account_service.create_account(
+            session,
+            name=body.name,
+            monthly_budget_usd=body.monthly_budget_usd,
+            is_operator=body.is_operator,
+        )
+    except account_service.InvalidBudgetError as exc:
+        raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
+    except account_service.AccountNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    return _account_out(account)
+
+
+@router.patch("/accounts/{account_id}", response_model=AccountOut)
+async def patch_account_route(
+    account_id: int,
+    body: AccountPatchRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AccountOut:
+    """Rename, set/clear budget, and/or toggle operator on an account.
+
+    Operator only. Applies each requested change through the service layer so
+    its guards (last-operator, name uniqueness, budget validation) hold.
+    Maps 404 (unknown account), 409 (name collision, last-operator), 422
+    (bad budget).
+    """
+    try:
+        account = None
+        if body.name is not None:
+            account = await account_service.rename_account(session, account_id, body.name)
+        if body.clear_budget:
+            account = await account_service.set_budget(session, account_id, None)
+        elif body.monthly_budget_usd is not None:
+            account = await account_service.set_budget(session, account_id, body.monthly_budget_usd)
+        if body.is_operator is not None:
+            account = await account_service.set_operator(session, account_id, body.is_operator)
+        if account is None:
+            # No mutating field supplied; return the current state.
+            account = await account_service._get_account_or_404(session, account_id)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except account_service.InvalidBudgetError as exc:
+        raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
+    except (
+        account_service.AccountNameConflictError,
+        account_service.LastOperatorError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    return _account_out(account)
