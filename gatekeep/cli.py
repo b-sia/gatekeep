@@ -8,6 +8,7 @@ import sys
 from anthropic import AsyncAnthropic
 from sqlalchemy import select
 
+from gatekeep import account_service
 from gatekeep.config import get_settings
 from gatekeep.curation import curate_cases, list_unreviewed, review_case
 from gatekeep.db import SessionLocal
@@ -21,7 +22,7 @@ from gatekeep.evals import (
 )
 from gatekeep.fixtures import load_fixtures_dir
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import Account, PromptVersion
+from gatekeep.models import Account, ApiKey, PromptVersion
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -277,38 +278,109 @@ async def _eval_review(name: str) -> None:
             print("  approved" if answer == "y" else "  rejected (deleted)")
 
 
-async def _set_budget(name: str, amount: float | None, unlimited: bool) -> None:
-    """Set or clear an account's monthly USD spend cap, looked up by name.
+async def _resolve_account_id(session, name: str) -> int:
+    """Return the id of the account named `name`, or raise ValueError.
 
-    Budget is pooled at the account: the cap is the shared quota
-    every key on the account draws from.
-
-    Args:
-        name: The accounts.name of the account to update.
-        amount: The new monthly_budget_usd value, or None if `unlimited` is set.
-        unlimited: If True, clears the cap (monthly_budget_usd = None),
-            ignoring `amount`.
-
-    Raises:
-        ValueError: if neither `amount` nor `unlimited` was given, if
-            `amount` is not positive, or if no account with that name exists.
+    Central lookup so every account/key subcommand references accounts by
+    their human-facing name, matching how operators think about them.
     """
+    account = (
+        await session.execute(select(Account).where(Account.name == name))
+    ).scalar_one_or_none()
+    if account is None:
+        raise ValueError(f"no account named {name!r}")
+    return account.id
+
+
+async def _account_create(name: str, budget: float | None, unlimited: bool, operator: bool) -> None:
+    """Create an account, optionally with a budget cap and operator status.
+
+    `--unlimited` and a positive `budget` are mutually exclusive ways to set
+    the cap; omitting both leaves the account unlimited.
+    """
+    monthly = None if unlimited else budget
+    async with SessionLocal() as session:
+        account = await account_service.create_account(
+            session, name=name, monthly_budget_usd=monthly, is_operator=operator
+        )
+    flag = " (operator)" if account.is_operator else ""
+    print(f"created account {name!r}{flag}")
+
+
+async def _account_rename(name: str, new_name: str) -> None:
+    """Rename an account."""
+    async with SessionLocal() as session:
+        account_id = await _resolve_account_id(session, name)
+        await account_service.rename_account(session, account_id, new_name)
+    print(f"renamed {name!r} to {new_name!r}")
+
+
+async def _account_set_budget(name: str, amount: float | None, unlimited: bool) -> None:
+    """Set or clear an account's monthly USD spend cap, looked up by name."""
     if not unlimited and amount is None:
         raise ValueError("must provide an amount, or pass --unlimited to clear it")
-    if not unlimited and amount <= 0:
-        raise ValueError("amount must be positive")
     async with SessionLocal() as session:
-        account = (
-            await session.execute(select(Account).where(Account.name == name))
-        ).scalar_one_or_none()
-        if account is None:
-            raise ValueError(f"no account named {name!r}")
-        account.monthly_budget_usd = None if unlimited else amount
-        await session.commit()
+        account_id = await _resolve_account_id(session, name)
+        await account_service.set_budget(session, account_id, None if unlimited else amount)
     if unlimited:
         print(f"cleared budget cap for {name!r} (unlimited)")
     else:
         print(f"set budget cap for {name!r} to ${amount:.2f}/month")
+
+
+async def _account_set_operator(name: str, off: bool) -> None:
+    """Grant or revoke operator status for an account (guarded server-side)."""
+    async with SessionLocal() as session:
+        account_id = await _resolve_account_id(session, name)
+        await account_service.set_operator(session, account_id, not off)
+    print(f"{'revoked' if off else 'granted'} operator for {name!r}")
+
+
+async def _account_list() -> None:
+    """Print every account with its budget and operator flag."""
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account).order_by(Account.name))).scalars().all()
+        for account in accounts:
+            budget = (
+                "unlimited"
+                if account.monthly_budget_usd is None
+                else f"${account.monthly_budget_usd:.2f}"
+            )
+            flag = "\toperator" if account.is_operator else ""
+            print(f"{account.name}\t{budget}{flag}")
+
+
+async def _key_create(account: str, name: str) -> None:
+    """Mint a key for an account and print the raw key exactly once."""
+    async with SessionLocal() as session:
+        account_id = await _resolve_account_id(session, account)
+        _key, raw = await account_service.create_key(session, account_id, name)
+    print(raw)
+
+
+async def _key_revoke(account: str, name: str) -> None:
+    """Soft-revoke a key by account name and key name."""
+    async with SessionLocal() as session:
+        account_id = await _resolve_account_id(session, account)
+        key = (
+            await session.execute(
+                select(ApiKey).where(ApiKey.account_id == account_id, ApiKey.name == name)
+            )
+        ).scalar_one_or_none()
+        if key is None:
+            raise ValueError(f"no key named {name!r} on account {account!r}")
+        await account_service.revoke_key(session, account_id, key.id)
+    print(f"revoked key {name!r} on account {account!r}")
+
+
+async def _key_list(account: str) -> None:
+    """Print an account's keys (active and revoked)."""
+    async with SessionLocal() as session:
+        account_id = await _resolve_account_id(session, account)
+        keys = await account_service.list_keys(session, account_id)
+        for key in keys:
+            status = "active" if key.active else "revoked"
+            print(f"{key.name}\t{status}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -371,19 +443,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_parser.add_argument("directory")
 
+    account_parser = subparsers.add_parser("account", help="manage accounts (tenants)")
+    account_subparsers = account_parser.add_subparsers(dest="account_command", required=True)
+
+    ac_create = account_subparsers.add_parser("create", help="create an account")
+    ac_create.add_argument("name")
+    ac_create.add_argument("--budget", type=float, default=None, help="monthly cap in USD")
+    ac_create.add_argument("--unlimited", action="store_true", help="no budget cap (default)")
+    ac_create.add_argument("--operator", action="store_true", help="grant operator status")
+
+    ac_rename = account_subparsers.add_parser("rename", help="rename an account")
+    ac_rename.add_argument("name")
+    ac_rename.add_argument("new_name")
+
+    ac_budget = account_subparsers.add_parser(
+        "set-budget", help="set or clear an account's monthly USD spend cap"
+    )
+    ac_budget.add_argument("name", help="the account name")
+    ac_budget.add_argument(
+        "amount", type=float, nargs="?", default=None, help="new monthly cap in USD"
+    )
+    ac_budget.add_argument(
+        "--unlimited", action="store_true", help="clear the cap (unlimited spend)"
+    )
+
+    ac_operator = account_subparsers.add_parser(
+        "set-operator", help="grant (default) or revoke operator status"
+    )
+    ac_operator.add_argument("name")
+    ac_operator.add_argument(
+        "--off", action="store_true", help="revoke operator status instead of granting"
+    )
+
+    account_subparsers.add_parser("list", help="list all accounts")
+
     key_parser = subparsers.add_parser("key", help="manage API keys")
     key_subparsers = key_parser.add_subparsers(dest="key_command", required=True)
 
-    set_budget_parser = key_subparsers.add_parser(
-        "set-budget", help="set or clear an account's monthly USD spend cap"
-    )
-    set_budget_parser.add_argument("name", help="the account name")
-    set_budget_parser.add_argument(
-        "amount", type=float, nargs="?", default=None, help="new monthly cap in USD"
-    )
-    set_budget_parser.add_argument(
-        "--unlimited", action="store_true", help="clear the cap (unlimited spend)"
-    )
+    k_create = key_subparsers.add_parser("create", help="mint a key for an account")
+    k_create.add_argument("account", help="the account name")
+    k_create.add_argument("name", help="the new key's name")
+
+    k_revoke = key_subparsers.add_parser("revoke", help="soft-revoke a key")
+    k_revoke.add_argument("account", help="the account name")
+    k_revoke.add_argument("name", help="the key's name")
+
+    k_list = key_subparsers.add_parser("list", help="list an account's keys")
+    k_list.add_argument("account", help="the account name")
 
     eval_parser = subparsers.add_parser("eval", help="manage eval suites and cases")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
@@ -450,9 +556,24 @@ def main(argv: list[str] | None = None) -> int:
                 asyncio.run(_clear_candidate(args.name))
             elif args.prompt_command == "sync":
                 asyncio.run(_sync(args.directory))
+        elif args.command == "account":
+            if args.account_command == "create":
+                asyncio.run(_account_create(args.name, args.budget, args.unlimited, args.operator))
+            elif args.account_command == "rename":
+                asyncio.run(_account_rename(args.name, args.new_name))
+            elif args.account_command == "set-budget":
+                asyncio.run(_account_set_budget(args.name, args.amount, args.unlimited))
+            elif args.account_command == "set-operator":
+                asyncio.run(_account_set_operator(args.name, args.off))
+            elif args.account_command == "list":
+                asyncio.run(_account_list())
         elif args.command == "key":
-            if args.key_command == "set-budget":
-                asyncio.run(_set_budget(args.name, args.amount, args.unlimited))
+            if args.key_command == "create":
+                asyncio.run(_key_create(args.account, args.name))
+            elif args.key_command == "revoke":
+                asyncio.run(_key_revoke(args.account, args.name))
+            elif args.key_command == "list":
+                asyncio.run(_key_list(args.account))
         elif args.command == "eval":
             if args.eval_command == "create-suite":
                 asyncio.run(_eval_create_suite(args.name, args.threshold, args.suite_name))
@@ -488,7 +609,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 2
-    except (PromptNotFoundError, PromptVersionNotFoundError, ValueError) as exc:
+    except (
+        PromptNotFoundError,
+        PromptVersionNotFoundError,
+        account_service.AccountServiceError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
