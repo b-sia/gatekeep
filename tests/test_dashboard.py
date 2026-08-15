@@ -1381,3 +1381,55 @@ async def test_patch_last_operator_guard(client, operator_key, session):
         json={"is_operator": False},
     )
     assert resp.status_code == 409
+
+
+async def test_patch_partial_failure_does_not_persist_earlier_fields(client, operator_key, session):
+    """A multi-field PATCH must be all-or-nothing.
+
+    A valid rename paired with an invalid budget in the same request must
+    422 without persisting the rename - regression test for the PATCH route
+    committing each field's service call independently.
+    """
+    target = await create_account(session, name="atomic-original")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "atomic-renamed", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+    await session.refresh(target)
+    assert target.name == "atomic-original"
+
+
+async def test_patch_failed_request_leaves_name_unchanged_on_recheck(client, operator_key, session):
+    """Following up the failed PATCH above with a fresh read confirms no leak.
+
+    Re-reads via the operator's account list (not the test session's cache)
+    so this exercises the same read path a real client would use.
+    """
+    target = await create_account(session, name="atomic-recheck")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "atomic-recheck-renamed", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+    listing = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {operator_key}"}
+    )
+    row = next(r for r in listing.json()["accounts"] if r["id"] == target.id)
+    assert row["name"] == "atomic-recheck"
+
+
+async def test_patch_unknown_account_404(client, operator_key):
+    """PATCHing a nonexistent account id maps to 404."""
+    resp = await client.patch(
+        "/dashboard/api/accounts/999999",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 404

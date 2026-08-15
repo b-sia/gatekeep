@@ -65,6 +65,19 @@ async def _get_account_or_404(session: AsyncSession, account_id: int) -> Account
     return account
 
 
+async def get_account(session: AsyncSession, account_id: int) -> Account:
+    """Load an account by id.
+
+    Public accessor over `_get_account_or_404`, for callers outside this
+    module (e.g. the dashboard API) that need to fetch an account without
+    reaching into a private helper.
+
+    Raises:
+        AccountNotFoundError: if no account has that id.
+    """
+    return await _get_account_or_404(session, account_id)
+
+
 async def create_account(
     session: AsyncSession,
     *,
@@ -98,15 +111,28 @@ async def create_account(
     return account
 
 
-async def rename_account(session: AsyncSession, account_id: int, new_name: str) -> Account:
-    """Rename an account, commit, and return it.
+async def rename_account(
+    session: AsyncSession, account_id: int, new_name: str, *, commit: bool = True
+) -> Account:
+    """Rename an account and return it.
+
+    Args:
+        commit: When True (default), commits immediately and translates an
+            `IntegrityError` (name collision) into `AccountNameConflictError`.
+            When False, only validates/loads/mutates - no commit, and any
+            `IntegrityError` is left untranslated for the caller to handle
+            around its own commit (used by multi-field atomic updates such
+            as the dashboard's PATCH /accounts/{id} route).
 
     Raises:
         AccountNotFoundError: if no account has that id.
-        AccountNameConflictError: if `new_name` is already taken.
+        AccountNameConflictError: if `new_name` is already taken (only when
+            `commit` is True; the integrity check happens at commit time).
     """
     account = await _get_account_or_404(session, account_id)
     account.name = new_name
+    if not commit:
+        return account
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -115,11 +141,16 @@ async def rename_account(session: AsyncSession, account_id: int, new_name: str) 
     return account
 
 
-async def set_budget(session: AsyncSession, account_id: int, amount: float | None) -> Account:
-    """Set or clear an account's monthly spend cap, commit, and return it.
+async def set_budget(
+    session: AsyncSession, account_id: int, amount: float | None, *, commit: bool = True
+) -> Account:
+    """Set or clear an account's monthly spend cap and return it.
 
     Args:
         amount: Positive cap, or None to clear it (unlimited).
+        commit: When True (default), commits immediately. When False, only
+            validates/loads/mutates - no commit, leaving the caller to commit
+            as part of a larger atomic update.
 
     Raises:
         AccountNotFoundError: if no account has that id.
@@ -128,15 +159,21 @@ async def set_budget(session: AsyncSession, account_id: int, amount: float | Non
     _validate_budget(amount)
     account = await _get_account_or_404(session, account_id)
     account.monthly_budget_usd = amount
-    await session.commit()
+    if commit:
+        await session.commit()
     return account
 
 
-async def set_operator(session: AsyncSession, account_id: int, value: bool) -> Account:
+async def set_operator(
+    session: AsyncSession, account_id: int, value: bool, *, commit: bool = True
+) -> Account:
     """Set an account's operator flag, guarding against removing the last operator.
 
     Args:
         value: The new operator flag.
+        commit: When True (default), commits immediately. When False, only
+            runs the guard/loads/mutates - no commit, leaving the caller to
+            commit as part of a larger atomic update.
 
     Raises:
         AccountNotFoundError: if no account has that id.
@@ -154,7 +191,8 @@ async def set_operator(session: AsyncSession, account_id: int, value: bool) -> A
         if other_operators == 0:
             raise LastOperatorError("cannot remove the last operator")
     account.is_operator = value
-    await session.commit()
+    if commit:
+        await session.commit()
     return account
 
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import Integer, case, func, or_, select, true
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep import account_service
@@ -1416,31 +1417,53 @@ async def patch_account_route(
 ) -> AccountOut:
     """Rename, set/clear budget, and/or toggle operator on an account.
 
-    Operator only. Applies each requested change through the service layer so
-    its guards (last-operator, name uniqueness, budget validation) hold.
+    Operator only. Applies each requested change through the service layer
+    with `commit=False`, so each service guard (last-operator, budget
+    validation) still runs, but nothing is written until every requested
+    change has succeeded - then this route commits once. That single commit
+    makes the whole PATCH atomic: if a later field fails validation (e.g. a
+    bad budget after a valid rename), the rename is rolled back too, rather
+    than silently persisting while the client sees an error.
+
     Maps 404 (unknown account), 409 (name collision, last-operator), 422
     (bad budget).
     """
     try:
         account = None
         if body.name is not None:
-            account = await account_service.rename_account(session, account_id, body.name)
+            account = await account_service.rename_account(
+                session, account_id, body.name, commit=False
+            )
         if body.clear_budget:
-            account = await account_service.set_budget(session, account_id, None)
+            account = await account_service.set_budget(session, account_id, None, commit=False)
         elif body.monthly_budget_usd is not None:
-            account = await account_service.set_budget(session, account_id, body.monthly_budget_usd)
+            account = await account_service.set_budget(
+                session, account_id, body.monthly_budget_usd, commit=False
+            )
         if body.is_operator is not None:
-            account = await account_service.set_operator(session, account_id, body.is_operator)
+            account = await account_service.set_operator(
+                session, account_id, body.is_operator, commit=False
+            )
         if account is None:
             # No mutating field supplied; return the current state.
-            account = await account_service._get_account_or_404(session, account_id)
+            account = await account_service.get_account(session, account_id)
+        else:
+            await session.commit()
     except account_service.AccountNotFoundError as exc:
+        await session.rollback()
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
     except account_service.InvalidBudgetError as exc:
+        await session.rollback()
         raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
     except (
         account_service.AccountNameConflictError,
         account_service.LastOperatorError,
     ) as exc:
+        await session.rollback()
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail=_error_body(f"account name {body.name!r} is already taken")
+        ) from exc
     return _account_out(account)
