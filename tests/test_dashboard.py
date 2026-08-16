@@ -1341,6 +1341,16 @@ async def test_create_account_bad_budget(client, operator_key):
     assert resp.status_code == 422
 
 
+async def test_create_account_blank_name(client, operator_key):
+    """A blank or whitespace-only name maps to 422."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "   "},
+    )
+    assert resp.status_code == 422
+
+
 async def test_patch_account_rename_and_budget(client, operator_key, session):
     """An operator can rename and set budget in one PATCH."""
     target = await create_account(session, name="patch-me")
@@ -1367,6 +1377,20 @@ async def test_patch_clear_budget(client, operator_key, session):
     )
     assert resp.status_code == 200
     assert resp.json()["monthly_budget_usd"] is None
+
+
+async def test_patch_account_blank_name(client, operator_key, session):
+    """Renaming to a blank or whitespace-only name maps to 422 and does not persist."""
+    target = await create_account(session, name="blank-guard")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "   "},
+    )
+    assert resp.status_code == 422
+    await session.refresh(target)
+    assert target.name == "blank-guard"
 
 
 async def test_patch_last_operator_guard(client, operator_key, session):

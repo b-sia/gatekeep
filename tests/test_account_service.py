@@ -33,6 +33,12 @@ async def test_create_account_rejects_non_positive_budget(session):
         await svc.create_account(session, name="cheap", monthly_budget_usd=0)
 
 
+async def test_create_account_rejects_blank_name(session):
+    """A blank or whitespace-only name raises InvalidAccountNameError."""
+    with pytest.raises(svc.InvalidAccountNameError):
+        await svc.create_account(session, name="   ")
+
+
 async def test_rename_account_changes_name(session):
     """rename_account updates the name and returns the account."""
     account = await create_account(session)
@@ -45,6 +51,14 @@ async def test_rename_missing_account_raises(session):
     """rename_account on an unknown id raises AccountNotFoundError."""
     with pytest.raises(svc.AccountNotFoundError):
         await svc.rename_account(session, 999999, "whatever")
+
+
+async def test_rename_account_rejects_blank_name(session):
+    """Renaming to a blank or whitespace-only name raises InvalidAccountNameError."""
+    account = await create_account(session)
+    await session.commit()
+    with pytest.raises(svc.InvalidAccountNameError):
+        await svc.rename_account(session, account.id, "   ")
 
 
 async def test_rename_to_taken_name_conflicts(session):

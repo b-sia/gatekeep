@@ -40,6 +40,17 @@ export default function AccountDetailPanel({
     }
   }
 
+  /** Validates and submits the name field: rejects a blank/whitespace-only
+   * name locally rather than sending it and relying on the server's 422. */
+  function handleRename() {
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      setError("Name must not be blank");
+      return;
+    }
+    apply({ name: trimmed });
+  }
+
   /** Validates and submits the budget field: a non-blank value that doesn't
    * parse to a finite number (e.g. "10O" or "1,000") is rejected locally
    * rather than silently becoming NaN -> null (unlimited) on the wire. A
@@ -82,7 +93,7 @@ export default function AccountDetailPanel({
             />
           </label>
           <button
-            onClick={() => apply({ name: name.trim() })}
+            onClick={handleRename}
             className="rounded bg-indigo-600 px-3 py-2 text-xs text-white hover:bg-indigo-500"
           >
             Rename

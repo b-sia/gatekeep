@@ -1393,7 +1393,7 @@ async def create_account_route(
     session: AsyncSession = Depends(get_session),
     _operator: Account = Depends(require_operator),
 ) -> AccountOut:
-    """Create an account. Operator only. 409 on name collision, 422 on bad budget."""
+    """Create an account. Operator only. 409 on name collision, 422 on bad name/budget."""
     try:
         account = await account_service.create_account(
             session,
@@ -1401,7 +1401,10 @@ async def create_account_route(
             monthly_budget_usd=body.monthly_budget_usd,
             is_operator=body.is_operator,
         )
-    except account_service.InvalidBudgetError as exc:
+    except (
+        account_service.InvalidBudgetError,
+        account_service.InvalidAccountNameError,
+    ) as exc:
         raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
     except account_service.AccountNameConflictError as exc:
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
@@ -1426,7 +1429,7 @@ async def patch_account_route(
     than silently persisting while the client sees an error.
 
     Maps 404 (unknown account), 409 (name collision, last-operator), 422
-    (bad budget).
+    (bad name, bad budget).
     """
     try:
         account = None
@@ -1452,7 +1455,10 @@ async def patch_account_route(
     except account_service.AccountNotFoundError as exc:
         await session.rollback()
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
-    except account_service.InvalidBudgetError as exc:
+    except (
+        account_service.InvalidBudgetError,
+        account_service.InvalidAccountNameError,
+    ) as exc:
         await session.rollback()
         raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
     except (

@@ -47,6 +47,10 @@ class InvalidBudgetError(AccountServiceError):
     """Raised when a budget amount is present but not strictly positive."""
 
 
+class InvalidAccountNameError(AccountServiceError):
+    """Raised when an account name is blank or all whitespace."""
+
+
 def _validate_budget(amount: float | None) -> None:
     """Reject a non-positive budget; None (unlimited/cleared) is always allowed.
 
@@ -55,6 +59,16 @@ def _validate_budget(amount: float | None) -> None:
     """
     if amount is not None and amount <= 0:
         raise InvalidBudgetError("budget amount must be positive")
+
+
+def _validate_name(name: str) -> None:
+    """Reject a blank or whitespace-only account name.
+
+    Raises:
+        InvalidAccountNameError: if `name` is empty once stripped.
+    """
+    if not name.strip():
+        raise InvalidAccountNameError("account name must not be blank")
 
 
 async def _get_account_or_404(session: AsyncSession, account_id: int) -> Account:
@@ -97,9 +111,11 @@ async def create_account(
         The persisted Account with its id populated.
 
     Raises:
+        InvalidAccountNameError: if `name` is blank or all whitespace.
         InvalidBudgetError: if `monthly_budget_usd` is non-positive.
         AccountNameConflictError: if `name` is already taken.
     """
+    _validate_name(name)
     _validate_budget(monthly_budget_usd)
     account = Account(name=name, monthly_budget_usd=monthly_budget_usd, is_operator=is_operator)
     session.add(account)
@@ -126,9 +142,11 @@ async def rename_account(
 
     Raises:
         AccountNotFoundError: if no account has that id.
+        InvalidAccountNameError: if `new_name` is blank or all whitespace.
         AccountNameConflictError: if `new_name` is already taken (only when
             `commit` is True; the integrity check happens at commit time).
     """
+    _validate_name(new_name)
     account = await _get_account_or_404(session, account_id)
     account.name = new_name
     if not commit:
