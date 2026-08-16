@@ -6,12 +6,16 @@ import CreateKeyModal from "./CreateKeyModal";
 interface KeyTableProps {
   accountId: number;
   onUnauthorized: () => void;
+  /** Called after a key is minted or revoked, so a parent showing derived
+   * key counts (e.g. the operator accounts table) can refresh too. Not
+   * called on the initial load. */
+  onChanged?: () => void;
 }
 
 /** Lists an account's keys with a create button and per-row revoke. Revoked
  * keys stay listed, greyed out. Works for the caller's own account or, for an
  * operator, any account (the caller id is supplied by the parent). */
-export default function KeyTable({ accountId, onUnauthorized }: KeyTableProps) {
+export default function KeyTable({ accountId, onUnauthorized, onChanged }: KeyTableProps) {
   const [keys, setKeys] = useState<KeyOut[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,11 +35,18 @@ export default function KeyTable({ accountId, onUnauthorized }: KeyTableProps) {
     load();
   }, [load]);
 
-  /** Revokes a key then reloads the table. */
+  /** Reloads the table after a mint, then notifies the parent. */
+  async function handleCreated() {
+    await load();
+    onChanged?.();
+  }
+
+  /** Revokes a key, reloads the table, then notifies the parent. */
   async function handleRevoke(keyId: number) {
     try {
       await revokeKey(accountId, keyId);
       await load();
+      onChanged?.();
     } catch (err) {
       if (err instanceof UnauthorizedError) return onUnauthorized();
       setError(err instanceof Error ? err.message : "Failed to revoke key");
@@ -87,7 +98,7 @@ export default function KeyTable({ accountId, onUnauthorized }: KeyTableProps) {
         <CreateKeyModal
           accountId={accountId}
           onClose={() => setShowCreate(false)}
-          onCreated={load}
+          onCreated={handleCreated}
           onUnauthorized={onUnauthorized}
         />
       )}

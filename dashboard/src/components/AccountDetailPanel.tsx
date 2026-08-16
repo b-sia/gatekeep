@@ -129,7 +129,7 @@ export default function AccountDetailPanel({
           </button>
         </div>
 
-        <KeyTable accountId={account.id} onUnauthorized={onUnauthorized} />
+        <KeyTable accountId={account.id} onUnauthorized={onUnauthorized} onChanged={onChanged} />
       </div>
     </div>
   );
