@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import KeyEntryScreen from "./components/KeyEntryScreen";
 import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
@@ -15,6 +15,7 @@ export default function App() {
   const [hasKey, setHasKey] = useState<boolean>(() => getStoredApiKey() !== null);
   const [tab, setTab] = useState<TabKey>("analytics");
   const [me, setMe] = useState<MeResponse | null>(null);
+  const [meError, setMeError] = useState<string | null>(null);
 
   /** Clears the stored API key and returns to the key entry screen. */
   function handleUnauthorized() {
@@ -23,14 +24,20 @@ export default function App() {
     setHasKey(false);
   }
 
-  useEffect(() => {
-    if (!hasKey) return;
+  const loadMe = useCallback(() => {
+    setMeError(null);
     getMe()
       .then(setMe)
       .catch((err) => {
-        if (err instanceof UnauthorizedError) handleUnauthorized();
+        if (err instanceof UnauthorizedError) return handleUnauthorized();
+        setMeError(err instanceof Error ? err.message : "Failed to load account");
       });
-  }, [hasKey]);
+  }, []);
+
+  useEffect(() => {
+    if (!hasKey) return;
+    loadMe();
+  }, [hasKey, loadMe]);
 
   if (!hasKey) {
     return <KeyEntryScreen onKeySaved={() => setHasKey(true)} />;
@@ -42,7 +49,13 @@ export default function App() {
       {tab === "analytics" ? (
         <DashboardPage onUnauthorized={handleUnauthorized} />
       ) : (
-        <ManagementPage me={me} onUnauthorized={handleUnauthorized} onMeChanged={setMe} />
+        <ManagementPage
+          me={me}
+          meError={meError}
+          onRetryMe={loadMe}
+          onUnauthorized={handleUnauthorized}
+          onMeChanged={setMe}
+        />
       )}
     </div>
   );
