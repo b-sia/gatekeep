@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { UnauthorizedError, getAccounts } from "../api/client";
-import type { AccountStatsOut } from "../api/types";
+import type { AccountStatsOut, MeResponse } from "../api/types";
 import { formatUsd } from "../format";
 import AccountDetailPanel from "./AccountDetailPanel";
 import CreateAccountModal from "./CreateAccountModal";
 
 interface AccountsTableProps {
+  selfAccountId: number;
+  onMeChanged: (me: MeResponse) => void;
   onUnauthorized: () => void;
 }
 
 /** Operator-only table of all accounts (name, budget, MTD spend, key count,
  * operator flag) with a Create button and a per-row Manage action. */
-export default function AccountsTable({ onUnauthorized }: AccountsTableProps) {
+export default function AccountsTable({
+  selfAccountId,
+  onMeChanged,
+  onUnauthorized,
+}: AccountsTableProps) {
   const [accounts, setAccounts] = useState<AccountStatsOut[]>([]);
   const [selected, setSelected] = useState<AccountStatsOut | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -24,11 +30,24 @@ export default function AccountsTable({ onUnauthorized }: AccountsTableProps) {
       setAccounts(res.accounts);
       // Keep the open detail panel in sync with fresh data after a mutation.
       setSelected((cur) => (cur ? res.accounts.find((a) => a.id === cur.id) ?? null : null));
+      // An operator managing their own row here mutates the same account
+      // backing App's `me` state - push the fresh row up so BudgetCard and
+      // the operator gate stay in sync instead of going stale.
+      const self = res.accounts.find((a) => a.id === selfAccountId);
+      if (self) {
+        onMeChanged({
+          account_id: self.id,
+          name: self.name,
+          is_operator: self.is_operator,
+          monthly_budget_usd: self.monthly_budget_usd,
+          spend_mtd: self.spend_mtd,
+        });
+      }
     } catch (err) {
       if (err instanceof UnauthorizedError) return onUnauthorized();
       setError(err instanceof Error ? err.message : "Failed to load accounts");
     }
-  }, [onUnauthorized]);
+  }, [onUnauthorized, onMeChanged, selfAccountId]);
 
   useEffect(() => {
     load();
