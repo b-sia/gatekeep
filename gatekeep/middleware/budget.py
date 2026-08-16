@@ -153,6 +153,90 @@ async def get_period_spend(
     return spent
 
 
+async def _aggregate_spend_from_db_batch(
+    session: AsyncSession, account_ids: list[int], period_start: dt.datetime
+) -> dict[int, float]:
+    """Sum non-cached `request_logs.cost_usd` for several accounts in one query.
+
+    Batched counterpart to `_aggregate_spend_from_db`: a single grouped
+    aggregate instead of one query per account. An account with no matching
+    rows is simply absent from the result; callers should default it to 0.0.
+    """
+    result = await session.execute(
+        select(RequestLog.account_id, func.coalesce(func.sum(RequestLog.cost_usd), 0.0))
+        .where(
+            RequestLog.account_id.in_(account_ids),
+            RequestLog.created_at >= period_start,
+            RequestLog.cached.is_(False),
+        )
+        .group_by(RequestLog.account_id)
+    )
+    return {account_id: float(total) for account_id, total in result.all()}
+
+
+async def get_period_spend_batch(
+    session: AsyncSession | None,
+    redis: Redis,
+    *,
+    account_ids: list[int],
+    now: dt.datetime | None = None,
+) -> dict[int, float]:
+    """Return current-period USD spend for several accounts at once.
+
+    Batched counterpart to `get_period_spend`, for callers (the operator
+    "all accounts" table) that would otherwise issue one Redis round-trip
+    and possibly one DB aggregate per account. Reads every account's Redis
+    counter in a single MGET (fast path), then - for whichever accounts
+    missed - runs one grouped DB aggregate covering all of them and seeds
+    Redis with each result, same fallback behavior as `get_period_spend`.
+
+    `session` may be omitted only when the caller already knows Redis has
+    every value (there is no fallback path to take without it).
+    """
+    if not account_ids:
+        return {}
+    now = now or dt.datetime.now(dt.UTC)
+    period = _current_period(now)
+    redis_keys = [_spend_redis_key(account_id, period) for account_id in account_ids]
+    try:
+        cached = await redis.mget(redis_keys)
+    except RedisError:
+        logger.warning(
+            "Batched budget spend lookup failed (Redis unavailable); falling back to DB aggregate.",
+            extra={"account_ids": account_ids},
+        )
+        cached = [None] * len(account_ids)
+        redis = None  # avoid further failing calls below when seeding
+
+    results: dict[int, float] = {}
+    missing: list[int] = []
+    for account_id, value in zip(account_ids, cached, strict=True):
+        if value is not None:
+            results[account_id] = float(value)
+        else:
+            missing.append(account_id)
+
+    if not missing:
+        return results
+
+    if session is None:
+        raise ValueError("session is required on a Redis cache miss")
+    aggregated = await _aggregate_spend_from_db_batch(session, missing, _period_start(period))
+    for account_id in missing:
+        spent = aggregated.get(account_id, 0.0)
+        results[account_id] = spent
+        if redis is not None:
+            try:
+                await redis.set(_spend_redis_key(account_id, period), spent, ex=_PERIOD_TTL_SECONDS)
+            except RedisError:
+                logger.warning(
+                    "Failed to seed budget spend cache after DB fallback (Redis unavailable).",
+                    extra={"account_id": account_id},
+                )
+                redis = None  # subsequent seeds would fail the same way
+    return results
+
+
 async def _fire_alert_if_new(redis: Redis, account_id: int, period: str, label: str) -> bool:
     """Mark an alert as fired for this account/period/label, True the first time.
 

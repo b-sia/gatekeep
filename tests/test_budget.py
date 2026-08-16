@@ -8,6 +8,7 @@ from gatekeep.accounting import log_request
 from gatekeep.middleware.budget import (
     check_budget,
     get_period_spend,
+    get_period_spend_batch,
     record_spend,
     require_budget,
 )
@@ -189,6 +190,89 @@ async def test_get_period_spend_falls_back_to_db_on_redis_error(session, monkeyp
     monkeypatch.setattr(redis, "get", _broken_get)
     spent = await get_period_spend(session, redis, account_id=account.id)
     assert spent == pytest.approx(1.0)
+
+
+async def test_get_period_spend_batch_empty_returns_empty_dict(session):
+    redis = get_redis()
+    assert await get_period_spend_batch(session, redis, account_ids=[]) == {}
+
+
+async def test_get_period_spend_batch_prefers_redis_when_present():
+    redis = get_redis()
+    await record_spend(redis, account_id=201, cost_usd=1.5)
+    await record_spend(redis, account_id=202, cost_usd=2.5)
+    spends = await get_period_spend_batch(None, redis, account_ids=[201, 202])
+    assert spends == {201: pytest.approx(1.5), 202: pytest.approx(2.5)}
+
+
+async def test_get_period_spend_batch_falls_back_to_db_for_misses_only(session, monkeypatch):
+    """A mix of Redis-hit and Redis-miss accounts each get the right value,
+    with the DB fallback only queried for the accounts that actually missed."""
+    from gatekeep.middleware import budget as budget_module
+
+    account, key = await _make_account_and_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        response_id="r1",
+    )
+    redis = get_redis()
+    # log_request's own record_spend call already seeded Redis for this
+    # account; delete it to force a genuine cache miss, so this test
+    # actually exercises the DB-fallback path rather than the fast path.
+    await redis.delete(budget_module._spend_redis_key(account.id, budget_module._current_period()))
+    await record_spend(redis, account_id=203, cost_usd=0.75)
+
+    calls: list[list[int]] = []
+    original = budget_module._aggregate_spend_from_db_batch
+
+    async def _tracking(session, account_ids, period_start):
+        calls.append(list(account_ids))
+        return await original(session, account_ids, period_start)
+
+    monkeypatch.setattr(budget_module, "_aggregate_spend_from_db_batch", _tracking)
+
+    spends = await get_period_spend_batch(session, redis, account_ids=[203, account.id])
+    assert spends == {203: pytest.approx(0.75), account.id: pytest.approx(2.0)}
+    assert calls == [[account.id]]
+
+    # The DB fallback should have seeded Redis so a second call hits the fast path.
+    calls.clear()
+    spends_again = await get_period_spend_batch(session, redis, account_ids=[203, account.id])
+    assert spends_again == {203: pytest.approx(0.75), account.id: pytest.approx(2.0)}
+    assert calls == []
+
+
+async def test_get_period_spend_batch_defaults_no_activity_accounts_to_zero(session):
+    account, _key = await _make_account_and_key(session)
+    redis = get_redis()
+    spends = await get_period_spend_batch(session, redis, account_ids=[account.id])
+    assert spends == {account.id: pytest.approx(0.0)}
+
+
+async def test_get_period_spend_batch_falls_back_to_db_on_redis_error(session, monkeypatch):
+    account, key = await _make_account_and_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        prompt_tokens=500_000,
+        completion_tokens=0,
+        response_id="r1",
+    )
+    redis = get_redis()
+
+    async def _broken_mget(*args, **kwargs):
+        raise RedisConnectionError("simulated Redis outage")
+
+    monkeypatch.setattr(redis, "mget", _broken_mget)
+    spends = await get_period_spend_batch(session, redis, account_ids=[account.id])
+    assert spends == {account.id: pytest.approx(1.0)}
 
 
 async def test_check_budget_allows_when_unlimited(session):

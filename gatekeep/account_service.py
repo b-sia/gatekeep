@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.middleware.budget import get_period_spend
+from gatekeep.middleware.budget import get_period_spend, get_period_spend_batch
 from gatekeep.models import Account, ApiKey
 
 
@@ -311,7 +311,9 @@ async def list_accounts_with_stats(session: AsyncSession, redis: Redis) -> list[
     """Return every account with key counts and month-to-date spend, by name.
 
     Key counts come from one grouped aggregate over api_keys; spend comes
-    from `get_period_spend` per account (Redis fast path, DB fallback).
+    from `get_period_spend_batch` for all accounts at once (a single Redis
+    MGET, falling back to one grouped DB aggregate for any misses) rather
+    than a per-account round-trip.
     """
     accounts = (await session.execute(select(Account).order_by(Account.name))).scalars().all()
     count_rows = (
@@ -326,9 +328,12 @@ async def list_accounts_with_stats(session: AsyncSession, redis: Redis) -> list[
     totals = {aid: int(total) for aid, total, _ in count_rows}
     actives = {aid: int(active) for aid, _, active in count_rows}
 
+    spends = await get_period_spend_batch(
+        session, redis, account_ids=[account.id for account in accounts]
+    )
+
     stats: list[AccountStats] = []
     for account in accounts:
-        spend = await get_period_spend(session, redis, account_id=account.id)
         stats.append(
             AccountStats(
                 id=account.id,
@@ -338,7 +343,7 @@ async def list_accounts_with_stats(session: AsyncSession, redis: Redis) -> list[
                 created_at=account.created_at,
                 active_key_count=actives.get(account.id, 0),
                 total_key_count=totals.get(account.id, 0),
-                spend_mtd=spend,
+                spend_mtd=spends.get(account.id, 0.0),
             )
         )
     return stats
