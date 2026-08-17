@@ -41,6 +41,26 @@ export function clearStoredApiKey(): void {
 export class UnauthorizedError extends Error {}
 
 /**
+ * Builds the error message for a non-OK response, preferring the server's
+ * OpenAI-shaped error message over a generic status-code message.
+ *
+ * @param response - The non-OK fetch response.
+ * @param path - API path the request was made to, for the fallback message.
+ * @returns The server's error message, or a generic fallback if the body
+ *   isn't JSON or doesn't carry an `error.message`.
+ */
+async function errorMessage(response: Response, path: string): Promise<string> {
+  let message = `Request to ${path} failed with status ${response.status}`;
+  try {
+    const payload = await response.json();
+    if (payload?.error?.message) message = payload.error.message;
+  } catch {
+    // Non-JSON error body; keep the generic message.
+  }
+  return message;
+}
+
+/**
  * Issues an authenticated GET request against `/dashboard/api/<path>`.
  *
  * @param path - API path under `/dashboard/api/`, without a leading slash.
@@ -49,7 +69,8 @@ export class UnauthorizedError extends Error {}
  * @returns The parsed JSON response body.
  * @throws {UnauthorizedError} If no API key is stored, or the gateway
  *   responds 401 (the stored key is cleared in that case).
- * @throws {Error} For any other non-OK response status.
+ * @throws {Error} For any other non-OK response; the thrown message includes
+ *   the server's error message when the body is OpenAI-shaped.
  */
 async function request<T>(
   path: string,
@@ -73,7 +94,7 @@ async function request<T>(
     throw new UnauthorizedError("API key was rejected");
   }
   if (!response.ok) {
-    throw new Error(`Request to ${path} failed with status ${response.status}`);
+    throw new Error(await errorMessage(response, path));
   }
   return response.json() as Promise<T>;
 }
@@ -113,14 +134,7 @@ async function mutate<T>(
     throw new UnauthorizedError("API key was rejected");
   }
   if (!response.ok) {
-    let message = `Request to ${path} failed with status ${response.status}`;
-    try {
-      const payload = await response.json();
-      if (payload?.error?.message) message = payload.error.message;
-    } catch {
-      // Non-JSON error body; keep the generic message.
-    }
-    throw new Error(message);
+    throw new Error(await errorMessage(response, path));
   }
   return response.json() as Promise<T>;
 }
