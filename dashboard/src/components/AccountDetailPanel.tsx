@@ -52,9 +52,10 @@ export default function AccountDetailPanel({
   }
 
   /** Validates and submits the budget field: a non-blank value that doesn't
-   * parse to a finite number (e.g. "10O" or "1,000") is rejected locally
-   * rather than silently becoming NaN -> null (unlimited) on the wire. A
-   * blank field still means "clear the budget" (unlimited). */
+   * parse to a finite number (e.g. "10O" or "1,000"), or isn't strictly
+   * positive, is rejected locally rather than round-tripping to the
+   * server's `_validate_budget` (account_service.py) for the same check.
+   * A blank field still means "clear the budget" (unlimited). */
   function handleSaveBudget() {
     const trimmed = budget.trim();
     if (trimmed === "") {
@@ -64,6 +65,10 @@ export default function AccountDetailPanel({
     const parsed = Number(trimmed);
     if (!Number.isFinite(parsed)) {
       setError("Budget must be a number, or blank for unlimited");
+      return;
+    }
+    if (parsed <= 0) {
+      setError("Budget must be positive, or blank for unlimited");
       return;
     }
     apply({ monthly_budget_usd: parsed });
