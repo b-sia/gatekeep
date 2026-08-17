@@ -3,7 +3,8 @@ import KeyEntryScreen from "./components/KeyEntryScreen";
 import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
-import { UnauthorizedError, clearStoredApiKey, getMe, getStoredApiKey } from "./api/client";
+import { clearStoredApiKey, getMe, getStoredApiKey } from "./api/client";
+import { useApiErrorHandler } from "./hooks/useApiErrorHandler";
 import type { MeResponse } from "./api/types";
 
 /**
@@ -15,24 +16,22 @@ export default function App() {
   const [hasKey, setHasKey] = useState<boolean>(() => getStoredApiKey() !== null);
   const [tab, setTab] = useState<TabKey>("analytics");
   const [me, setMe] = useState<MeResponse | null>(null);
-  const [meError, setMeError] = useState<string | null>(null);
 
   /** Clears the stored API key and returns to the key entry screen. */
-  function handleUnauthorized() {
+  const handleUnauthorized = useCallback(() => {
     clearStoredApiKey();
     setMe(null);
     setHasKey(false);
-  }
+  }, []);
+
+  const { error: meError, setError: setMeError, handleError } = useApiErrorHandler(handleUnauthorized);
 
   const loadMe = useCallback(() => {
     setMeError(null);
     getMe()
       .then(setMe)
-      .catch((err) => {
-        if (err instanceof UnauthorizedError) return handleUnauthorized();
-        setMeError(err instanceof Error ? err.message : "Failed to load account");
-      });
-  }, []);
+      .catch((err) => handleError(err, "Failed to load account"));
+  }, [setMeError, handleError]);
 
   useEffect(() => {
     if (!hasKey) return;

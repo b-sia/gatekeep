@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { UnauthorizedError, createAccount } from "../api/client";
+import { createAccount } from "../api/client";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 
 interface CreateAccountModalProps {
   onClose: () => void;
@@ -19,7 +20,7 @@ export default function CreateAccountModal({
   const [name, setName] = useState("");
   const [budget, setBudget] = useState("");
   const [operator, setOperator] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
   const [busy, setBusy] = useState(false);
 
   /** Submits the create request, mapping a blank budget to unlimited (null).
@@ -47,8 +48,7 @@ export default function CreateAccountModal({
       onCreated();
       onClose();
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      setError(err instanceof Error ? err.message : "Failed to create account");
+      handleError(err, "Failed to create account");
     } finally {
       setBusy(false);
     }

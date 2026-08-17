@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { UnauthorizedError, patchAccount } from "../api/client";
+import { patchAccount } from "../api/client";
 import type { AccountStatsOut } from "../api/types";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 import KeyTable from "./KeyTable";
 
 interface AccountDetailPanelProps {
@@ -23,7 +24,7 @@ export default function AccountDetailPanel({
   const [budget, setBudget] = useState(
     account.monthly_budget_usd === null ? "" : String(account.monthly_budget_usd),
   );
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
   /** Runs one PATCH mutation, surfaces errors, and refreshes on success.
    * Only calls `onChanged()` when the request succeeds, so a rejected
@@ -35,8 +36,7 @@ export default function AccountDetailPanel({
       await patchAccount(account.id, body);
       onChanged();
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      if (err instanceof Error) setError(err.message);
+      handleError(err, "Failed to update account");
     }
   }
 

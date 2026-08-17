@@ -20,6 +20,7 @@ import {
   getUsageTimeseries,
   getUsageTimeseriesByModel,
 } from "../api/client";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 import type {
   EvalRunOut,
   LatencySummaryResponse,
@@ -56,7 +57,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   const [latencySeries, setLatencySeries] = useState<LatencyTimeseriesResponse | null>(null);
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
   const [prompts, setPrompts] = useState<PromptOut[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
   const load = useCallback(async () => {
     setError(null);
@@ -94,13 +95,9 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       setRuns(evalsRes.runs);
       setPrompts(promptsRes.prompts);
     } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
-      }
-      setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+      handleError(err, "Failed to load dashboard data");
     }
-  }, [filters, onUnauthorized]);
+  }, [filters, setError, handleError]);
 
   // Fetch the model list from an *unfiltered* summary (no `model` param) so
   // the dropdown always lists every model seen in the current time window,

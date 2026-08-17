@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { UnauthorizedError, createKey } from "../api/client";
+import { createKey } from "../api/client";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 
 interface CreateKeyModalProps {
   accountId: number;
@@ -25,7 +26,7 @@ export default function CreateKeyModal({
   const [name, setName] = useState("");
   const [rawKey, setRawKey] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
   const [busy, setBusy] = useState(false);
 
   /** Submits step 1: mints the key and advances to the show-once panel. */
@@ -36,8 +37,7 @@ export default function CreateKeyModal({
       const created = await createKey(accountId, name.trim());
       setRawKey(created.key);
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      setError(err instanceof Error ? err.message : "Failed to create key");
+      handleError(err, "Failed to create key");
     } finally {
       setBusy(false);
     }

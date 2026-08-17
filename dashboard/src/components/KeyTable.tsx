@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { UnauthorizedError, getAccountKeys, revokeKey } from "../api/client";
+import { getAccountKeys, revokeKey } from "../api/client";
 import type { KeyOut } from "../api/types";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 import CreateKeyModal from "./CreateKeyModal";
 
 interface KeyTableProps {
@@ -18,7 +19,7 @@ interface KeyTableProps {
 export default function KeyTable({ accountId, onUnauthorized, onChanged }: KeyTableProps) {
   const [keys, setKeys] = useState<KeyOut[]>([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
   const load = useCallback(async () => {
     setError(null);
@@ -26,10 +27,9 @@ export default function KeyTable({ accountId, onUnauthorized, onChanged }: KeyTa
       const res = await getAccountKeys(accountId);
       setKeys(res.keys);
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      setError(err instanceof Error ? err.message : "Failed to load keys");
+      handleError(err, "Failed to load keys");
     }
-  }, [accountId, onUnauthorized]);
+  }, [accountId, setError, handleError]);
 
   useEffect(() => {
     load();
@@ -48,8 +48,7 @@ export default function KeyTable({ accountId, onUnauthorized, onChanged }: KeyTa
       await load();
       onChanged?.();
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      setError(err instanceof Error ? err.message : "Failed to revoke key");
+      handleError(err, "Failed to revoke key");
     }
   }
 

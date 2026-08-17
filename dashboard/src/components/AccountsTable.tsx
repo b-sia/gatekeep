@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { UnauthorizedError, getAccounts } from "../api/client";
+import { getAccounts } from "../api/client";
 import type { AccountStatsOut, MeResponse } from "../api/types";
 import { formatUsd } from "../format";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 import AccountDetailPanel from "./AccountDetailPanel";
 import CreateAccountModal from "./CreateAccountModal";
 
@@ -21,7 +22,7 @@ export default function AccountsTable({
   const [accounts, setAccounts] = useState<AccountStatsOut[]>([]);
   const [selected, setSelected] = useState<AccountStatsOut | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
   const load = useCallback(async () => {
     setError(null);
@@ -44,10 +45,9 @@ export default function AccountsTable({
         });
       }
     } catch (err) {
-      if (err instanceof UnauthorizedError) return onUnauthorized();
-      setError(err instanceof Error ? err.message : "Failed to load accounts");
+      handleError(err, "Failed to load accounts");
     }
-  }, [onUnauthorized, onMeChanged, selfAccountId]);
+  }, [setError, handleError, onMeChanged, selfAccountId]);
 
   useEffect(() => {
     load();
