@@ -132,6 +132,30 @@ def _authorize_account_access(caller_account: Account, account_id: int) -> None:
     raise _forbidden("You can only manage your own account.")
 
 
+async def require_account_access(
+    account_id: int,
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """FastAPI dependency that authorizes an account-scoped route.
+
+    Allows the account's own caller, or an operator acting on any account.
+    Builds on `_require_caller_account`; `account_id` is taken from the
+    route's path parameter of the same name.
+
+    Args:
+        account_id: The account id the request targets, injected from the path.
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        The caller's `Account`.
+
+    Raises:
+        HTTPException: 403 when a non-operator targets a different account.
+    """
+    _authorize_account_access(caller_account, account_id)
+    return caller_account
+
+
 def _default_window() -> tuple[datetime, datetime]:
     """Return a (start, end) pair spanning the trailing 7 days up to now (UTC).
 
@@ -1241,14 +1265,13 @@ class KeyCreatedResponse(BaseModel):
 async def list_account_keys(
     account_id: int,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(_require_caller_account),
+    _caller_account: Account = Depends(require_account_access),
 ) -> KeyListResponse:
     """List an account's keys. Allowed for the account itself or an operator.
 
     Raises 403 for a non-operator targeting another account, 404 for an
     unknown account.
     """
-    _authorize_account_access(caller_account, account_id)
     try:
         keys = await account_service.list_keys(session, account_id)
     except account_service.AccountNotFoundError as exc:
@@ -1263,13 +1286,12 @@ async def mint_account_key(
     account_id: int,
     body: KeyCreateRequest,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(_require_caller_account),
+    _caller_account: Account = Depends(require_account_access),
 ) -> KeyCreatedResponse:
     """Mint a key for an account, returning the raw key exactly once.
 
     Raises 403 (wrong account), 404 (unknown account), 409 (duplicate name).
     """
-    _authorize_account_access(caller_account, account_id)
     try:
         key, raw = await account_service.create_key(session, account_id, body.name)
     except account_service.AccountNotFoundError as exc:
@@ -1286,12 +1308,11 @@ async def revoke_account_key(
     account_id: int,
     key_id: int,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(_require_caller_account),
+    _caller_account: Account = Depends(require_account_access),
 ) -> KeyOut:
     """Soft-revoke a key on an account. Raises 403 (wrong account) or 404
     (no such key on the account).
     """
-    _authorize_account_access(caller_account, account_id)
     try:
         key = await account_service.revoke_key(session, account_id, key_id)
     except account_service.KeyNotFoundError as exc:
