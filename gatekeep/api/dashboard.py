@@ -5,11 +5,16 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from redis.asyncio import Redis
 from sqlalchemy import Integer, case, func, or_, select, true
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gatekeep import account_service
+from gatekeep.config import get_settings
 from gatekeep.db import get_session
 from gatekeep.middleware.auth import require_api_key
+from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
     Account,
     ApiKey,
@@ -50,6 +55,105 @@ def _account_scope(caller_account: Account) -> list:
     if caller_account.is_operator:
         return []
     return [RequestLog.account_id == caller_account.id]
+
+
+def _get_redis() -> Redis:
+    """FastAPI dependency yielding the shared async Redis client.
+
+    Management routes need Redis for month-to-date spend via
+    `middleware.budget.get_period_spend`; the analytics routes touch only
+    Postgres, so this is scoped to the routes that need it.
+    """
+    return get_redis(get_settings())
+
+
+def _forbidden(message: str) -> HTTPException:
+    """Build a 403 HTTPException with an OpenAI-shaped error body.
+
+    Args:
+        message: Human-readable explanation of why access was denied.
+
+    Returns:
+        An `HTTPException` with status 403 and the OpenAI-shaped error body.
+    """
+    return HTTPException(
+        status_code=403,
+        detail={"error": {"message": message, "type": "permission_error", "code": None}},
+    )
+
+
+def _error_body(message: str, err_type: str = "invalid_request_error") -> dict:
+    """Build an OpenAI-shaped error detail dict for HTTPException(detail=...).
+
+    Args:
+        message: Human-readable explanation of the error.
+        err_type: The OpenAI-style error type tag.
+
+    Returns:
+        A dict of the shape ``{"error": {"message": ..., "type": ..., "code": None}}``.
+    """
+    return {"error": {"message": message, "type": err_type, "code": None}}
+
+
+async def require_operator(
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """FastAPI dependency that authorizes only operator accounts.
+
+    Builds on `_require_caller_account`; raises a 403 (OpenAI-shaped body)
+    when the caller's account is not an operator.
+
+    Args:
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        The caller's `Account`, when it is an operator account.
+
+    Raises:
+        HTTPException: 403 when `caller_account.is_operator` is False.
+    """
+    if not caller_account.is_operator:
+        raise _forbidden("Operator access required.")
+    return caller_account
+
+
+def _authorize_account_access(caller_account: Account, account_id: int) -> None:
+    """Authorize an account-scoped action: operator, or the caller's own account.
+
+    Args:
+        caller_account: The authenticated caller's account.
+        account_id: The account id the request targets.
+
+    Raises:
+        HTTPException: 403 when a non-operator targets a different account.
+    """
+    if caller_account.is_operator or caller_account.id == account_id:
+        return
+    raise _forbidden("You can only manage your own account.")
+
+
+async def require_account_access(
+    account_id: int,
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """FastAPI dependency that authorizes an account-scoped route.
+
+    Allows the account's own caller, or an operator acting on any account.
+    Builds on `_require_caller_account`; `account_id` is taken from the
+    route's path parameter of the same name.
+
+    Args:
+        account_id: The account id the request targets, injected from the path.
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        The caller's `Account`.
+
+    Raises:
+        HTTPException: 403 when a non-operator targets a different account.
+    """
+    _authorize_account_access(caller_account, account_id)
+    return caller_account
 
 
 def _default_window() -> tuple[datetime, datetime]:
@@ -1086,3 +1190,307 @@ async def prompt_version_timeline(
         for v in rows
     ]
     return PromptVersionTimelineResponse(name=name, versions=versions)
+
+
+class MeResponse(BaseModel):
+    """The caller's own account context, driving tab visibility and the budget card."""
+
+    account_id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    spend_mtd: float
+
+
+@router.get("/me", response_model=MeResponse)
+async def get_me(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    caller_account: Account = Depends(_require_caller_account),
+) -> MeResponse:
+    """Return the caller's account context: id, name, operator flag, budget
+    cap, and current-period budget-relevant spend. Requires a valid API key.
+
+    Args:
+        session: Database session, injected.
+        redis: Shared async Redis client, injected.
+        caller_account: The authenticated caller's account, injected.
+
+    Returns:
+        A `MeResponse` describing the caller's account and its month-to-date
+        budget-relevant spend.
+    """
+    spend = await account_service.get_account_spend(session, redis, caller_account.id)
+    return MeResponse(
+        account_id=caller_account.id,
+        name=caller_account.name,
+        is_operator=caller_account.is_operator,
+        monthly_budget_usd=caller_account.monthly_budget_usd,
+        spend_mtd=spend,
+    )
+
+
+class KeyOut(BaseModel):
+    """One API key as shown in the management UI (no secret material)."""
+
+    id: int
+    name: str
+    active: bool
+    created_at: datetime
+
+
+class KeyListResponse(BaseModel):
+    """An account's keys, active and revoked, newest first."""
+
+    keys: list[KeyOut]
+
+
+class KeyCreateRequest(BaseModel):
+    """Request body for minting a key: the new key's display name."""
+
+    name: str
+
+
+class KeyCreatedResponse(BaseModel):
+    """A freshly minted key. `key` carries the raw secret exactly once."""
+
+    id: int
+    name: str
+    active: bool
+    created_at: datetime
+    key: str
+
+
+@router.get("/accounts/{account_id}/keys", response_model=KeyListResponse)
+async def list_account_keys(
+    account_id: int,
+    session: AsyncSession = Depends(get_session),
+    _caller_account: Account = Depends(require_account_access),
+) -> KeyListResponse:
+    """List an account's keys. Allowed for the account itself or an operator.
+
+    Raises 403 for a non-operator targeting another account, 404 for an
+    unknown account.
+    """
+    try:
+        keys = await account_service.list_keys(session, account_id)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return KeyListResponse(
+        keys=[KeyOut(id=k.id, name=k.name, active=k.active, created_at=k.created_at) for k in keys]
+    )
+
+
+@router.post("/accounts/{account_id}/keys", response_model=KeyCreatedResponse)
+async def mint_account_key(
+    account_id: int,
+    body: KeyCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    _caller_account: Account = Depends(require_account_access),
+) -> KeyCreatedResponse:
+    """Mint a key for an account, returning the raw key exactly once.
+
+    Raises 403 (wrong account), 404 (unknown account), 409 (duplicate name).
+    """
+    try:
+        key, raw = await account_service.create_key(session, account_id, body.name)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except account_service.KeyNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    return KeyCreatedResponse(
+        id=key.id, name=key.name, active=key.active, created_at=key.created_at, key=raw
+    )
+
+
+@router.post("/accounts/{account_id}/keys/{key_id}/revoke", response_model=KeyOut)
+async def revoke_account_key(
+    account_id: int,
+    key_id: int,
+    session: AsyncSession = Depends(get_session),
+    _caller_account: Account = Depends(require_account_access),
+) -> KeyOut:
+    """Soft-revoke a key on an account. Raises 403 (wrong account) or 404
+    (no such key on the account).
+    """
+    try:
+        key = await account_service.revoke_key(session, account_id, key_id)
+    except account_service.KeyNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return KeyOut(id=key.id, name=key.name, active=key.active, created_at=key.created_at)
+
+
+class AccountStatsOut(BaseModel):
+    """One account row for the operator's all-accounts table."""
+
+    id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    created_at: datetime
+    active_key_count: int
+    total_key_count: int
+    spend_mtd: float
+
+
+class AccountListResponse(BaseModel):
+    """All accounts with stats, ordered by name (operator view)."""
+
+    accounts: list[AccountStatsOut]
+
+
+class AccountOut(BaseModel):
+    """A single account after a create/patch, without stats."""
+
+    id: int
+    name: str
+    is_operator: bool
+    monthly_budget_usd: float | None
+    created_at: datetime
+
+
+class AccountCreateRequest(BaseModel):
+    """Request body for creating an account."""
+
+    name: str
+    monthly_budget_usd: float | None = None
+    is_operator: bool = False
+
+
+class AccountPatchRequest(BaseModel):
+    """Request body for updating an account.
+
+    Every field is optional so a caller sends only what changes. `clear_budget`
+    is a separate flag because `monthly_budget_usd = null` is indistinguishable
+    from "field omitted" in JSON, and the two must mean different things
+    (clear-the-cap vs. leave-it-alone).
+    """
+
+    name: str | None = None
+    monthly_budget_usd: float | None = None
+    clear_budget: bool = False
+    is_operator: bool | None = None
+
+
+def _account_out(account: Account) -> AccountOut:
+    """Map an Account ORM row to the AccountOut response model."""
+    return AccountOut(
+        id=account.id,
+        name=account.name,
+        is_operator=account.is_operator,
+        monthly_budget_usd=account.monthly_budget_usd,
+        created_at=account.created_at,
+    )
+
+
+@router.get("/accounts", response_model=AccountListResponse)
+async def list_accounts(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    _operator: Account = Depends(require_operator),
+) -> AccountListResponse:
+    """List all accounts with key counts and month-to-date spend. Operator only."""
+    stats = await account_service.list_accounts_with_stats(session, redis)
+    return AccountListResponse(
+        accounts=[
+            AccountStatsOut(
+                id=s.id,
+                name=s.name,
+                is_operator=s.is_operator,
+                monthly_budget_usd=s.monthly_budget_usd,
+                created_at=s.created_at,
+                active_key_count=s.active_key_count,
+                total_key_count=s.total_key_count,
+                spend_mtd=s.spend_mtd,
+            )
+            for s in stats
+        ]
+    )
+
+
+@router.post("/accounts", response_model=AccountOut)
+async def create_account_route(
+    body: AccountCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AccountOut:
+    """Create an account. Operator only. 409 on name collision, 422 on bad name/budget."""
+    try:
+        account = await account_service.create_account(
+            session,
+            name=body.name,
+            monthly_budget_usd=body.monthly_budget_usd,
+            is_operator=body.is_operator,
+        )
+    except (
+        account_service.InvalidBudgetError,
+        account_service.InvalidAccountNameError,
+    ) as exc:
+        raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
+    except account_service.AccountNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    return _account_out(account)
+
+
+@router.patch("/accounts/{account_id}", response_model=AccountOut)
+async def patch_account_route(
+    account_id: int,
+    body: AccountPatchRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AccountOut:
+    """Rename, set/clear budget, and/or toggle operator on an account.
+
+    Operator only. Applies each requested change through the service layer
+    with `commit=False`, so each service guard (last-operator, budget
+    validation) still runs, but nothing is written until every requested
+    change has succeeded - then this route commits once. That single commit
+    makes the whole PATCH atomic: if a later field fails validation (e.g. a
+    bad budget after a valid rename), the rename is rolled back too, rather
+    than silently persisting while the client sees an error.
+
+    Maps 404 (unknown account), 409 (name collision, last-operator), 422
+    (bad name, bad budget).
+    """
+    try:
+        account = None
+        if body.name is not None:
+            account = await account_service.rename_account(
+                session, account_id, body.name, commit=False
+            )
+        if body.clear_budget:
+            account = await account_service.set_budget(session, account_id, None, commit=False)
+        elif body.monthly_budget_usd is not None:
+            account = await account_service.set_budget(
+                session, account_id, body.monthly_budget_usd, commit=False
+            )
+        if body.is_operator is not None:
+            account = await account_service.set_operator(
+                session, account_id, body.is_operator, commit=False
+            )
+        if account is None:
+            # No mutating field supplied; return the current state.
+            account = await account_service.get_account(session, account_id)
+        else:
+            await session.commit()
+    except account_service.AccountNotFoundError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except (
+        account_service.InvalidBudgetError,
+        account_service.InvalidAccountNameError,
+    ) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
+    except (
+        account_service.AccountNameConflictError,
+        account_service.LastOperatorError,
+    ) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail=_error_body(f"account name {body.name!r} is already taken")
+        ) from exc
+    return _account_out(account)

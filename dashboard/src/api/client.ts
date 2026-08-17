@@ -1,7 +1,15 @@
 import type {
+  AccountCreateRequest,
+  AccountListResponse,
+  AccountOut,
+  AccountPatchRequest,
   EvalHistoryResponse,
+  KeyCreatedResponse,
+  KeyListResponse,
+  KeyOut,
   LatencySummaryResponse,
   LatencyTimeseriesResponse,
+  MeResponse,
   PromptListResponse,
   PromptVersionTimelineResponse,
   TimeseriesResponse,
@@ -33,6 +41,26 @@ export function clearStoredApiKey(): void {
 export class UnauthorizedError extends Error {}
 
 /**
+ * Builds the error message for a non-OK response, preferring the server's
+ * OpenAI-shaped error message over a generic status-code message.
+ *
+ * @param response - The non-OK fetch response.
+ * @param path - API path the request was made to, for the fallback message.
+ * @returns The server's error message, or a generic fallback if the body
+ *   isn't JSON or doesn't carry an `error.message`.
+ */
+async function errorMessage(response: Response, path: string): Promise<string> {
+  let message = `Request to ${path} failed with status ${response.status}`;
+  try {
+    const payload = await response.json();
+    if (payload?.error?.message) message = payload.error.message;
+  } catch {
+    // Non-JSON error body; keep the generic message.
+  }
+  return message;
+}
+
+/**
  * Issues an authenticated GET request against `/dashboard/api/<path>`.
  *
  * @param path - API path under `/dashboard/api/`, without a leading slash.
@@ -41,7 +69,8 @@ export class UnauthorizedError extends Error {}
  * @returns The parsed JSON response body.
  * @throws {UnauthorizedError} If no API key is stored, or the gateway
  *   responds 401 (the stored key is cleared in that case).
- * @throws {Error} For any other non-OK response status.
+ * @throws {Error} For any other non-OK response; the thrown message includes
+ *   the server's error message when the body is OpenAI-shaped.
  */
 async function request<T>(
   path: string,
@@ -65,7 +94,47 @@ async function request<T>(
     throw new UnauthorizedError("API key was rejected");
   }
   if (!response.ok) {
-    throw new Error(`Request to ${path} failed with status ${response.status}`);
+    throw new Error(await errorMessage(response, path));
+  }
+  return response.json() as Promise<T>;
+}
+
+/**
+ * Issues an authenticated POST/PATCH against `/dashboard/api/<path>` with a
+ * JSON body, mirroring `request`'s bearer-auth and 401 handling.
+ *
+ * @param method - "POST" or "PATCH".
+ * @param path - API path under `/dashboard/api/`, without a leading slash.
+ * @param body - JSON-serializable request body, or undefined for none.
+ * @returns The parsed JSON response body.
+ * @throws {UnauthorizedError} If no key is stored, or the gateway responds 401.
+ * @throws {Error} For any other non-OK response; the thrown message includes
+ *   the server's error message when the body is OpenAI-shaped.
+ */
+async function mutate<T>(
+  method: "POST" | "PATCH",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const apiKey = getStoredApiKey();
+  if (!apiKey) {
+    throw new UnauthorizedError("No API key stored");
+  }
+  const url = new URL(`/dashboard/api/${path}`, window.location.origin);
+  const response = await fetch(url.toString(), {
+    method,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    clearStoredApiKey();
+    throw new UnauthorizedError("API key was rejected");
+  }
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, path));
   }
   return response.json() as Promise<T>;
 }
@@ -162,4 +231,43 @@ export function getPrompts(): Promise<PromptListResponse> {
 /** Fetches the version history for a single named prompt. */
 export function getPromptVersions(name: string): Promise<PromptVersionTimelineResponse> {
   return request<PromptVersionTimelineResponse>(`prompts/${encodeURIComponent(name)}/versions`);
+}
+
+/** Fetches the caller's own account context (id, name, operator flag,
+ * budget, spend). */
+export function getMe(): Promise<MeResponse> {
+  return request<MeResponse>("me");
+}
+
+/** Lists an account's keys (active and revoked). */
+export function getAccountKeys(accountId: number): Promise<KeyListResponse> {
+  return request<KeyListResponse>(`accounts/${accountId}/keys`);
+}
+
+/** Mints a key for an account; the response carries the raw key once. */
+export function createKey(accountId: number, name: string): Promise<KeyCreatedResponse> {
+  return mutate<KeyCreatedResponse>("POST", `accounts/${accountId}/keys`, { name });
+}
+
+/** Soft-revokes a key on an account. */
+export function revokeKey(accountId: number, keyId: number): Promise<KeyOut> {
+  return mutate<KeyOut>("POST", `accounts/${accountId}/keys/${keyId}/revoke`);
+}
+
+/** Lists all accounts with stats (operator only). */
+export function getAccounts(): Promise<AccountListResponse> {
+  return request<AccountListResponse>("accounts");
+}
+
+/** Creates an account (operator only). */
+export function createAccount(body: AccountCreateRequest): Promise<AccountOut> {
+  return mutate<AccountOut>("POST", "accounts", body);
+}
+
+/** Updates an account (operator only). */
+export function patchAccount(
+  accountId: number,
+  body: AccountPatchRequest,
+): Promise<AccountOut> {
+  return mutate<AccountOut>("PATCH", `accounts/${accountId}`, body);
 }

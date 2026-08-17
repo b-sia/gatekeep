@@ -1141,3 +1141,376 @@ async def test_latency_timeseries_empty_window_is_not_an_error(client, raw_key, 
     )
     assert r.status_code == 200
     assert r.json()["buckets"] == []
+
+
+# -- me / operator dependency ------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def operator_key(session):
+    """A raw active key on an operator account."""
+    raw = generate_key()
+    account = await create_account(session, name="op-acct", is_operator=True)
+    session.add(ApiKey(name="op-key", key_hash=hash_key(raw), account_id=account.id))
+    await session.commit()
+    return raw
+
+
+async def test_me_returns_caller_shape(client, raw_key):
+    """GET /me returns the caller's account id, name, operator flag, budget, spend."""
+    resp = await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {
+        "account_id",
+        "name",
+        "is_operator",
+        "monthly_budget_usd",
+        "spend_mtd",
+    }
+    assert body["is_operator"] is False
+
+
+async def test_me_requires_auth(client):
+    """GET /me with no key is 401."""
+    resp = await client.get("/dashboard/api/me")
+    assert resp.status_code == 401
+
+
+# -- account-scoped key routes -----------------------------------------------
+
+
+async def test_list_own_keys(client, raw_key, session):
+    """An account can list its own keys via its own account id."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{me['account_id']}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+    names = [k["name"] for k in resp.json()["keys"]]
+    assert "dashboard-test" in names
+
+
+async def test_mint_key_returns_raw_once(client, raw_key):
+    """Minting a key returns the raw key exactly once in the response body."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{me['account_id']}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "minted"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"].startswith("gk-")
+    assert body["name"] == "minted"
+    assert body["active"] is True
+
+
+async def test_mint_duplicate_name_conflicts(client, raw_key):
+    """A duplicate key name maps to 409."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    aid = me["account_id"]
+    await client.post(
+        f"/dashboard/api/accounts/{aid}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "dup"},
+    )
+    resp = await client.post(
+        f"/dashboard/api/accounts/{aid}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "dup"},
+    )
+    assert resp.status_code == 409
+
+
+async def test_revoke_flips_active(client, raw_key):
+    """Revoking a key sets active False; it stays listed."""
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    aid = me["account_id"]
+    minted = (
+        await client.post(
+            f"/dashboard/api/accounts/{aid}/keys",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={"name": "to-revoke"},
+        )
+    ).json()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{aid}/keys/{minted['id']}/revoke",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+
+
+async def test_non_operator_cannot_touch_other_account_keys(client, raw_key, session):
+    """A non-operator listing another account's keys is 403."""
+    other = await create_account(session, name="other-acct")
+    await session.commit()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_operator_can_list_any_account_keys(client, operator_key, session):
+    """An operator can list another account's keys."""
+    other = await create_account(session, name="tenant-x")
+    await session.commit()
+    resp = await client.get(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert resp.status_code == 200
+
+
+# -- operator account list/create/patch routes -------------------------------
+
+
+async def test_list_accounts_operator_only(client, raw_key):
+    """A non-operator hitting GET /accounts is 403."""
+    resp = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {raw_key}"}
+    )
+    assert resp.status_code == 403
+
+
+async def test_list_accounts_returns_stats(client, operator_key):
+    """An operator gets accounts with counts, budget, and spend fields."""
+    resp = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {operator_key}"}
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["accounts"]
+    assert rows, "expected at least the operator's own account"
+    sample = rows[0]
+    assert set(sample) >= {
+        "id",
+        "name",
+        "is_operator",
+        "monthly_budget_usd",
+        "created_at",
+        "active_key_count",
+        "total_key_count",
+        "spend_mtd",
+    }
+
+
+async def test_create_account_operator(client, operator_key):
+    """An operator can create an account."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "new-tenant", "monthly_budget_usd": 50.0},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "new-tenant"
+
+
+async def test_create_account_name_conflict(client, operator_key):
+    """A duplicate account name maps to 409."""
+    await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe"},
+    )
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe"},
+    )
+    assert resp.status_code == 409
+
+
+async def test_create_account_bad_budget(client, operator_key):
+    """A non-positive budget maps to 422."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "cheapo", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+
+async def test_create_account_blank_name(client, operator_key):
+    """A blank or whitespace-only name maps to 422."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "   "},
+    )
+    assert resp.status_code == 422
+
+
+async def test_patch_account_rename_and_budget(client, operator_key, session):
+    """An operator can rename and set budget in one PATCH."""
+    target = await create_account(session, name="patch-me")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "patched", "monthly_budget_usd": 12.5},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "patched"
+    assert body["monthly_budget_usd"] == 12.5
+
+
+async def test_patch_clear_budget(client, operator_key, session):
+    """clear_budget True sets the cap to null."""
+    target = await create_account(session, name="had-budget", monthly_budget_usd=9.0)
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"clear_budget": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["monthly_budget_usd"] is None
+
+
+async def test_patch_account_blank_name(client, operator_key, session):
+    """Renaming to a blank or whitespace-only name maps to 422 and does not persist."""
+    target = await create_account(session, name="blank-guard")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "   "},
+    )
+    assert resp.status_code == 422
+    await session.refresh(target)
+    assert target.name == "blank-guard"
+
+
+async def test_patch_last_operator_guard(client, operator_key, session):
+    """Turning off the only operator maps to 409."""
+    # operator_key's own account is the only operator; find its id via /me.
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {operator_key}"})
+    ).json()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{me['account_id']}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"is_operator": False},
+    )
+    assert resp.status_code == 409
+
+
+async def test_patch_partial_failure_does_not_persist_earlier_fields(client, operator_key, session):
+    """A multi-field PATCH must be all-or-nothing.
+
+    A valid rename paired with an invalid budget in the same request must
+    422 without persisting the rename - regression test for the PATCH route
+    committing each field's service call independently.
+    """
+    target = await create_account(session, name="atomic-original")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "atomic-renamed", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+    await session.refresh(target)
+    assert target.name == "atomic-original"
+
+
+async def test_patch_failed_request_leaves_name_unchanged_on_recheck(client, operator_key, session):
+    """Following up the failed PATCH above with a fresh read confirms no leak.
+
+    Re-reads via the operator's account list (not the test session's cache)
+    so this exercises the same read path a real client would use.
+    """
+    target = await create_account(session, name="atomic-recheck")
+    await session.commit()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{target.id}",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "atomic-recheck-renamed", "monthly_budget_usd": 0},
+    )
+    assert resp.status_code == 422
+
+    listing = await client.get(
+        "/dashboard/api/accounts", headers={"Authorization": f"Bearer {operator_key}"}
+    )
+    row = next(r for r in listing.json()["accounts"] if r["id"] == target.id)
+    assert row["name"] == "atomic-recheck"
+
+
+async def test_patch_unknown_account_404(client, operator_key):
+    """PATCHing a nonexistent account id maps to 404."""
+    resp = await client.patch(
+        "/dashboard/api/accounts/999999",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 404
+
+
+# -- mutating route denials --------------------------------------------------
+
+
+async def test_non_operator_cannot_mint_key_on_other_account(client, raw_key, session):
+    """A non-operator minting a key on another account is 403."""
+    other = await create_account(session, name="mint-other")
+    await session.commit()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{other.id}/keys",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "x"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_non_operator_cannot_revoke_key_on_other_account(client, raw_key, session):
+    """A non-operator revoking a key on another account is 403.
+
+    The authorization check runs before the key lookup, so an arbitrary
+    (possibly nonexistent) key id still yields 403, not 404.
+    """
+    other = await create_account(session, name="revoke-other")
+    await session.commit()
+    resp = await client.post(
+        f"/dashboard/api/accounts/{other.id}/keys/1/revoke",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_create_account_operator_only(client, raw_key):
+    """A non-operator hitting POST /accounts is 403."""
+    resp = await client.post(
+        "/dashboard/api/accounts",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "nope"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_patch_account_operator_only(client, raw_key):
+    """A non-operator hitting PATCH /accounts/{id} is 403.
+
+    require_operator rejects before any account lookup, so this holds
+    regardless of whether the target id belongs to the caller.
+    """
+    me = (
+        await client.get("/dashboard/api/me", headers={"Authorization": f"Bearer {raw_key}"})
+    ).json()
+    resp = await client.patch(
+        f"/dashboard/api/accounts/{me['account_id']}",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={"name": "nope"},
+    )
+    assert resp.status_code == 403

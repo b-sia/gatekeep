@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
+from gatekeep import account_service
 from gatekeep.cli import (
+    _account_create,
+    _account_list,
+    _account_set_budget,
+    _account_set_operator,
     _clear_candidate,
     _eval_review,
     _eval_run,
+    _key_create,
+    _key_list,
     _list,
-    _set_budget,
+    _resolve_account_id,
     _set_candidate,
     _show,
     build_parser,
     main,
 )
 from gatekeep.evals import add_case, create_suite
-from gatekeep.models import Account
+from gatekeep.models import Account, ApiKey
 from gatekeep.prompts import add_prompt_version, create_prompt
 from tests.helpers import FakeProvider as _FakeProvider
 from tests.helpers import create_account
@@ -204,68 +212,138 @@ async def test_eval_review_edit_then_quit_does_not_delete_the_case(session, monk
 # --- account set-budget: does it set/clear the account's monthly_budget_usd? -----
 
 
-async def test_set_budget_sets_amount_on_existing_account(session):
-    """`key set-budget <name> <amount>` sets the account's monthly_budget_usd."""
+async def test_account_set_budget_sets_amount_on_existing_account(session):
+    """`account set-budget <name> <amount>` sets the account's monthly_budget_usd."""
     account = await create_account(session, name="budget-account")
     await session.commit()
     account_id = account.id
 
-    await _set_budget("budget-account", 25.0, unlimited=False)
+    await _account_set_budget("budget-account", 25.0, unlimited=False)
 
     session.expire_all()
     refreshed = await session.get(Account, account_id)
     assert refreshed.monthly_budget_usd == 25.0
 
 
-async def test_set_budget_unlimited_clears_amount(session):
+async def test_account_set_budget_unlimited_clears_amount(session):
+    """`account set-budget --unlimited` clears a previously set cap."""
     account = await create_account(session, name="budget-account", monthly_budget_usd=10.0)
     await session.commit()
     account_id = account.id
 
-    await _set_budget("budget-account", None, unlimited=True)
+    await _account_set_budget("budget-account", None, unlimited=True)
 
     session.expire_all()
     refreshed = await session.get(Account, account_id)
     assert refreshed.monthly_budget_usd is None
 
 
-async def test_set_budget_raises_for_unknown_account_name():
+async def test_account_set_budget_raises_for_unknown_account_name():
     """A name matching no account raises rather than silently no-op'ing."""
     with pytest.raises(ValueError, match="no account named"):
-        await _set_budget("does-not-exist", 5.0, unlimited=False)
+        await _account_set_budget("does-not-exist", 5.0, unlimited=False)
 
 
-async def test_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
+async def test_account_set_budget_raises_when_neither_amount_nor_unlimited_given(session):
+    """Calling with neither an amount nor --unlimited is rejected up front."""
     await create_account(session, name="budget-account")
     await session.commit()
 
     with pytest.raises(ValueError, match="must provide an amount"):
-        await _set_budget("budget-account", None, unlimited=False)
+        await _account_set_budget("budget-account", None, unlimited=False)
 
 
-async def test_set_budget_raises_for_non_positive_amount(session):
+async def test_account_set_budget_raises_for_non_positive_amount(session):
+    """A non-positive amount is rejected by the underlying account_service call."""
     await create_account(session, name="budget-account")
     await session.commit()
 
-    with pytest.raises(ValueError, match="amount must be positive"):
-        await _set_budget("budget-account", -5.0, unlimited=False)
-    with pytest.raises(ValueError, match="amount must be positive"):
-        await _set_budget("budget-account", 0.0, unlimited=False)
+    with pytest.raises(account_service.InvalidBudgetError, match="amount must be positive"):
+        await _account_set_budget("budget-account", -5.0, unlimited=False)
+    with pytest.raises(account_service.InvalidBudgetError, match="amount must be positive"):
+        await _account_set_budget("budget-account", 0.0, unlimited=False)
 
 
-def test_main_key_set_budget_dispatches(monkeypatch):
-    """`main(["key", "set-budget", ...])` must parse and dispatch to _set_budget."""
+def test_main_account_set_budget_dispatches(monkeypatch):
+    """`main(["account", "set-budget", ...])` must parse and dispatch to _account_set_budget."""
     calls = []
 
     async def _fake_set_budget(name, amount, unlimited):
+        """Record the call instead of touching the DB."""
         calls.append((name, amount, unlimited))
 
-    monkeypatch.setattr("gatekeep.cli._set_budget", _fake_set_budget)
+    monkeypatch.setattr("gatekeep.cli._account_set_budget", _fake_set_budget)
 
-    code = main(["key", "set-budget", "some-key", "12.5"])
+    code = main(["account", "set-budget", "some-account", "12.5"])
 
     assert code == 0
-    assert calls == [("some-key", 12.5, False)]
+    assert calls == [("some-account", 12.5, False)]
+
+
+def test_key_set_budget_removed():
+    """`key set-budget` no longer parses; budget moved to `account set-budget`."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["key", "set-budget", "team-k", "10"])
+
+
+# --- account create / resolve / set-operator / list --------------------------
+
+
+async def test_account_create_and_resolve(session, capsys):
+    """`account create` makes an account resolvable by name."""
+    await _account_create("team-a", budget=None, unlimited=False, operator=False)
+    account_id = await _resolve_account_id(session, "team-a")
+    assert account_id is not None
+
+
+async def test_account_set_operator_bootstrap(session):
+    """`account set-operator` promotes an account (the headless bootstrap path)."""
+    await _account_create("boot", budget=None, unlimited=False, operator=False)
+    await _account_set_operator("boot", off=False)
+    account_id = await _resolve_account_id(session, "boot")
+
+    assert (await session.get(Account, account_id)).is_operator is True
+
+
+async def test_account_list_includes_created_account(session, capsys):
+    """`account list` prints every account by name."""
+    await _account_create("team-list", budget=None, unlimited=False, operator=False)
+
+    await _account_list()
+
+    out = capsys.readouterr().out
+    assert "team-list" in out
+
+
+# --- key create / list --------------------------------------------------------
+
+
+async def test_key_create_prints_raw_and_persists(session, capsys):
+    """`key create` mints a key, prints the raw value, and stores its hash."""
+    await _account_create("team-k", budget=None, unlimited=False, operator=False)
+    await _key_create("team-k", "prod")
+    printed = capsys.readouterr().out
+    assert "gk-" in printed
+    account_id = await _resolve_account_id(session, "team-k")
+    keys = (
+        (await session.execute(select(ApiKey).where(ApiKey.account_id == account_id)))
+        .scalars()
+        .all()
+    )
+    assert [k.name for k in keys] == ["prod"]
+
+
+async def test_key_list_reports_created_key(session, capsys):
+    """`key list` prints an account's keys with their active/revoked status."""
+    await _account_create("team-kl", budget=None, unlimited=False, operator=False)
+    await _key_create("team-kl", "prod")
+    capsys.readouterr()  # discard the printed raw key
+
+    await _key_list("team-kl")
+
+    out = capsys.readouterr().out
+    assert "prod\tactive" in out
 
 
 # --- candidate visibility: no candidate vs. candidate paused at 0% -----------

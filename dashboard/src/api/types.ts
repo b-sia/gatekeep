@@ -178,3 +178,77 @@ export interface LatencyTimeseriesResponse {
   interval: "minute" | "hour" | "day";
   buckets: LatencyTimeseriesBucket[];
 }
+
+/** The caller's own account context, from GET /me. Drives tab visibility
+ * and the budget card. */
+export interface MeResponse {
+  account_id: number;
+  name: string;
+  is_operator: boolean;
+  monthly_budget_usd: number | null;
+  spend_mtd: number;
+}
+
+/** One API key as shown in the management UI (no secret material). */
+export interface KeyOut {
+  id: number;
+  name: string;
+  active: boolean;
+  created_at: string;
+}
+
+/** An account's keys, active and revoked, newest first. */
+export interface KeyListResponse {
+  keys: KeyOut[];
+}
+
+/** A freshly minted key; `key` carries the raw secret exactly once. */
+export interface KeyCreatedResponse {
+  id: number;
+  name: string;
+  active: boolean;
+  created_at: string;
+  key: string;
+}
+
+/** One account row for the operator's all-accounts table. */
+export interface AccountStatsOut {
+  id: number;
+  name: string;
+  is_operator: boolean;
+  monthly_budget_usd: number | null;
+  created_at: string;
+  active_key_count: number;
+  total_key_count: number;
+  spend_mtd: number;
+}
+
+/** All accounts with stats, ordered by name (operator view). */
+export interface AccountListResponse {
+  accounts: AccountStatsOut[];
+}
+
+/** A single account after create/patch, without stats. */
+export interface AccountOut {
+  id: number;
+  name: string;
+  is_operator: boolean;
+  monthly_budget_usd: number | null;
+  created_at: string;
+}
+
+/** Request body for creating an account. */
+export interface AccountCreateRequest {
+  name: string;
+  monthly_budget_usd?: number | null;
+  is_operator?: boolean;
+}
+
+/** Request body for updating an account; only supplied fields change.
+ * `clear_budget` clears the cap (distinct from omitting the field). */
+export interface AccountPatchRequest {
+  name?: string;
+  monthly_budget_usd?: number | null;
+  clear_budget?: boolean;
+  is_operator?: boolean;
+}

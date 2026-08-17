@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import Header from "../components/Header";
 import FilterBar, { type DashboardFilters } from "../components/FilterBar";
 import StatRow from "../components/StatRow";
 import UsageChart from "../components/UsageChart";
@@ -21,6 +20,7 @@ import {
   getUsageTimeseries,
   getUsageTimeseriesByModel,
 } from "../api/client";
+import { useApiErrorHandler } from "../hooks/useApiErrorHandler";
 import type {
   EvalRunOut,
   LatencySummaryResponse,
@@ -57,7 +57,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   const [latencySeries, setLatencySeries] = useState<LatencyTimeseriesResponse | null>(null);
   const [runs, setRuns] = useState<EvalRunOut[]>([]);
   const [prompts, setPrompts] = useState<PromptOut[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
   const load = useCallback(async () => {
     setError(null);
@@ -95,13 +95,9 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       setRuns(evalsRes.runs);
       setPrompts(promptsRes.prompts);
     } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
-      }
-      setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+      handleError(err, "Failed to load dashboard data");
     }
-  }, [filters, onUnauthorized]);
+  }, [filters, setError, handleError]);
 
   // Fetch the model list from an *unfiltered* summary (no `model` param) so
   // the dropdown always lists every model seen in the current time window,
@@ -133,8 +129,7 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
   }, [loadAllModels]);
 
   return (
-    <div className="min-h-screen bg-slate-950">
-      <Header onClearKey={onUnauthorized} />
+    <div>
       <FilterBar filters={filters} availableModels={allModels} onChange={setFilters} />
       {error && (
         <div className="mx-6 mt-4 flex items-center justify-between rounded-lg border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-300">
