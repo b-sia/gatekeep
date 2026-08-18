@@ -4,7 +4,12 @@ import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
 import { getMe } from "./api/client";
-import { clearActiveIdentity, getActiveIdentity, type Identity } from "./api/identityStore";
+import {
+  clearActiveIdentity,
+  getActiveIdentity,
+  subscribeToRosterChanges,
+  type Identity,
+} from "./api/identityStore";
 import { useApiErrorHandler } from "./hooks/useApiErrorHandler";
 import type { MeResponse } from "./api/types";
 
@@ -32,6 +37,22 @@ export default function App() {
   /** Re-reads the active identity after the picker sets one for this tab. */
   const handleIdentityActivated = useCallback(() => {
     setActiveIdentity(getActiveIdentity());
+  }, []);
+
+  // Reconcile this tab's active identity whenever another tab writes to the
+  // shared roster (forgets it, invalidates it, or refreshes its account
+  // label via re-auth), so the header and dashboard don't keep showing a
+  // stale snapshot. If the active identity no longer resolves, this drops
+  // the tab back to the picker the same way a 401 does.
+  useEffect(() => {
+    return subscribeToRosterChanges(() => {
+      const current = getActiveIdentity();
+      if (!current) {
+        clearActiveIdentity();
+        setMe(null);
+      }
+      setActiveIdentity(current);
+    });
   }, []);
 
   const { error: meError, setError: setMeError, handleError } = useApiErrorHandler(handleUnauthorized);

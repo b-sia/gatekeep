@@ -199,3 +199,22 @@ export function clearActiveIdentity(): void {
 export function getActiveKey(): string | null {
   return getActiveIdentity()?.key ?? null;
 }
+
+/**
+ * Subscribes to shared-roster writes made by other tabs, via the browser's
+ * `storage` event (which fires only in tabs other than the one that wrote
+ * the change - never the writer itself). Lets a tab reconcile its active
+ * identity when another tab forgets, invalidates, or re-authenticates it.
+ *
+ * @param callback - Called with no arguments whenever another tab writes
+ *   to the shared roster. Unrelated localStorage writes are ignored.
+ * @returns An unsubscribe function; call it on unmount to remove the
+ *   listener.
+ */
+export function subscribeToRosterChanges(callback: () => void): () => void {
+  const listener = (event: StorageEvent) => {
+    if (event.key === ROSTER_KEY) callback();
+  };
+  window.addEventListener("storage", listener);
+  return () => window.removeEventListener("storage", listener);
+}

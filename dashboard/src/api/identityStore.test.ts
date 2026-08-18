@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addIdentity,
   clearActiveIdentity,
@@ -9,6 +9,7 @@ import {
   reauthenticate,
   removeIdentity,
   setActiveIdentity,
+  subscribeToRosterChanges,
 } from "./identityStore";
 
 /** Fresh storage before every test so cases do not leak roster/pointer
@@ -166,6 +167,33 @@ describe("reauthenticate", () => {
       "This identity was removed - it may have been forgotten in another tab.",
     );
     expect(listIdentities()).toHaveLength(0);
+  });
+});
+
+describe("subscribeToRosterChanges", () => {
+  it("invokes the callback when a storage event fires for the roster key", () => {
+    const callback = vi.fn();
+    const unsubscribe = subscribeToRosterChanges(callback);
+    window.dispatchEvent(new StorageEvent("storage", { key: "gatekeep_identities" }));
+    expect(callback).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("ignores storage events for unrelated keys", () => {
+    const callback = vi.fn();
+    const unsubscribe = subscribeToRosterChanges(callback);
+    window.dispatchEvent(new StorageEvent("storage", { key: "gatekeep_active_identity" }));
+    window.dispatchEvent(new StorageEvent("storage", { key: "some_other_key" }));
+    expect(callback).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("stops invoking the callback after unsubscribe", () => {
+    const callback = vi.fn();
+    const unsubscribe = subscribeToRosterChanges(callback);
+    unsubscribe();
+    window.dispatchEvent(new StorageEvent("storage", { key: "gatekeep_identities" }));
+    expect(callback).not.toHaveBeenCalled();
   });
 });
 
