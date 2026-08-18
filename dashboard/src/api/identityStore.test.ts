@@ -34,6 +34,32 @@ describe("addIdentity / listIdentities", () => {
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw as string)).toHaveLength(1);
   });
+
+  it("updates the existing entry in place instead of duplicating it when the account id is already saved", () => {
+    const first = addIdentity({ key: "sk-a", accountId: 1, accountName: "Alice", isOperator: false });
+    const second = addIdentity({ key: "sk-a-new", accountId: 1, accountName: "Alice Renamed", isOperator: true });
+    expect(second.id).toBe(first.id);
+    const roster = listIdentities();
+    expect(roster).toHaveLength(1);
+    expect(roster[0].key).toBe("sk-a-new");
+    expect(roster[0].accountName).toBe("Alice Renamed");
+    expect(roster[0].isOperator).toBe(true);
+  });
+
+  it("reactivates a matching invalid entry rather than adding a second row", () => {
+    const first = addIdentity({ key: "sk-a", accountId: 1, accountName: "Alice", isOperator: false });
+    markInvalid(first.id);
+    const second = addIdentity({ key: "sk-a-new", accountId: 1, accountName: "Alice", isOperator: false });
+    expect(second.id).toBe(first.id);
+    expect(second.status).toBe("active");
+    expect(listIdentities()).toHaveLength(1);
+  });
+
+  it("still appends a separate entry for a different account id", () => {
+    addIdentity({ key: "sk-a", accountId: 1, accountName: "Alice", isOperator: false });
+    addIdentity({ key: "sk-b", accountId: 2, accountName: "Bob", isOperator: false });
+    expect(listIdentities()).toHaveLength(2);
+  });
 });
 
 describe("per-tab active pointer", () => {

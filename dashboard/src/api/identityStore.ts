@@ -58,12 +58,16 @@ export function listIdentities(): Identity[] {
 }
 
 /**
- * Appends a new active identity to the shared roster. The caller must have
- * already validated the key via `/me`; the account context comes from there.
+ * Adds an identity to the shared roster, or updates the existing entry for
+ * the same account if one is already saved. The caller must have already
+ * validated the key via `/me`; the account context comes from there.
  *
  * @param fields - The raw key and the account id/name/operator flag from
  *   `/me`.
- * @returns The created identity, including its generated id.
+ * @returns The created or updated identity. When an entry for this
+ *   `accountId` already existed, its `id` is preserved (so any tab with it
+ *   active keeps pointing at the same roster row) and its key/name/operator
+ *   flag/status are refreshed to the values just passed in.
  */
 export function addIdentity(fields: {
   key: string;
@@ -71,6 +75,13 @@ export function addIdentity(fields: {
   accountName: string;
   isOperator: boolean;
 }): Identity {
+  const roster = readRoster();
+  const existing = roster.find((candidate) => candidate.accountId === fields.accountId);
+  if (existing) {
+    const updated: Identity = { ...existing, ...fields, status: "active" };
+    writeRoster(roster.map((candidate) => (candidate.id === existing.id ? updated : candidate)));
+    return updated;
+  }
   const identity: Identity = {
     id: crypto.randomUUID(),
     key: fields.key,
@@ -79,7 +90,7 @@ export function addIdentity(fields: {
     isOperator: fields.isOperator,
     status: "active",
   };
-  writeRoster([...readRoster(), identity]);
+  writeRoster([...roster, identity]);
   return identity;
 }
 
