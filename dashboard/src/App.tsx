@@ -1,27 +1,58 @@
 import { useCallback, useEffect, useState } from "react";
-import KeyEntryScreen from "./components/KeyEntryScreen";
+import IdentityPicker from "./components/IdentityPicker";
 import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
-import { clearStoredApiKey, getMe, getStoredApiKey } from "./api/client";
+import { getMe } from "./api/client";
+import {
+  clearActiveIdentity,
+  getActiveIdentity,
+  subscribeToRosterChanges,
+  type Identity,
+} from "./api/identityStore";
 import { useApiErrorHandler } from "./hooks/useApiErrorHandler";
 import type { MeResponse } from "./api/types";
 
 /**
- * Root component: gates the dashboard behind an API key, owns the active tab
- * and the caller's own account context (GET /me), and renders the shared
- * header plus the active tab's page.
+ * Root component: gates the dashboard behind this tab's active identity, owns
+ * the active tab and the caller's own account context (GET /me), and renders
+ * the shared header plus the active tab's page.
  */
 export default function App() {
-  const [hasKey, setHasKey] = useState<boolean>(() => getStoredApiKey() !== null);
+  const [activeIdentity, setActiveIdentity] = useState<Identity | null>(() =>
+    getActiveIdentity(),
+  );
   const [tab, setTab] = useState<TabKey>("analytics");
   const [me, setMe] = useState<MeResponse | null>(null);
 
-  /** Clears the stored API key and returns to the key entry screen. */
+  /** Drops this tab back to the picker. `client.ts` has already marked the
+   * rejected identity invalid on a 401; here we just clear this tab's
+   * pointer and forget the loaded account. */
   const handleUnauthorized = useCallback(() => {
-    clearStoredApiKey();
+    clearActiveIdentity();
     setMe(null);
-    setHasKey(false);
+    setActiveIdentity(null);
+  }, []);
+
+  /** Re-reads the active identity after the picker sets one for this tab. */
+  const handleIdentityActivated = useCallback(() => {
+    setActiveIdentity(getActiveIdentity());
+  }, []);
+
+  // Reconcile this tab's active identity whenever another tab writes to the
+  // shared roster (forgets it, invalidates it, or refreshes its account
+  // label via re-auth), so the header and dashboard don't keep showing a
+  // stale snapshot. If the active identity no longer resolves, this drops
+  // the tab back to the picker the same way a 401 does.
+  useEffect(() => {
+    return subscribeToRosterChanges(() => {
+      const current = getActiveIdentity();
+      if (!current) {
+        clearActiveIdentity();
+        setMe(null);
+      }
+      setActiveIdentity(current);
+    });
   }, []);
 
   const { error: meError, setError: setMeError, handleError } = useApiErrorHandler(handleUnauthorized);
@@ -34,17 +65,22 @@ export default function App() {
   }, [setMeError, handleError]);
 
   useEffect(() => {
-    if (!hasKey) return;
+    if (!activeIdentity) return;
     loadMe();
-  }, [hasKey, loadMe]);
+  }, [activeIdentity, loadMe]);
 
-  if (!hasKey) {
-    return <KeyEntryScreen onKeySaved={() => setHasKey(true)} />;
+  if (!activeIdentity) {
+    return <IdentityPicker onIdentityActivated={handleIdentityActivated} />;
   }
 
   return (
     <div className="min-h-screen bg-slate-950">
-      <Header activeTab={tab} onTabChange={setTab} onClearKey={handleUnauthorized} />
+      <Header
+        activeTab={tab}
+        onTabChange={setTab}
+        identity={activeIdentity}
+        onLogout={handleUnauthorized}
+      />
       {tab === "analytics" ? (
         <DashboardPage onUnauthorized={handleUnauthorized} />
       ) : (

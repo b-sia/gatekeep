@@ -20,11 +20,22 @@ because `key_id` is deliberately not a metric label; see
 
 ## Auth
 
-On first load the SPA prompts for an API key - the same kind used for
-`/v1/chat/completions`. The key is stored in the browser's `localStorage` and sent
-as a bearer token to the dashboard's own read-only API under `/dashboard/api/*`,
-which is served by `gatekeep/api/dashboard.py` and requires a valid key on every
-endpoint.
+The dashboard keeps a shared roster of saved Gatekeep identities - the same kind of
+key used for `/v1/chat/completions`, plus the account name and operator flag
+resolved from `/me` when the key is added - in the browser's `localStorage`. Each
+browser tab tracks its own active identity independently, as a per-tab pointer in
+`sessionStorage`, so two tabs can be logged in as two different accounts at the
+same time.
+
+A new tab always starts logged out and shows the identity picker, even if
+identities are already saved in the roster - you pick (or add) one per tab. The
+active identity's key is sent as a bearer token to the dashboard's own read-only
+API under `/dashboard/api/*`, which is served by `gatekeep/api/dashboard.py` and
+requires a valid key on every endpoint.
+
+If a saved key is rejected by the gateway (e.g. revoked), that roster entry is
+marked invalid and offers a re-authenticate action instead of being removed
+automatically.
 
 Any valid key can read the whole dataset - the dashboard API is not scoped to the
 calling key. Treat dashboard access as an operator-level privilege.

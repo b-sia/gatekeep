@@ -16,28 +16,11 @@ import type {
   UsageByModelTimeseriesResponse,
   UsageSummaryResponse,
 } from "./types";
+import { getActiveIdentity, getActiveKey, markInvalid } from "./identityStore";
 
-const STORAGE_KEY = "gatekeep_dashboard_api_key";
-
-/** Reads the dashboard API key from localStorage, if one has been saved. */
-export function getStoredApiKey(): string | null {
-  return localStorage.getItem(STORAGE_KEY);
-}
-
-/** Persists the dashboard API key to localStorage. */
-export function setStoredApiKey(key: string): void {
-  localStorage.setItem(STORAGE_KEY, key);
-}
-
-/** Removes the stored dashboard API key, e.g. after it's rejected or the
- * user chooses to replace it. */
-export function clearStoredApiKey(): void {
-  localStorage.removeItem(STORAGE_KEY);
-}
-
-/** Thrown when a dashboard API request has no stored key, or the gateway
- * rejects the stored key with a 401 (in which case the key is also cleared
- * from storage as a side effect). */
+/** Thrown when a dashboard API request has no active identity, or the
+ * gateway rejects the active key with a 401 (in which case that identity is
+ * marked invalid in the roster as a side effect). */
 export class UnauthorizedError extends Error {}
 
 /**
@@ -61,14 +44,51 @@ async function errorMessage(response: Response, path: string): Promise<string> {
 }
 
 /**
+ * Marks this tab's active identity invalid (if one is set) and throws.
+ * Called from `request`/`mutate` when the gateway returns 401 so the roster
+ * reflects the dead key and the tab drops back to the picker.
+ *
+ * @throws {UnauthorizedError} Always.
+ */
+function handleRejectedKey(): never {
+  const active = getActiveIdentity();
+  if (active) markInvalid(active.id);
+  throw new UnauthorizedError("API key was rejected");
+}
+
+/**
+ * Validates a raw Gatekeep key by calling `GET /me` with it directly,
+ * without touching the roster or the active pointer. Used by the identity
+ * picker before a key is saved.
+ *
+ * @param key - The raw key to validate.
+ * @returns The caller's account context if the key is accepted.
+ * @throws {UnauthorizedError} If the gateway rejects the key with a 401.
+ * @throws {Error} For any other non-OK response.
+ */
+export async function validateKey(key: string): Promise<MeResponse> {
+  const url = new URL("/dashboard/api/me", window.location.origin);
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (response.status === 401) {
+    throw new UnauthorizedError("API key was rejected");
+  }
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "me"));
+  }
+  return response.json() as Promise<MeResponse>;
+}
+
+/**
  * Issues an authenticated GET request against `/dashboard/api/<path>`.
  *
  * @param path - API path under `/dashboard/api/`, without a leading slash.
  * @param params - Query params to attach; entries with an `undefined` value
  *   are omitted.
  * @returns The parsed JSON response body.
- * @throws {UnauthorizedError} If no API key is stored, or the gateway
- *   responds 401 (the stored key is cleared in that case).
+ * @throws {UnauthorizedError} If no active identity is set, or the gateway
+ *   responds 401 (that identity is marked invalid).
  * @throws {Error} For any other non-OK response; the thrown message includes
  *   the server's error message when the body is OpenAI-shaped.
  */
@@ -76,9 +96,9 @@ async function request<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
 ): Promise<T> {
-  const apiKey = getStoredApiKey();
+  const apiKey = getActiveKey();
   if (!apiKey) {
-    throw new UnauthorizedError("No API key stored");
+    throw new UnauthorizedError("No active identity");
   }
   const url = new URL(`/dashboard/api/${path}`, window.location.origin);
   if (params) {
@@ -90,8 +110,7 @@ async function request<T>(
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (response.status === 401) {
-    clearStoredApiKey();
-    throw new UnauthorizedError("API key was rejected");
+    handleRejectedKey();
   }
   if (!response.ok) {
     throw new Error(await errorMessage(response, path));
@@ -107,7 +126,8 @@ async function request<T>(
  * @param path - API path under `/dashboard/api/`, without a leading slash.
  * @param body - JSON-serializable request body, or undefined for none.
  * @returns The parsed JSON response body.
- * @throws {UnauthorizedError} If no key is stored, or the gateway responds 401.
+ * @throws {UnauthorizedError} If no active identity is set, or the gateway
+ *   responds 401 (that identity is marked invalid).
  * @throws {Error} For any other non-OK response; the thrown message includes
  *   the server's error message when the body is OpenAI-shaped.
  */
@@ -116,9 +136,9 @@ async function mutate<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const apiKey = getStoredApiKey();
+  const apiKey = getActiveKey();
   if (!apiKey) {
-    throw new UnauthorizedError("No API key stored");
+    throw new UnauthorizedError("No active identity");
   }
   const url = new URL(`/dashboard/api/${path}`, window.location.origin);
   const response = await fetch(url.toString(), {
@@ -130,8 +150,7 @@ async function mutate<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (response.status === 401) {
-    clearStoredApiKey();
-    throw new UnauthorizedError("API key was rejected");
+    handleRejectedKey();
   }
   if (!response.ok) {
     throw new Error(await errorMessage(response, path));
