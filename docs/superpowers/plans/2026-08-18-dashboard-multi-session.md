@@ -859,7 +859,7 @@ Replaces the boolean key gate with an `activeIdentity` gate and connects every p
 - Modify: `dashboard/src/App.tsx`
 
 **Interfaces:**
-- Consumes: `getActiveIdentity`, `getActiveKey`, `clearActiveIdentity`, `type Identity` from `./api/identityStore`; `IdentityPicker`; the updated `Header` (`identity` + `onLogout`); `getMe` from `./api/client`.
+- Consumes: `getActiveIdentity`, `clearActiveIdentity`, `type Identity` from `./api/identityStore`; `IdentityPicker`; the updated `Header` (`identity` + `onLogout`); `getMe` from `./api/client`.
 - Produces: nothing downstream (root component).
 
 - [ ] **Step 1: Replace imports**
@@ -872,11 +872,7 @@ import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
 import { getMe } from "./api/client";
-import {
-  clearActiveIdentity,
-  getActiveIdentity,
-  type Identity,
-} from "./api/identityStore";
+import { clearActiveIdentity, getActiveIdentity, type Identity } from "./api/identityStore";
 import { useApiErrorHandler } from "./hooks/useApiErrorHandler";
 import type { MeResponse } from "./api/types";
 ```
