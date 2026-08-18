@@ -1,8 +1,11 @@
 import { useState, type FormEvent } from "react";
 import {
   addIdentity,
+  clearActiveIdentity,
+  getActiveIdentity,
   listIdentities,
   reauthenticate,
+  removeIdentity,
   setActiveIdentity,
   type Identity,
 } from "../api/identityStore";
@@ -29,10 +32,41 @@ export default function IdentityPicker({ onIdentityActivated }: IdentityPickerPr
   // input is adding a brand-new identity.
   const [reauthId, setReauthId] = useState<string | null>(null);
 
-  /** Selects an existing active identity for this tab. */
+  /**
+   * Selects an existing active identity for this tab. Guards against a
+   * roster row that was invalidated by another tab between this picker's
+   * mount and the click: if the pointer resolves to nothing, the dangling
+   * pointer is cleared, the roster snapshot is refreshed so the row shows
+   * as invalid, and the caller is not notified.
+   */
   function activate(id: string) {
     setActiveIdentity(id);
+    if (!getActiveIdentity()) {
+      clearActiveIdentity();
+      setRoster(listIdentities());
+      setError(
+        "That identity is no longer available - it may have been invalidated in another tab.",
+      );
+      return;
+    }
     onIdentityActivated();
+  }
+
+  /**
+   * Removes an identity from the roster entirely. If it happened to be this
+   * tab's active identity, also clears this tab's active pointer, since the
+   * identity would no longer exist to resolve to. If it was the entry
+   * currently being re-authenticated, closes that flow too.
+   */
+  function forget(id: string) {
+    if (getActiveIdentity()?.id === id) {
+      clearActiveIdentity();
+    }
+    removeIdentity(id);
+    setRoster(listIdentities());
+    if (reauthId === id) {
+      cancelReauth();
+    }
   }
 
   /**
@@ -48,11 +82,12 @@ export default function IdentityPicker({ onIdentityActivated }: IdentityPickerPr
     try {
       const me = await validateKey(trimmed);
       if (reauthId) {
-        reauthenticate(reauthId, trimmed);
+        reauthenticate(reauthId, trimmed, me.account_id);
         setActiveIdentity(reauthId);
       } else {
         const created = addIdentity({
           key: trimmed,
+          accountId: me.account_id,
           accountName: me.name,
           isOperator: me.is_operator,
         });
@@ -98,29 +133,52 @@ export default function IdentityPicker({ onIdentityActivated }: IdentityPickerPr
             {roster.map((entry) => (
               <li key={entry.id}>
                 {entry.status === "active" ? (
-                  <button
-                    onClick={() => activate(entry.id)}
-                    className="flex w-full items-center justify-between rounded border border-slate-700 px-3 py-2 text-left text-sm text-slate-100 hover:bg-slate-800"
-                  >
-                    <span>{entry.accountName}</span>
-                    {entry.isOperator && (
-                      <span className="rounded bg-indigo-600 px-1.5 py-0.5 text-xs text-white">
-                        operator
-                      </span>
-                    )}
-                  </button>
+                  <div className="flex items-center justify-between rounded border border-slate-700 px-3 py-2 text-sm text-slate-100 hover:bg-slate-800">
+                    <button
+                      onClick={() => activate(entry.id)}
+                      className="flex flex-1 items-center gap-2 text-left"
+                    >
+                      <span>{entry.accountName}</span>
+                      {entry.isOperator && (
+                        <span className="rounded bg-indigo-600 px-1.5 py-0.5 text-xs text-white">
+                          operator
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => forget(entry.id)}
+                      className="ml-2 rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                    >
+                      Forget
+                    </button>
+                  </div>
                 ) : (
                   <div className="flex items-center justify-between rounded border border-slate-800 px-3 py-2 text-sm text-slate-500">
-                    <span>
-                      {entry.accountName}
-                      <span className="ml-2 text-xs text-amber-500">key rejected</span>
+                    <span className="flex items-center gap-2">
+                      <span>
+                        {entry.accountName}
+                        <span className="ml-2 text-xs text-amber-500">key rejected</span>
+                      </span>
+                      {entry.isOperator && (
+                        <span className="rounded bg-indigo-600 px-1.5 py-0.5 text-xs text-white">
+                          operator
+                        </span>
+                      )}
                     </span>
-                    <button
-                      onClick={() => startReauth(entry.id)}
-                      className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                    >
-                      Re-authenticate
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => startReauth(entry.id)}
+                        className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                      >
+                        Re-authenticate
+                      </button>
+                      <button
+                        onClick={() => forget(entry.id)}
+                        className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                      >
+                        Forget
+                      </button>
+                    </div>
                   </div>
                 )}
               </li>

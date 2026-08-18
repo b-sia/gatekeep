@@ -5,6 +5,10 @@ export interface Identity {
   id: string;
   /** Raw Gatekeep API key. */
   key: string;
+  /** Account id from `/me` at add-time. Immutable for the entry's lifetime;
+   * used to make sure a re-authenticate can't silently swap this entry onto
+   * a different account. */
+  accountId: number;
   /** Account name from `/me` at add-time, for the roster/header label. */
   accountName: string;
   /** Operator flag from `/me`, drives the operator badge. */
@@ -57,17 +61,20 @@ export function listIdentities(): Identity[] {
  * Appends a new active identity to the shared roster. The caller must have
  * already validated the key via `/me`; the account context comes from there.
  *
- * @param fields - The raw key and the account name/operator flag from `/me`.
+ * @param fields - The raw key and the account id/name/operator flag from
+ *   `/me`.
  * @returns The created identity, including its generated id.
  */
 export function addIdentity(fields: {
   key: string;
+  accountId: number;
   accountName: string;
   isOperator: boolean;
 }): Identity {
   const identity: Identity = {
     id: crypto.randomUUID(),
     key: fields.key,
+    accountId: fields.accountId,
     accountName: fields.accountName,
     isOperator: fields.isOperator,
     status: "active",
@@ -105,11 +112,22 @@ export function markInvalid(id: string): void {
  *
  * @param id - The roster handle to re-authenticate.
  * @param newKey - The new, already-validated Gatekeep key.
+ * @param accountId - The account id resolved from `/me` for `newKey`. Must
+ *   match the entry's stored `accountId` - otherwise the pasted key belongs
+ *   to a different account than the one this roster row represents, and
+ *   accepting it would silently relabel the row.
+ * @throws {Error} If `accountId` does not match the entry's stored
+ *   `accountId`. The entry is left unchanged in this case.
  */
-export function reauthenticate(id: string, newKey: string): void {
+export function reauthenticate(id: string, newKey: string, accountId: number): void {
+  const roster = readRoster();
+  const entry = roster.find((candidate) => candidate.id === id);
+  if (entry && entry.accountId !== accountId) {
+    throw new Error("This key belongs to a different account");
+  }
   writeRoster(
-    readRoster().map((entry) =>
-      entry.id === id ? { ...entry, key: newKey, status: "active" } : entry,
+    roster.map((candidate) =>
+      candidate.id === id ? { ...candidate, key: newKey, status: "active" } : candidate,
     ),
   );
 }
