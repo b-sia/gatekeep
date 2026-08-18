@@ -82,7 +82,7 @@ export default function IdentityPicker({ onIdentityActivated }: IdentityPickerPr
     try {
       const me = await validateKey(trimmed);
       if (reauthId) {
-        reauthenticate(reauthId, trimmed, me.account_id);
+        reauthenticate(reauthId, trimmed, me.account_id, me.name, me.is_operator);
         setActiveIdentity(reauthId);
       } else {
         const created = addIdentity({
@@ -95,12 +95,20 @@ export default function IdentityPicker({ onIdentityActivated }: IdentityPickerPr
       }
       onIdentityActivated();
     } catch (err) {
+      const refreshedRoster = listIdentities();
       if (err instanceof UnauthorizedError) {
         setError("That key was rejected. Check it and try again.");
       } else {
         setError(err instanceof Error ? err.message : "Could not validate the key.");
       }
-      setRoster(listIdentities());
+      setRoster(refreshedRoster);
+      // A re-auth target that vanished from the roster (removed by another
+      // tab) can't be re-authenticated anymore - drop back to "add identity"
+      // instead of leaving the form scoped to a row that no longer exists.
+      if (reauthId && !refreshedRoster.some((entry) => entry.id === reauthId)) {
+        setReauthId(null);
+        setKeyInput("");
+      }
     } finally {
       setBusy(false);
     }

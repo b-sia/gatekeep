@@ -91,10 +91,24 @@ describe("reauthenticate", () => {
       isOperator: false,
     });
     markInvalid(created.id);
-    reauthenticate(created.id, "sk-new", 1);
+    reauthenticate(created.id, "sk-new", 1, "Alice", false);
     const roster = listIdentities();
     expect(roster[0].status).toBe("active");
     expect(roster[0].key).toBe("sk-new");
+  });
+
+  it("refreshes accountName and isOperator to the freshly validated values", () => {
+    const created = addIdentity({
+      key: "sk-old",
+      accountId: 1,
+      accountName: "Alice",
+      isOperator: false,
+    });
+    markInvalid(created.id);
+    reauthenticate(created.id, "sk-new", 1, "Alice Renamed", true);
+    const roster = listIdentities();
+    expect(roster[0].accountName).toBe("Alice Renamed");
+    expect(roster[0].isOperator).toBe(true);
   });
 
   it("throws and leaves the entry unchanged when the account id does not match", () => {
@@ -105,12 +119,27 @@ describe("reauthenticate", () => {
       isOperator: false,
     });
     markInvalid(created.id);
-    expect(() => reauthenticate(created.id, "sk-new", 2)).toThrow(
+    expect(() => reauthenticate(created.id, "sk-new", 2, "Bob", false)).toThrow(
       "This key belongs to a different account",
     );
     const roster = listIdentities();
     expect(roster[0].status).toBe("invalid");
     expect(roster[0].key).toBe("sk-old");
+  });
+
+  it("throws when the entry no longer exists in the roster", () => {
+    const created = addIdentity({
+      key: "sk-old",
+      accountId: 1,
+      accountName: "Alice",
+      isOperator: false,
+    });
+    markInvalid(created.id);
+    removeIdentity(created.id);
+    expect(() => reauthenticate(created.id, "sk-new", 1, "Alice", false)).toThrow(
+      "This identity was removed - it may have been forgotten in another tab.",
+    );
+    expect(listIdentities()).toHaveLength(0);
   });
 });
 

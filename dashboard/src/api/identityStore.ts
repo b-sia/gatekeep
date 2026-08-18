@@ -107,8 +107,9 @@ export function markInvalid(id: string): void {
 }
 
 /**
- * Replaces an entry's key with a freshly validated one and flips it back to
- * `active`.
+ * Replaces an entry's key with a freshly validated one, refreshes its
+ * account name/operator flag to the values just resolved from `/me`, and
+ * flips it back to `active`.
  *
  * @param id - The roster handle to re-authenticate.
  * @param newKey - The new, already-validated Gatekeep key.
@@ -116,18 +117,32 @@ export function markInvalid(id: string): void {
  *   match the entry's stored `accountId` - otherwise the pasted key belongs
  *   to a different account than the one this roster row represents, and
  *   accepting it would silently relabel the row.
- * @throws {Error} If `accountId` does not match the entry's stored
- *   `accountId`. The entry is left unchanged in this case.
+ * @param accountName - The account name resolved from `/me` for `newKey`.
+ * @param isOperator - The operator flag resolved from `/me` for `newKey`.
+ * @throws {Error} If the entry no longer exists (e.g. another tab removed
+ *   it after this picker loaded) or `accountId` does not match the entry's
+ *   stored `accountId`. The roster is left unchanged in either case.
  */
-export function reauthenticate(id: string, newKey: string, accountId: number): void {
+export function reauthenticate(
+  id: string,
+  newKey: string,
+  accountId: number,
+  accountName: string,
+  isOperator: boolean,
+): void {
   const roster = readRoster();
   const entry = roster.find((candidate) => candidate.id === id);
-  if (entry && entry.accountId !== accountId) {
+  if (!entry) {
+    throw new Error("This identity was removed - it may have been forgotten in another tab.");
+  }
+  if (entry.accountId !== accountId) {
     throw new Error("This key belongs to a different account");
   }
   writeRoster(
     roster.map((candidate) =>
-      candidate.id === id ? { ...candidate, key: newKey, status: "active" } : candidate,
+      candidate.id === id
+        ? { ...candidate, key: newKey, accountName, isOperator, status: "active" }
+        : candidate,
     ),
   );
 }
