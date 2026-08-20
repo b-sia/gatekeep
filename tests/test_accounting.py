@@ -11,17 +11,22 @@ from tests.helpers import create_account, create_key
 
 
 def test_calculate_cost_known_model():
-    cost = calculate_cost("claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost(
+        "anthropic", "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
     assert cost == 12.0
 
 
 def test_calculate_cost_scales_linearly():
-    cost = calculate_cost("claude-sonnet-5", prompt_tokens=500_000, completion_tokens=0)
+    cost = calculate_cost(
+        "anthropic", "claude-sonnet-5", prompt_tokens=500_000, completion_tokens=0
+    )
     assert cost == 1.0
 
 
 def test_calculate_cost_haiku_alias_is_priced():
     cost = calculate_cost(
+        "anthropic",
         "claude-haiku-4-5-20251001",
         prompt_tokens=1_000_000,
         completion_tokens=1_000_000,
@@ -30,20 +35,37 @@ def test_calculate_cost_haiku_alias_is_priced():
 
 
 def test_calculate_cost_unknown_model_is_free():
-    cost = calculate_cost("llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost("ollama", "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert cost == 0.0
+
+
+def test_calculate_cost_unpriced_model_on_a_paid_provider_is_free():
+    """No fail-closed policy exists yet (see issue #25); an unpriced paid-provider
+    model still costs $0 today - just from a JSON miss rather than a dict miss."""
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
     assert cost == 0.0
 
 
 def test_calculate_cost_openai_gpt4o_is_priced():
-    cost = calculate_cost("gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost("openai", "gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost > 0.0
 
 
 def test_calculate_cost_google_gemini_flash_is_priced():
     cost = calculate_cost(
-        "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
+        "google", "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
     )
     assert cost == 10.5
+
+
+def test_calculate_cost_is_provider_scoped():
+    """A model priced under one provider does not leak into another provider's lookup."""
+    cost = calculate_cost(
+        "openai", "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
 
 
 async def test_log_request_persists_row(session):
@@ -58,6 +80,7 @@ async def test_log_request_persists_row(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=100,
         completion_tokens=50,
@@ -70,7 +93,7 @@ async def test_log_request_persists_row(session):
     assert found.prompt_tokens == 100
     assert found.completion_tokens == 50
     assert found.total_tokens == 150
-    assert found.cost_usd == calculate_cost("claude-sonnet-5", 100, 50)
+    assert found.cost_usd == calculate_cost("anthropic", "claude-sonnet-5", 100, 50)
     assert found.cached is False
     assert found.cache_key is None
     assert found.response_id == "chatcmpl-abc"
@@ -87,6 +110,7 @@ async def test_log_request_stamps_account_id(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -109,6 +133,7 @@ async def test_log_request_can_record_cache_hit(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=0,
@@ -134,6 +159,7 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=0,
         completion_tokens=0,
@@ -144,7 +170,7 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
     )
 
     assert log.cost_usd == 0.0042
-    assert log.cost_usd != calculate_cost("claude-sonnet-5", 0, 0)
+    assert log.cost_usd != calculate_cost("anthropic", "claude-sonnet-5", 0, 0)
 
 
 async def test_log_request_records_latency_columns(session):
@@ -158,6 +184,7 @@ async def test_log_request_records_latency_columns(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -182,6 +209,7 @@ async def test_log_request_latency_columns_default_to_none(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -203,6 +231,7 @@ async def test_log_request_persists_path(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="openai",
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -224,6 +253,7 @@ async def test_log_request_path_defaults_to_none(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="openai",
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -267,6 +297,7 @@ async def test_log_request_defaults_outcome_to_ok(session, key_and_account_id):
         session,
         key_id=key_id,
         account_id=account_id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,
@@ -282,6 +313,7 @@ async def test_log_request_persists_explicit_outcome(session, key_and_account_id
         session,
         key_id=key_id,
         account_id=account_id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,

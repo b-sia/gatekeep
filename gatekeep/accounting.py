@@ -8,26 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.middleware.budget import record_spend
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import RequestLog
+from gatekeep.pricing import get_pricing_table
 
 logger = logging.getLogger(__name__)
-
-# Per-model USD pricing as (input_price_per_1m_tokens, output_price_per_1m_tokens).
-# Models not listed here (e.g. locally-served Ollama models) cost $0.
-# claude-haiku-4-5-20251001 pricing is an approximate estimate consistent with
-# Haiku's usual cost tier relative to Sonnet; reconcile with current published
-# Anthropic pricing before relying on it for exact billing.
-# OpenAI/Google prices below are approximate published per-1M-token rates as
-# of this writing; reconcile with current provider pricing before relying on
-# them for exact billing. Costs use the resolved (prefix-stripped) model id
-# returned by resolve_route, e.g. "gpt-4o" not "openai/gpt-4o".
-MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    "gpt-4o": (2.5, 10.0),
-    "gpt-4o-mini": (0.15, 0.6),
-    "gemini-2.5-pro": (1.25, 10.0),
-    "gemini-flash-latest": (1.5, 9.0),  # gemini-3.5-flash pricing as of 2026-07-21
-}
 
 
 def estimate_tokens(text: str) -> int:
@@ -53,16 +36,20 @@ def estimate_tokens(text: str) -> int:
     return -(-len(text) // 4)
 
 
-def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Calculate the USD cost of a completion from its model and token counts.
+def calculate_cost(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Calculate the USD cost of a completion from its provider, model, and token counts.
 
-    Looks up per-million-token input/output pricing in MODEL_PRICING; models
-    with no listed pricing (e.g. local Ollama models) are treated as free.
+    Looks up per-million-token input/output pricing via `pricing.get_pricing_table`
+    (the vendored + operator-override pricing dataset, keyed by
+    ``"<provider>/<model>"``); a model with no listed pricing (e.g. a local
+    Ollama model, or a paid-provider model absent from the dataset) is
+    treated as free. `provider`/`model` are exactly what `resolve_route`
+    returns.
     """
-    input_price, output_price = MODEL_PRICING.get(model, (0.0, 0.0))
-    return (prompt_tokens / 1_000_000 * input_price) + (
-        completion_tokens / 1_000_000 * output_price
-    )
+    price = get_pricing_table().lookup(provider, model)
+    if price is None:
+        return 0.0
+    return price.cost(prompt_tokens, completion_tokens)
 
 
 async def log_request(
@@ -70,6 +57,7 @@ async def log_request(
     *,
     key_id: int,
     account_id: int,
+    provider: str,
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
@@ -92,6 +80,10 @@ async def log_request(
     server-side from the authenticated key. It is denormalized onto the row
     (rather than joined through `key_id`) so attribution survives key rotation
     or revocation.
+
+    `provider` is the resolved upstream (`resolve_route`'s first return
+    value, e.g. "anthropic"/"openai"/"google"/"ollama") and, together with
+    `model`, is what `calculate_cost` keys its pricing lookup on.
 
     Cost is derived via calculate_cost, unless `cost_usd_override` is given,
     in which case that value is used directly (e.g. a semantic-cache hit
@@ -138,7 +130,7 @@ async def log_request(
     cost_usd = (
         cost_usd_override
         if cost_usd_override is not None
-        else calculate_cost(model, prompt_tokens, completion_tokens)
+        else calculate_cost(provider, model, prompt_tokens, completion_tokens)
     )
     log = RequestLog(
         key_id=key_id,

@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     default_model: str = "claude-sonnet-5"
     default_max_tokens: int = 4096
+    # Optional path to an operator-supplied pricing override file (same
+    # {"models": {"<provider>/<model>": {...}}} shape as the vendored
+    # gatekeep/data/model_prices.json). Entries here win over the vendored
+    # baseline, letting an operator price preview/self-hosted models no public
+    # dataset covers. None (default) means baseline-only. See gatekeep/pricing.py.
+    pricing_overrides_path: str | None = None
     model_aliases: dict[str, str] = Field(
         default_factory=lambda: {
             "gpt-4": "claude-sonnet-5",
