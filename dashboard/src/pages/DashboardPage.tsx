@@ -25,6 +25,7 @@ import type {
   EvalRunOut,
   LatencySummaryResponse,
   LatencyTimeseriesResponse,
+  MeResponse,
   PromptOut,
   TimeseriesResponse,
   UsageByModelTimeseriesResponse,
@@ -32,18 +33,25 @@ import type {
 } from "../api/types";
 
 interface DashboardPageProps {
+  /** The caller's own account context (GET /me), or null while it loads.
+   * Drives whether the operator-only prompts/eval panels are fetched and
+   * shown - those routes are fleet-wide and gated to operators (see
+   * `gatekeep/api/dashboard.py`), so a non-operator would only get 403s. */
+  me: MeResponse | null;
   /** Called when any dashboard API call comes back 401, so the app can drop
    * back to the API key entry screen and clear the stale stored key. */
   onUnauthorized: () => void;
 }
 
 /**
- * Top-level dashboard view: owns filter state, fetches usage/eval/prompt
- * data for the current time window and model filter, and renders the
- * dashboard layout (header, filters, stat cards, charts, breakdowns,
- * prompts, eval history).
+ * Top-level dashboard view: owns filter state, fetches usage/latency data
+ * (and, for operators, fleet-wide prompt/eval data) for the current time
+ * window and model filter, and renders the dashboard layout (header,
+ * filters, stat cards, charts, breakdowns, and - for operators - prompts and
+ * eval history).
  */
-export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
+export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps) {
+  const isOperator = me?.is_operator ?? false;
   const [filters, setFilters] = useState<DashboardFilters>({
     rangeDays: 7,
     interval: "day",
@@ -65,6 +73,11 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
     const start = new Date(end.getTime() - filters.rangeDays * 24 * 60 * 60 * 1000);
     const windowParams = { start: start.toISOString(), end: end.toISOString() };
     try {
+      // Prompt/eval data is fleet-wide and operator-only on the backend, so
+      // a non-operator would only get 403s - skip those two fetches entirely
+      // for them rather than failing the whole batch (`Promise.all` rejects
+      // on the first rejection, which would blank the usage/latency panels
+      // they *are* allowed to see).
       const [summaryRes, timeseriesRes, byModelRes, latencyRes, latencySeriesRes, evalsRes, promptsRes] =
         await Promise.all([
           getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
@@ -84,20 +97,20 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
             interval: filters.interval,
             model: filters.model ?? undefined,
           }),
-          getEvalHistory(),
-          getPrompts(),
+          isOperator ? getEvalHistory() : Promise.resolve(null),
+          isOperator ? getPrompts() : Promise.resolve(null),
         ]);
       setSummary(summaryRes);
       setTimeseries(timeseriesRes);
       setByModel(byModelRes);
       setLatency(latencyRes);
       setLatencySeries(latencySeriesRes);
-      setRuns(evalsRes.runs);
-      setPrompts(promptsRes.prompts);
+      setRuns(evalsRes?.runs ?? []);
+      setPrompts(promptsRes?.prompts ?? []);
     } catch (err) {
       handleError(err, "Failed to load dashboard data");
     }
-  }, [filters, setError, handleError]);
+  }, [filters, isOperator, setError, handleError]);
 
   // Fetch the model list from an *unfiltered* summary (no `model` param) so
   // the dropdown always lists every model seen in the current time window,
@@ -150,8 +163,12 @@ export default function DashboardPage({ onUnauthorized }: DashboardPageProps) {
       <LatencyPanel timeseries={latencySeries} summary={latency} />
       <LatencyByPathPanel summary={latency} />
       <BreakdownPanels summary={summary} latency={latency} />
-      <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
-      <EvalHistoryPanel runs={runs} />
+      {isOperator && (
+        <>
+          <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
+          <EvalHistoryPanel runs={runs} />
+        </>
+      )}
     </div>
   );
 }
