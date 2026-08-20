@@ -162,6 +162,7 @@ async def test_log_request_persists_row(session):
 
     found = (await session.execute(select(RequestLog).where(RequestLog.id == log.id))).scalar_one()
     assert found.key_id == key.id
+    assert found.provider == "anthropic"
     assert found.model == "claude-sonnet-5"
     assert found.prompt_tokens == 100
     assert found.completion_tokens == 50

@@ -141,6 +141,13 @@ class RequestLog(Base):
     # this is read (dashboard.py's _latency_filters, the success-rate
     # aggregate), since failed rows were never logged at all before #17.
     outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The resolved upstream this request was billed against, one of
+    # "anthropic", "openai", "google", or "ollama" (resolve_route's first
+    # return value). Kept on the row so cost audits can see which provider a
+    # spend figure was priced under - pricing is keyed "<provider>/<model>",
+    # so `model` alone is ambiguous when a bare id exists under two providers.
+    # NULL only on rows written before migration 0021.
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         # Speeds up budget.get_period_spend's DB-fallback aggregate, which

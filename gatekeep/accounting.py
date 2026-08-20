@@ -216,6 +216,7 @@ async def log_request(
     log = RequestLog(
         key_id=key_id,
         account_id=account_id,
+        provider=provider,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
