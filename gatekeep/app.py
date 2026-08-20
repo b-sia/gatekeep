@@ -96,6 +96,7 @@ from gatekeep.observability.metrics import (
     observe_request,
     requests_total,
 )
+from gatekeep.pricing import get_pricing_table
 from gatekeep.prompts import PromptNotFoundError, resolve_prompt_version_for_request
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
@@ -128,7 +129,7 @@ _STREAM_PATH = "stream"
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Warm the semantic-cache embedding model before serving traffic.
+    """Warm the embedding model and pricing table before serving traffic.
 
     `embed_text`'s underlying model loads lazily on first use, and on a
     container with no baked-in weights that first load downloads them from
@@ -136,8 +137,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     process doesn't report ready until it's paid, instead of stalling
     whichever request happens to arrive first (and every other request
     queued behind it on the event loop).
+
+    `get_pricing_table()` is also loaded eagerly for the same reason, but for
+    correctness rather than latency: it verifies the vendored pricing file
+    against its committed hash pin (see gatekeep.pricing), and that file is
+    the spend-enforcement table. A corrupted file or a stale pin must fail
+    the container at startup - loud and before it takes traffic - rather than
+    surface as a generic 500 on whichever request happens to be first to call
+    enforce_pricing_policy/calculate_cost.
     """
     await asyncio.to_thread(warm_embedding_model)
+    get_pricing_table()
     yield
 
 

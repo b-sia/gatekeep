@@ -257,6 +257,25 @@ def test_load_rejects_a_baseline_that_does_not_match_its_pin(tmp_path):
         PricingTable.load(baseline_path=base)
 
 
+async def test_lifespan_fails_startup_when_pricing_table_is_unloadable(monkeypatch):
+    """The pricing table is warmed eagerly in _lifespan (alongside the
+    embedding model) so a corrupted baseline or stale pin fails the container
+    at startup - loud and before it takes traffic - instead of surfacing as a
+    generic 500 on whichever request happens to call enforce_pricing_policy/
+    calculate_cost first."""
+    import gatekeep.app as app_module
+
+    def _boom():
+        raise PricingIntegrityError("simulated corrupt baseline")
+
+    monkeypatch.setattr(app_module, "get_pricing_table", _boom)
+    monkeypatch.setattr(app_module, "warm_embedding_model", lambda: None)
+
+    with pytest.raises(PricingIntegrityError):
+        async with app_module._lifespan(app_module.app):
+            pytest.fail("lifespan should not have completed startup")
+
+
 def test_load_allows_an_unpinned_non_default_baseline(tmp_path):
     """Only the shipped baseline requires a pin; an ad-hoc file without a
     sibling lockfile still loads, so test/operator fixtures need not ship one."""
