@@ -134,8 +134,15 @@ export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps
   }, [filters.rangeDays, onUnauthorized]);
 
   useEffect(() => {
+    // `isOperator` (and so `load`'s identity) starts as `false` until GET
+    // /me resolves, then may flip to `true` for an operator account.
+    // Waiting for `me` here avoids firing `load()` once with the wrong
+    // (default-false) `isOperator` and again when it flips - which would
+    // otherwise duplicate every usage/latency fetch on each operator page
+    // load.
+    if (!me) return;
     load();
-  }, [load]);
+  }, [load, me]);
 
   useEffect(() => {
     loadAllModels();
