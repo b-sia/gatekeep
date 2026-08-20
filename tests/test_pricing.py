@@ -7,7 +7,9 @@ import pytest
 
 from gatekeep.pricing import (
     ModelPrice,
+    PricingIntegrityError,
     PricingTable,
+    compute_models_digest,
     get_pricing_table,
     is_billed_provider,
     is_unpriced,
@@ -202,3 +204,66 @@ def test_vendored_file_is_well_formed():
         assert isinstance(entry["input_per_1m"], int | float)
         assert isinstance(entry["output_per_1m"], int | float)
         assert entry["source"] in {"local", "litellm"}
+
+
+# --- hash pin (integrity of the enforcement table) ---------------------------
+
+
+def _write_pinned(tmp_path, models, *, pin=None):
+    """Write a baseline JSON + sibling .sha256 pin, returning the baseline path.
+
+    `pin` defaults to the correct digest; pass a wrong string to simulate a
+    baseline changed without re-pinning.
+    """
+    base = tmp_path / "model_prices.json"
+    base.write_text(json.dumps({"_meta": {"generated_at": "x"}, "models": models}))
+    pin_file = tmp_path / "model_prices.sha256"
+    pin_file.write_text((pin if pin is not None else compute_models_digest(models)) + "\n")
+    return base
+
+
+def test_vendored_baseline_matches_its_committed_pin():
+    """The real shipped file loads - proving the committed pin is present and
+    correct, so production never trips the fail-closed integrity check."""
+    data = json.loads(Path("gatekeep/data/model_prices.json").read_text())
+    pin = Path("gatekeep/data/model_prices.sha256").read_text().strip()
+    assert compute_models_digest(data["models"]) == pin
+    assert PricingTable.load() is not None  # default baseline path, pin enforced
+
+
+def test_digest_ignores_meta_and_key_order():
+    """The pin tracks price content only: reordering keys or bumping the
+    generated_at stamp must not change it, but changing a price must."""
+    a = {"openai/x": {"input_per_1m": 1.0, "output_per_1m": 2.0, "source": "local"}}
+    b = {"openai/x": {"source": "local", "output_per_1m": 2.0, "input_per_1m": 1.0}}
+    assert compute_models_digest(a) == compute_models_digest(b)
+    c = {"openai/x": {"input_per_1m": 9.0, "output_per_1m": 2.0, "source": "local"}}
+    assert compute_models_digest(a) != compute_models_digest(c)
+
+
+def test_load_accepts_a_matching_pin(tmp_path):
+    models = {"openai/x": {"input_per_1m": 1.0, "output_per_1m": 2.0, "source": "local"}}
+    base = _write_pinned(tmp_path, models)
+    table = PricingTable.load(baseline_path=base)
+    assert table.lookup("openai", "x").input_per_1m == 1.0
+
+
+def test_load_rejects_a_baseline_that_does_not_match_its_pin(tmp_path):
+    """A price changed without re-pinning must fail closed, not silently
+    redefine spend enforcement (issue #25)."""
+    models = {"openai/x": {"input_per_1m": 1.0, "output_per_1m": 2.0, "source": "local"}}
+    base = _write_pinned(tmp_path, models, pin="0" * 64)
+    with pytest.raises(PricingIntegrityError):
+        PricingTable.load(baseline_path=base)
+
+
+def test_load_allows_an_unpinned_non_default_baseline(tmp_path):
+    """Only the shipped baseline requires a pin; an ad-hoc file without a
+    sibling lockfile still loads, so test/operator fixtures need not ship one."""
+    base = tmp_path / "model_prices.json"
+    base.write_text(
+        json.dumps(
+            {"models": {"openai/x": {"input_per_1m": 1.0, "output_per_1m": 2.0, "source": "local"}}}
+        )
+    )
+    assert PricingTable.load(baseline_path=base).lookup("openai", "x") is not None

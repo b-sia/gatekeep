@@ -34,11 +34,16 @@ jobs:
           title: "chore: refresh vendored model pricing"
           branch: chore/refresh-model-prices
           delete-branch: true
-          add-paths: gatekeep/data/model_prices.json
+          add-paths: |
+            gatekeep/data/model_prices.json
+            gatekeep/data/model_prices.sha256
           body: |
             Automated refresh of `gatekeep/data/model_prices.json` from
             [BerriAI/litellm](https://github.com/BerriAI/litellm)'s pricing dataset.
 
             Only `source: "litellm"` entries change; hand-maintained
-            `source: "local"` entries are preserved. Review the price diff
-            before merging - this file feeds the cost/budget enforcement path.
+            `source: "local"` entries are preserved. The sibling
+            `model_prices.sha256` pin is regenerated to match - it is verified
+            fail-closed on load, so the two always travel together. Review the
+            price diff before merging - this file feeds the cost/budget
+            enforcement path.

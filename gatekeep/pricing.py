@@ -25,6 +25,7 @@ still uses the old table for now.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -49,6 +50,34 @@ _LITELLM_PROVIDER_MAP = {
 }
 
 _DEFAULT_BASELINE_PATH = Path(__file__).parent / "data" / "model_prices.json"
+
+
+class PricingIntegrityError(RuntimeError):
+    """Raised when the vendored pricing baseline fails its committed hash pin.
+
+    The vendored ``model_prices.json`` is the spend-enforcement table, so a
+    swap, partial write, or hand-edit that did not go back through
+    ``scripts/refresh_model_prices.py`` (the only thing that re-pins it) must
+    fail loudly rather than silently redefine what requests cost. See issue #25.
+    """
+
+
+def _pin_path_for(baseline_path: Path) -> Path:
+    """Return the sibling ``.sha256`` lockfile path for a baseline JSON file."""
+    return baseline_path.with_name(baseline_path.stem + ".sha256")
+
+
+def compute_models_digest(models: Mapping[str, Any]) -> str:
+    """Return the SHA-256 hex digest pinning a pricing file's `models` payload.
+
+    Hashes only the ``models`` mapping - never ``_meta`` - so the pin tracks
+    exactly the price content and is not churned by the ``generated_at`` stamp
+    a no-op refresh rewrites. The canonical form sorts keys and drops
+    whitespace, so file key ordering and pretty-print formatting do not affect
+    the digest; only an actual change to a model or its price does.
+    """
+    canonical = json.dumps(models, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -116,8 +145,12 @@ class PricingTable:
         Raises:
             FileNotFoundError: if `baseline_path` does not exist.
             ValueError: if the baseline file is malformed.
+            PricingIntegrityError: if the baseline fails its committed hash pin.
         """
-        prices = _load_entries(baseline_path)
+        raw = _read_pricing_json(baseline_path)
+        models = raw.get("models", {})
+        _verify_pin(baseline_path, models)
+        prices = _entries_from_models(models, baseline_path)
         if overrides:
             prices.update(overrides)
         return cls(prices)
@@ -151,19 +184,25 @@ class PricingTable:
         return len(self._prices)
 
 
-def _load_entries(path: Path) -> dict[str, ModelPrice]:
-    """Parse a pricing JSON file into a ``canonical-key -> ModelPrice`` dict.
+def _read_pricing_json(path: Path) -> dict[str, Any]:
+    """Read and parse a pricing JSON file into its raw ``{_meta, models}`` dict.
 
     Raises:
         FileNotFoundError: if `path` does not exist.
-        ValueError: if the file is not valid JSON or an entry is missing a
-            required numeric field.
+        ValueError: if the file is not valid JSON.
     """
     try:
-        raw = json.loads(path.read_text())
+        return json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise ValueError(f"malformed pricing file {path}: {exc}") from exc
-    models = raw.get("models", {})
+
+
+def _entries_from_models(models: Mapping[str, Any], path: Path) -> dict[str, ModelPrice]:
+    """Parse a raw ``models`` mapping into a ``canonical-key -> ModelPrice`` dict.
+
+    Raises:
+        ValueError: if an entry is missing a required numeric field.
+    """
     entries: dict[str, ModelPrice] = {}
     for key, value in models.items():
         try:
@@ -175,6 +214,52 @@ def _load_entries(path: Path) -> dict[str, ModelPrice]:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid pricing entry {key!r} in {path}: {exc}") from exc
     return entries
+
+
+def _verify_pin(baseline_path: Path, models: Mapping[str, Any]) -> None:
+    """Verify a baseline file's `models` against its committed ``.sha256`` pin.
+
+    The default vendored baseline *must* carry a pin: a missing lockfile there
+    is treated as a failure, so deleting the pin cannot silently disable the
+    check on the enforcement path. Any other baseline path (test fixtures,
+    an operator's alternate file) is only verified if a pin sits beside it, so
+    ad-hoc files need not ship one.
+
+    Raises:
+        PricingIntegrityError: if the pin is required-but-absent, or present
+            but does not match the file's `models` payload.
+    """
+    pin_path = _pin_path_for(baseline_path)
+    if not pin_path.exists():
+        if baseline_path == _DEFAULT_BASELINE_PATH:
+            raise PricingIntegrityError(
+                f"vendored pricing baseline {baseline_path} is missing its hash "
+                f"pin {pin_path}; regenerate it with scripts/refresh_model_prices.py"
+            )
+        return
+    expected = pin_path.read_text().strip()
+    actual = compute_models_digest(models)
+    if actual != expected:
+        raise PricingIntegrityError(
+            f"pricing baseline {baseline_path} does not match its hash pin "
+            f"{pin_path} (expected {expected}, got {actual}); it was changed "
+            f"without re-pinning - regenerate with scripts/refresh_model_prices.py"
+        )
+
+
+def _load_entries(path: Path) -> dict[str, ModelPrice]:
+    """Parse a pricing JSON file into a ``canonical-key -> ModelPrice`` dict.
+
+    Used for unpinned files (operator override layers); the pinned baseline
+    goes through `PricingTable.load`, which additionally verifies the hash.
+
+    Raises:
+        FileNotFoundError: if `path` does not exist.
+        ValueError: if the file is not valid JSON or an entry is missing a
+            required numeric field.
+    """
+    raw = _read_pricing_json(path)
+    return _entries_from_models(raw.get("models", {}), path)
 
 
 def _load_overrides(path: Path) -> dict[str, ModelPrice]:
