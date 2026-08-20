@@ -1,0 +1,49 @@
+name: refresh-model-prices
+
+# Keeps gatekeep/data/model_prices.json in sync with BerriAI/litellm's community
+# pricing dataset. Runs weekly (and on demand); opens a PR with the diff so a
+# human reviews every price change before it reaches the enforcement path,
+# rather than a stale table silently mispricing new models.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Refresh vendored pricing
+        run: python scripts/refresh_model_prices.py
+
+      - name: Open PR on change
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: refresh vendored model pricing from litellm"
+          title: "chore: refresh vendored model pricing"
+          branch: chore/refresh-model-prices
+          delete-branch: true
+          add-paths: |
+            gatekeep/data/model_prices.json
+            gatekeep/data/model_prices.sha256
+          body: |
+            Automated refresh of `gatekeep/data/model_prices.json` from
+            [BerriAI/litellm](https://github.com/BerriAI/litellm)'s pricing dataset.
+
+            Only `source: "litellm"` entries change; hand-maintained
+            `source: "local"` entries are preserved. The sibling
+            `model_prices.sha256` pin is regenerated to match - it is verified
+            fail-closed on load, so the two always travel together. Review the
+            price diff before merging - this file feeds the cost/budget
+            enforcement path.

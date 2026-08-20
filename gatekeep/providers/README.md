@@ -65,5 +65,6 @@ indistinguishable at this layer - both are reported as `end_turn`.
 
 Implement `base.py`'s interface, add the adapter to the `_PROVIDERS` registry in
 `gatekeep/app.py`, teach `resolve_route` how to reach it, and add its per-token
-pricing to `MODEL_PRICING` in `gatekeep/accounting.py` so cost accounting and
-cost-based routing stay correct.
+pricing to `gatekeep/data/model_prices.json` (or map it in
+`pricing._LITELLM_PROVIDER_MAP` if it's a LiteLLM-covered provider) so cost
+accounting and cost-based routing stay correct.

@@ -298,6 +298,26 @@ async def test_openai_prefixed_model_routes_to_openai_provider_response(client, 
     assert body["choices"][0]["message"]["content"] == "pong"
 
 
+async def test_unpriced_paid_model_is_rejected_before_the_provider_call(client, raw_key, session):
+    """The default `pricing_miss_policy` is "reject": a billed-provider model with
+    no configured price is refused with a 400 before any upstream call (issue
+    #25's fail-open hole), rather than served and billed at $0. `openai/` routes
+    straight to the openai provider, so an unknown model there is genuinely
+    unpriced."""
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "openai/gpt-nonexistent-9000",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    # Refused before the provider ran, so no RequestLog row was written.
+    assert (await session.execute(select(RequestLog))).first() is None
+
+
 async def test_streaming_completion(client, raw_key):
     async with client.stream(
         "POST",
@@ -587,7 +607,7 @@ async def budgeted_raw_key(session):
     but the second is rejected once the first request's full cost has been
     recorded. Budget is pooled at the account."""
     raw = generate_key()
-    one_call_cost = calculate_cost("gpt-4o", prompt_tokens=3, completion_tokens=1)
+    one_call_cost = calculate_cost("openai", "gpt-4o", prompt_tokens=3, completion_tokens=1)
     account = await create_account(session, monthly_budget_usd=one_call_cost / 2)
     session.add(ApiKey(name="b", key_hash=hash_key(raw), account_id=account.id))
     await session.commit()
@@ -1228,6 +1248,7 @@ async def test_client_disconnect_mid_stream_logs_failed_row(session, raw_key):
     state = {"started_at": time_module.perf_counter()}
     gen = app_module._sse(
         FakeProvider(),
+        "anthropic",
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
@@ -1272,6 +1293,7 @@ async def test_client_disconnect_via_aclose_logs_failed_row(session, raw_key):
     state = {"started_at": time_module.perf_counter()}
     gen = app_module._sse(
         FakeProvider(),
+        "anthropic",
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,
@@ -1307,6 +1329,7 @@ async def test_client_disconnect_before_first_token_has_null_duration(session, r
     state = {"started_at": time_module.perf_counter()}
     gen = app_module._sse(
         FakeProvider(),
+        "anthropic",
         {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "ping"}]},
         "claude-sonnet-5",
         key_id=key.id,

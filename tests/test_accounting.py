@@ -4,24 +4,51 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
+from gatekeep.accounting import (
+    calculate_cost,
+    enforce_pricing_policy,
+    estimate_tokens,
+    log_request,
+)
 from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.config import get_settings
 from gatekeep.models import ApiKey, RequestLog
 from tests.helpers import create_account, create_key
 
 
+@pytest.fixture
+def miss_policy(monkeypatch):
+    """Set `pricing_miss_policy` (and optionally the ceiling) for one test,
+    clearing the cached Settings before and after so the change is isolated."""
+
+    def _set(policy: str, *, ceiling: float | None = None) -> None:
+        monkeypatch.setenv("PRICING_MISS_POLICY", policy)
+        if ceiling is not None:
+            monkeypatch.setenv("PRICING_CEILING_PER_1M", str(ceiling))
+        get_settings.cache_clear()
+
+    get_settings.cache_clear()
+    yield _set
+    get_settings.cache_clear()
+
+
 def test_calculate_cost_known_model():
-    cost = calculate_cost("claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost(
+        "anthropic", "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
     assert cost == 12.0
 
 
 def test_calculate_cost_scales_linearly():
-    cost = calculate_cost("claude-sonnet-5", prompt_tokens=500_000, completion_tokens=0)
+    cost = calculate_cost(
+        "anthropic", "claude-sonnet-5", prompt_tokens=500_000, completion_tokens=0
+    )
     assert cost == 1.0
 
 
 def test_calculate_cost_haiku_alias_is_priced():
     cost = calculate_cost(
+        "anthropic",
         "claude-haiku-4-5-20251001",
         prompt_tokens=1_000_000,
         completion_tokens=1_000_000,
@@ -30,20 +57,88 @@ def test_calculate_cost_haiku_alias_is_priced():
 
 
 def test_calculate_cost_unknown_model_is_free():
-    cost = calculate_cost("llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost("ollama", "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost == 0.0
 
 
+def test_calculate_cost_unpriced_paid_model_is_zero_under_default_reject_policy():
+    """calculate_cost is numeric-only: under the default "reject" policy it still
+    returns $0 for an unpriced paid model (the request never reaches here, since
+    enforce_pricing_policy refuses it first)."""
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
+
+
+def test_calculate_cost_unpriced_paid_model_uses_ceiling_under_ceiling_policy(miss_policy):
+    miss_policy("ceiling", ceiling=100.0)
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 200.0  # $100/1M input + $100/1M output
+
+
+def test_calculate_cost_unpriced_ollama_model_is_free_even_under_ceiling(miss_policy):
+    """Ollama is never billed, so the ceiling policy must not touch it."""
+    miss_policy("ceiling", ceiling=100.0)
+    cost = calculate_cost("ollama", "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert cost == 0.0
+
+
+def test_calculate_cost_unpriced_paid_model_is_zero_under_alert_zero_policy(miss_policy):
+    miss_policy("alert_zero")
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
+
+
+# --- enforce_pricing_policy ---------------------------------------------------
+
+
+def test_enforce_pricing_policy_rejects_unpriced_paid_model_by_default(miss_policy):
+    miss_policy("reject")
+    rejection = enforce_pricing_policy("anthropic", "not-a-real-model")
+    assert rejection is not None
+    assert "not-a-real-model" in rejection
+
+
+def test_enforce_pricing_policy_allows_priced_model():
+    assert enforce_pricing_policy("anthropic", "claude-sonnet-5") is None
+
+
+def test_enforce_pricing_policy_never_rejects_ollama(miss_policy):
+    """Even under "reject", a self-hosted Ollama model is served."""
+    miss_policy("reject")
+    assert enforce_pricing_policy("ollama", "llama3-local") is None
+
+
+def test_enforce_pricing_policy_ceiling_and_alert_zero_do_not_reject(miss_policy):
+    miss_policy("ceiling", ceiling=100.0)
+    assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
+    miss_policy("alert_zero")
+    assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
+
+
 def test_calculate_cost_openai_gpt4o_is_priced():
-    cost = calculate_cost("gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    cost = calculate_cost("openai", "gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost > 0.0
 
 
 def test_calculate_cost_google_gemini_flash_is_priced():
     cost = calculate_cost(
-        "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
+        "google", "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
     )
     assert cost == 10.5
+
+
+def test_calculate_cost_is_provider_scoped():
+    """A model priced under one provider does not leak into another provider's lookup."""
+    cost = calculate_cost(
+        "openai", "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
 
 
 async def test_log_request_persists_row(session):
@@ -58,6 +153,7 @@ async def test_log_request_persists_row(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=100,
         completion_tokens=50,
@@ -66,11 +162,12 @@ async def test_log_request_persists_row(session):
 
     found = (await session.execute(select(RequestLog).where(RequestLog.id == log.id))).scalar_one()
     assert found.key_id == key.id
+    assert found.provider == "anthropic"
     assert found.model == "claude-sonnet-5"
     assert found.prompt_tokens == 100
     assert found.completion_tokens == 50
     assert found.total_tokens == 150
-    assert found.cost_usd == calculate_cost("claude-sonnet-5", 100, 50)
+    assert found.cost_usd == calculate_cost("anthropic", "claude-sonnet-5", 100, 50)
     assert found.cached is False
     assert found.cache_key is None
     assert found.response_id == "chatcmpl-abc"
@@ -87,6 +184,7 @@ async def test_log_request_stamps_account_id(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -109,6 +207,7 @@ async def test_log_request_can_record_cache_hit(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=0,
@@ -134,6 +233,7 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=0,
         completion_tokens=0,
@@ -144,7 +244,7 @@ async def test_log_request_cost_usd_override_is_used_instead_of_calculated_cost(
     )
 
     assert log.cost_usd == 0.0042
-    assert log.cost_usd != calculate_cost("claude-sonnet-5", 0, 0)
+    assert log.cost_usd != calculate_cost("anthropic", "claude-sonnet-5", 0, 0)
 
 
 async def test_log_request_records_latency_columns(session):
@@ -158,6 +258,7 @@ async def test_log_request_records_latency_columns(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -182,6 +283,7 @@ async def test_log_request_latency_columns_default_to_none(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=10,
         completion_tokens=5,
@@ -203,6 +305,7 @@ async def test_log_request_persists_path(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="openai",
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -224,6 +327,7 @@ async def test_log_request_path_defaults_to_none(session):
         session,
         key_id=key.id,
         account_id=account.id,
+        provider="openai",
         model="gpt-4o",
         prompt_tokens=10,
         completion_tokens=5,
@@ -267,6 +371,7 @@ async def test_log_request_defaults_outcome_to_ok(session, key_and_account_id):
         session,
         key_id=key_id,
         account_id=account_id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,
@@ -282,6 +387,7 @@ async def test_log_request_persists_explicit_outcome(session, key_and_account_id
         session,
         key_id=key_id,
         account_id=account_id,
+        provider="anthropic",
         model="claude-sonnet-5",
         prompt_tokens=1,
         completion_tokens=1,

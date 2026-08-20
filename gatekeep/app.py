@@ -23,7 +23,12 @@ from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
+from gatekeep.accounting import (
+    calculate_cost,
+    enforce_pricing_policy,
+    estimate_tokens,
+    log_request,
+)
 from gatekeep.api.anthropic_schemas import MessagesRequest
 from gatekeep.api.anthropic_translation import (
     content_block_delta_event,
@@ -91,6 +96,7 @@ from gatekeep.observability.metrics import (
     observe_request,
     requests_total,
 )
+from gatekeep.pricing import get_pricing_table
 from gatekeep.prompts import PromptNotFoundError, resolve_prompt_version_for_request
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
@@ -123,7 +129,7 @@ _STREAM_PATH = "stream"
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Warm the semantic-cache embedding model before serving traffic.
+    """Warm the embedding model and pricing table before serving traffic.
 
     `embed_text`'s underlying model loads lazily on first use, and on a
     container with no baked-in weights that first load downloads them from
@@ -131,8 +137,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     process doesn't report ready until it's paid, instead of stalling
     whichever request happens to arrive first (and every other request
     queued behind it on the event loop).
+
+    `get_pricing_table()` is also loaded eagerly for the same reason, but for
+    correctness rather than latency: it verifies the vendored pricing file
+    against its committed hash pin (see gatekeep.pricing), and that file is
+    the spend-enforcement table. A corrupted file or a stale pin must fail
+    the container at startup - loud and before it takes traffic - rather than
+    surface as a generic 500 on whichever request happens to be first to call
+    enforce_pricing_policy/calculate_cost.
     """
     await asyncio.to_thread(warm_embedding_model)
+    get_pricing_table()
     yield
 
 
@@ -216,6 +231,7 @@ async def _finish_request(
     session: AsyncSession,
     *,
     model: str,
+    provider: str,
     path: str,
     provider_ms: float | None,
     key_id: int,
@@ -245,6 +261,8 @@ async def _finish_request(
         request: The Starlette request carrying `state.started_at`.
         session: DB session to persist the `RequestLog` row through.
         model: Resolved model id, used as the metric label.
+        provider: Resolved upstream (`resolve_route`'s provider), passed
+            through to `log_request` for its pricing lookup.
         path: One of "cache_exact", "cache_semantic", "provider". Published
             as the metric label and stored on the RequestLog row from this
             one parameter, so the histogram and the column cannot diverge.
@@ -273,6 +291,7 @@ async def _finish_request(
         session,
         key_id=key_id,
         account_id=account_id,
+        provider=provider,
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -302,6 +321,7 @@ async def _finish_failed_request(
     session: AsyncSession,
     *,
     model: str,
+    provider: str,
     provider_started: float,
     key_id: int,
     account_id: int,
@@ -331,6 +351,8 @@ async def _finish_failed_request(
         request: The Starlette request carrying `state.started_at`.
         session: DB session to persist the `RequestLog` row through.
         model: Resolved model id, used as the metric label.
+        provider: Resolved upstream (`resolve_route`'s provider), passed
+            through to `log_request` for its pricing lookup.
         provider_started: `time.perf_counter()` value captured just before
             the provider call, used to compute `provider_ms`.
         key_id: The requesting API key's id.
@@ -361,6 +383,7 @@ async def _finish_failed_request(
             session,
             key_id=key_id,
             account_id=account_id,
+            provider=provider,
             model=model,
             prompt_tokens=0,
             completion_tokens=0,
@@ -505,11 +528,15 @@ async def chat_completions(
     routed_from = None
     if req.route_by_cost and req.prompt_name is not None:
         floor = req.quality_floor if req.quality_floor is not None else 0.0
-        chosen = await select_model(model, req.prompt_name, floor, session)
+        chosen = await select_model(provider_name, model, req.prompt_name, floor, session)
         if chosen != model:
             routed_from = model
             model = chosen
             payload["model"] = chosen
+
+    rejection = enforce_pricing_policy(provider_name, model)
+    if rejection is not None:
+        return openai_error(400, rejection, "invalid_request_error")
 
     requests_total.labels(model=model).inc()
     mark(request, model=model)
@@ -519,6 +546,7 @@ async def chat_completions(
         return StreamingResponse(
             _sse(
                 provider,
+                provider_name,
                 payload,
                 model,
                 key_id=key_id,
@@ -540,12 +568,15 @@ async def chat_completions(
         cached = None
     if cached is not None:
         cache_exact_hits.labels(model=model).inc()
-        cost_usd = calculate_cost(model, cached.usage.prompt_tokens, cached.usage.completion_tokens)
+        cost_usd = calculate_cost(
+            provider_name, model, cached.usage.prompt_tokens, cached.usage.completion_tokens
+        )
         cache_cost_saved_usd.inc(cost_usd)
         await _finish_request(
             request,
             session,
             model=model,
+            provider=provider_name,
             path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
@@ -583,6 +614,7 @@ async def chat_completions(
                 request,
                 session,
                 model=model,
+                provider=provider_name,
                 path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
@@ -610,6 +642,7 @@ async def chat_completions(
             request,
             session,
             model=model,
+            provider=provider_name,
             provider_started=provider_started,
             key_id=key_id,
             account_id=account_id,
@@ -641,7 +674,9 @@ async def chat_completions(
             embedding=embedding,
             response_text=response.choices[0].message.content or "",
             model=model,
-            cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+            cost_usd=calculate_cost(
+                provider_name, model, result.input_tokens, result.output_tokens
+            ),
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
         )
@@ -659,6 +694,7 @@ async def chat_completions(
         request,
         session,
         model=model,
+        provider=provider_name,
         path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
@@ -666,7 +702,7 @@ async def chat_completions(
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=response.id,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+        cost_usd=calculate_cost(provider_name, model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
@@ -724,11 +760,15 @@ async def messages(
     routed_from = None
     if req.route_by_cost and req.prompt_name is not None:
         floor = req.quality_floor if req.quality_floor is not None else 0.0
-        chosen = await select_model(model, req.prompt_name, floor, session)
+        chosen = await select_model(provider_name, model, req.prompt_name, floor, session)
         if chosen != model:
             routed_from = model
             model = chosen
             payload["model"] = chosen
+
+    rejection = enforce_pricing_policy(provider_name, model)
+    if rejection is not None:
+        return anthropic_error(400, rejection, "invalid_request_error")
 
     requests_total.labels(model=model).inc()
     mark(request, model=model)
@@ -738,6 +778,7 @@ async def messages(
         return StreamingResponse(
             _messages_sse(
                 provider,
+                provider_name,
                 payload,
                 model,
                 key_id=key_id,
@@ -759,12 +800,15 @@ async def messages(
         cached = None
     if cached is not None:
         cache_exact_hits.labels(model=model).inc()
-        cost_usd = calculate_cost(model, cached.usage.prompt_tokens, cached.usage.completion_tokens)
+        cost_usd = calculate_cost(
+            provider_name, model, cached.usage.prompt_tokens, cached.usage.completion_tokens
+        )
         cache_cost_saved_usd.inc(cost_usd)
         await _finish_request(
             request,
             session,
             model=model,
+            provider=provider_name,
             path=_CACHE_EXACT_PATH,
             provider_ms=None,
             key_id=key_id,
@@ -802,6 +846,7 @@ async def messages(
                 request,
                 session,
                 model=model,
+                provider=provider_name,
                 path=_CACHE_SEMANTIC_PATH,
                 provider_ms=None,
                 key_id=key_id,
@@ -829,6 +874,7 @@ async def messages(
             request,
             session,
             model=model,
+            provider=provider_name,
             provider_started=provider_started,
             key_id=key_id,
             account_id=account_id,
@@ -861,7 +907,9 @@ async def messages(
             embedding=embedding,
             response_text=messages_response.content[0].text,
             model=model,
-            cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+            cost_usd=calculate_cost(
+                provider_name, model, result.input_tokens, result.output_tokens
+            ),
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
         )
@@ -879,6 +927,7 @@ async def messages(
         request,
         session,
         model=model,
+        provider=provider_name,
         path=_PROVIDER_PATH,
         provider_ms=provider_ms,
         key_id=key_id,
@@ -886,7 +935,7 @@ async def messages(
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         response_id=messages_response.id,
-        cost_usd=calculate_cost(model, result.input_tokens, result.output_tokens),
+        cost_usd=calculate_cost(provider_name, model, result.input_tokens, result.output_tokens),
         prompt_name=req.prompt_name,
         routed_from=routed_from,
         prompt_version_num=served_prompt_version,
@@ -896,6 +945,7 @@ async def messages(
 
 async def _messages_sse(
     provider: _GatewayProvider,
+    provider_name: str,
     payload: dict,
     model: str,
     *,
@@ -907,6 +957,9 @@ async def _messages_sse(
     state: dict | None = None,
 ):
     """Stream a /v1/messages completion as Anthropic-style named Server-Sent Events.
+
+    `provider_name` is the resolved upstream (`resolve_route`'s provider),
+    passed through to `log_request`/`calculate_cost` for pricing.
 
     Emits message_start, content_block_start, a content_block_delta per text
     delta, content_block_stop, message_delta (carrying the authoritative
@@ -999,7 +1052,7 @@ async def _messages_sse(
     finally:
         # NEVER yield here - illegal during GeneratorExit.
         timings = timer.finish(succeeded=(outcome == "ok"))
-        cost_usd = calculate_cost(model, input_tokens, output_tokens)
+        cost_usd = calculate_cost(provider_name, model, input_tokens, output_tokens)
 
         async def _record() -> None:
             async with SessionLocal() as session:
@@ -1007,6 +1060,7 @@ async def _messages_sse(
                     session,
                     key_id=key_id,
                     account_id=account_id,
+                    provider=provider_name,
                     model=model,
                     prompt_tokens=input_tokens,
                     completion_tokens=output_tokens,
@@ -1105,6 +1159,7 @@ def _payload_text(payload: dict) -> str:
 
 async def _sse(
     provider: _GatewayProvider,
+    provider_name: str,
     payload: dict,
     model: str,
     *,
@@ -1116,6 +1171,9 @@ async def _sse(
     state: dict | None = None,
 ):
     """Stream a chat completion as OpenAI-style Server-Sent Events.
+
+    `provider_name` is the resolved upstream (`resolve_route`'s provider),
+    passed through to `log_request`/`calculate_cost` for pricing.
 
     Emits a role chunk, then a text chunk per delta, then a final chunk
     carrying the finish_reason. Accounting (`StreamTimer.finish`,
@@ -1218,7 +1276,7 @@ async def _sse(
     finally:
         # NEVER yield here - illegal during GeneratorExit.
         timings = timer.finish(succeeded=(outcome == "ok"))
-        cost_usd = calculate_cost(model, input_tokens, output_tokens)
+        cost_usd = calculate_cost(provider_name, model, input_tokens, output_tokens)
 
         async def _record() -> None:
             async with SessionLocal() as session:
@@ -1226,6 +1284,7 @@ async def _sse(
                     session,
                     key_id=key_id,
                     account_id=account_id,
+                    provider=provider_name,
                     model=model,
                     prompt_tokens=input_tokens,
                     completion_tokens=output_tokens,

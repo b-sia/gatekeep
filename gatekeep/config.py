@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,26 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     default_model: str = "claude-sonnet-5"
     default_max_tokens: int = 4096
+    # Optional path to an operator-supplied pricing override file (same
+    # {"models": {"<provider>/<model>": {...}}} shape as the vendored
+    # gatekeep/data/model_prices.json). Entries here win over the vendored
+    # baseline, letting an operator price preview/self-hosted models no public
+    # dataset covers. None (default) means baseline-only. See gatekeep/pricing.py.
+    pricing_overrides_path: str | None = None
+    # What to do with a request whose resolved model has no configured price on
+    # a billed provider (anthropic/openai/google). Ollama is self-hosted and
+    # genuinely free, so this never applies to it.
+    #   "reject" (default): refuse the request with a 400 before the upstream
+    #       call - a model gatekeep cannot price is a model it cannot govern.
+    #   "ceiling": serve it, but bill it at `pricing_ceiling_per_1m` so budgets
+    #       clamp down rather than open up, and emit an alert.
+    #   "alert_zero": serve it at $0 (the old fail-open behavior) but emit an
+    #       alert so the gap is at least visible.
+    # See gatekeep/accounting.enforce_pricing_policy.
+    pricing_miss_policy: Literal["reject", "ceiling", "alert_zero"] = "reject"
+    # Per-1M-token USD price charged to an unpriced billed-provider model when
+    # `pricing_miss_policy` is "ceiling" (applied to both input and output).
+    pricing_ceiling_per_1m: float = 100.0
     model_aliases: dict[str, str] = Field(
         default_factory=lambda: {
             "gpt-4": "claude-sonnet-5",

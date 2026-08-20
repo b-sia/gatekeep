@@ -70,6 +70,18 @@ budget_alerts_total = Counter(
     ["threshold"],
 )
 
+# Requests whose resolved model has no configured price on a billed provider,
+# by the `pricing_miss_policy` outcome applied ('rejected', 'ceiling', or
+# 'served_zero'). Deliberately NOT labeled by model: an unpriced model id is
+# attacker-controllable, and a model label here would let a client explode this
+# counter's cardinality. The specific model name is logged instead, so an
+# operator still knows what to add to the pricing table.
+unpriced_model_total = Counter(
+    "gatekeep_unpriced_model_total",
+    "Requests for a model with no configured pricing on a billed provider, by policy outcome.",
+    ["provider", "outcome"],
+)
+
 
 def observe_request(
     model: str, prompt_tokens: int, completion_tokens: int, cost_usd: float
