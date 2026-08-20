@@ -9,6 +9,8 @@ from gatekeep.pricing import (
     ModelPrice,
     PricingTable,
     get_pricing_table,
+    is_billed_provider,
+    is_unpriced,
     transform_litellm,
 )
 
@@ -47,6 +49,30 @@ def test_current_models_are_hand_maintained_local_entries():
     table = PricingTable.load()
     for model, (provider, _, _) in _CURRENT_MODELS.items():
         assert table.lookup(provider, model).source == "local"
+
+
+# --- billed-provider / unpriced classification --------------------------------
+
+
+def test_is_billed_provider():
+    assert is_billed_provider("anthropic")
+    assert is_billed_provider("openai")
+    assert is_billed_provider("google")
+    assert not is_billed_provider("ollama")
+
+
+def test_is_unpriced_true_for_paid_provider_miss():
+    assert is_unpriced("anthropic", "not-a-real-model") is True
+
+
+def test_is_unpriced_false_for_priced_model():
+    assert is_unpriced("anthropic", "claude-sonnet-5") is False
+
+
+def test_is_unpriced_false_for_any_ollama_model():
+    """A self-hosted Ollama model is never billed, so an absent price is
+    expected, not a governance gap."""
+    assert is_unpriced("ollama", "llama3-totally-local") is False
 
 
 # --- lookup semantics --------------------------------------------------------

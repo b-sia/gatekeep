@@ -5,12 +5,19 @@ import logging
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from gatekeep.config import get_settings
 from gatekeep.middleware.budget import record_spend
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import RequestLog
-from gatekeep.pricing import get_pricing_table
+from gatekeep.observability.metrics import unpriced_model_total
+from gatekeep.pricing import BILLED_PROVIDERS, get_pricing_table, is_unpriced
 
 logger = logging.getLogger(__name__)
+
+# Maps a `pricing_miss_policy` value to the `unpriced_model_total` outcome label
+# it produces. Kept beside the policy logic so the metric vocabulary and the
+# setting's Literal cannot drift apart.
+_MISS_OUTCOME = {"reject": "rejected", "ceiling": "ceiling", "alert_zero": "served_zero"}
 
 
 def estimate_tokens(text: str) -> int:
@@ -41,15 +48,89 @@ def calculate_cost(provider: str, model: str, prompt_tokens: int, completion_tok
 
     Looks up per-million-token input/output pricing via `pricing.get_pricing_table`
     (the vendored + operator-override pricing dataset, keyed by
-    ``"<provider>/<model>"``); a model with no listed pricing (e.g. a local
-    Ollama model, or a paid-provider model absent from the dataset) is
-    treated as free. `provider`/`model` are exactly what `resolve_route`
-    returns.
+    ``"<provider>/<model>"``). `provider`/`model` are exactly what
+    `resolve_route` returns.
+
+    On a pricing miss the result depends on the provider and the configured
+    `pricing_miss_policy`:
+
+    - A non-billed provider (Ollama) is always $0 - self-hosted models are
+      genuinely free.
+    - A billed provider under the "ceiling" policy is charged
+      `pricing_ceiling_per_1m` on both input and output, so an unpriced model
+      pushes budgets down rather than escaping them.
+    - A billed provider under any other policy is $0. Under "reject" that case
+      is unreachable on the request path (`enforce_pricing_policy` refuses it
+      before this is called); under "alert_zero" the $0 is intentional.
+
+    This function only computes the number; it neither raises nor emits the
+    miss metric/alert - that is `enforce_pricing_policy`'s job, run once per
+    request so repeated `calculate_cost` calls for one request can't
+    double-count.
     """
     price = get_pricing_table().lookup(provider, model)
-    if price is None:
-        return 0.0
-    return price.cost(prompt_tokens, completion_tokens)
+    if price is not None:
+        return price.cost(prompt_tokens, completion_tokens)
+    settings = get_settings()
+    if provider in BILLED_PROVIDERS and settings.pricing_miss_policy == "ceiling":
+        ceiling = settings.pricing_ceiling_per_1m
+        return (prompt_tokens / 1_000_000 * ceiling) + (completion_tokens / 1_000_000 * ceiling)
+    return 0.0
+
+
+def enforce_pricing_policy(provider: str, model: str) -> str | None:
+    """Apply `pricing_miss_policy` to one request, once, and decide whether to reject it.
+
+    Called on the request path after the provider/model are resolved (and after
+    any cost-based routing substitution), before the upstream call. For a model
+    that `is_unpriced` on a billed provider it records the `unpriced_model_total`
+    metric and logs, then:
+
+    - "reject": returns a client-facing error message; the caller turns it into
+      a 400 and never makes the upstream call. A model gatekeep cannot price is
+      one it will not serve.
+    - "ceiling" / "alert_zero": returns None (the request proceeds);
+      `calculate_cost` then prices it at the ceiling or at $0 respectively.
+
+    Returns None (proceed) for any priced model and for every Ollama model.
+    Emitting the metric/alert here - rather than inside `calculate_cost`, which
+    runs several times per request - is what keeps one unpriced request counted
+    exactly once.
+    """
+    if not is_unpriced(provider, model):
+        return None
+    settings = get_settings()
+    policy = settings.pricing_miss_policy
+    unpriced_model_total.labels(provider=provider, outcome=_MISS_OUTCOME[policy]).inc()
+    if policy == "reject":
+        logger.warning(
+            "Rejecting request for unpriced model %r on billed provider %r "
+            "(pricing_miss_policy='reject').",
+            model,
+            provider,
+        )
+        return (
+            f"Model {model!r} has no configured pricing and will not be served "
+            "(pricing_miss_policy='reject'). Add it to the pricing table "
+            "(gatekeep/data/model_prices.json or a pricing_overrides_path file), "
+            "or set pricing_miss_policy to 'ceiling' or 'alert_zero'."
+        )
+    if policy == "ceiling":
+        logger.warning(
+            "Serving unpriced model %r on billed provider %r at the ceiling price "
+            "$%.2f/1M (pricing_miss_policy='ceiling').",
+            model,
+            provider,
+            settings.pricing_ceiling_per_1m,
+        )
+        return None
+    logger.warning(
+        "Serving unpriced model %r on billed provider %r at $0 "
+        "(pricing_miss_policy='alert_zero'); its spend is not being tracked.",
+        model,
+        provider,
+    )
+    return None
 
 
 async def log_request(

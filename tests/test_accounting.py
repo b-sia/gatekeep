@@ -4,10 +4,32 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
+from gatekeep.accounting import (
+    calculate_cost,
+    enforce_pricing_policy,
+    estimate_tokens,
+    log_request,
+)
 from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.config import get_settings
 from gatekeep.models import ApiKey, RequestLog
 from tests.helpers import create_account, create_key
+
+
+@pytest.fixture
+def miss_policy(monkeypatch):
+    """Set `pricing_miss_policy` (and optionally the ceiling) for one test,
+    clearing the cached Settings before and after so the change is isolated."""
+
+    def _set(policy: str, *, ceiling: float | None = None) -> None:
+        monkeypatch.setenv("PRICING_MISS_POLICY", policy)
+        if ceiling is not None:
+            monkeypatch.setenv("PRICING_CEILING_PER_1M", str(ceiling))
+        get_settings.cache_clear()
+
+    get_settings.cache_clear()
+    yield _set
+    get_settings.cache_clear()
 
 
 def test_calculate_cost_known_model():
@@ -39,13 +61,64 @@ def test_calculate_cost_unknown_model_is_free():
     assert cost == 0.0
 
 
-def test_calculate_cost_unpriced_model_on_a_paid_provider_is_free():
-    """No fail-closed policy exists yet (see issue #25); an unpriced paid-provider
-    model still costs $0 today - just from a JSON miss rather than a dict miss."""
+def test_calculate_cost_unpriced_paid_model_is_zero_under_default_reject_policy():
+    """calculate_cost is numeric-only: under the default "reject" policy it still
+    returns $0 for an unpriced paid model (the request never reaches here, since
+    enforce_pricing_policy refuses it first)."""
     cost = calculate_cost(
         "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
     )
     assert cost == 0.0
+
+
+def test_calculate_cost_unpriced_paid_model_uses_ceiling_under_ceiling_policy(miss_policy):
+    miss_policy("ceiling", ceiling=100.0)
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 200.0  # $100/1M input + $100/1M output
+
+
+def test_calculate_cost_unpriced_ollama_model_is_free_even_under_ceiling(miss_policy):
+    """Ollama is never billed, so the ceiling policy must not touch it."""
+    miss_policy("ceiling", ceiling=100.0)
+    cost = calculate_cost("ollama", "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert cost == 0.0
+
+
+def test_calculate_cost_unpriced_paid_model_is_zero_under_alert_zero_policy(miss_policy):
+    miss_policy("alert_zero")
+    cost = calculate_cost(
+        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
+
+
+# --- enforce_pricing_policy ---------------------------------------------------
+
+
+def test_enforce_pricing_policy_rejects_unpriced_paid_model_by_default(miss_policy):
+    miss_policy("reject")
+    rejection = enforce_pricing_policy("anthropic", "not-a-real-model")
+    assert rejection is not None
+    assert "not-a-real-model" in rejection
+
+
+def test_enforce_pricing_policy_allows_priced_model():
+    assert enforce_pricing_policy("anthropic", "claude-sonnet-5") is None
+
+
+def test_enforce_pricing_policy_never_rejects_ollama(miss_policy):
+    """Even under "reject", a self-hosted Ollama model is served."""
+    miss_policy("reject")
+    assert enforce_pricing_policy("ollama", "llama3-local") is None
+
+
+def test_enforce_pricing_policy_ceiling_and_alert_zero_do_not_reject(miss_policy):
+    miss_policy("ceiling", ceiling=100.0)
+    assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
+    miss_policy("alert_zero")
+    assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
 
 
 def test_calculate_cost_openai_gpt4o_is_priced():

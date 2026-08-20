@@ -298,6 +298,26 @@ async def test_openai_prefixed_model_routes_to_openai_provider_response(client, 
     assert body["choices"][0]["message"]["content"] == "pong"
 
 
+async def test_unpriced_paid_model_is_rejected_before_the_provider_call(client, raw_key, session):
+    """The default `pricing_miss_policy` is "reject": a billed-provider model with
+    no configured price is refused with a 400 before any upstream call (issue
+    #25's fail-open hole), rather than served and billed at $0. `openai/` routes
+    straight to the openai provider, so an unknown model there is genuinely
+    unpriced."""
+    r = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "model": "openai/gpt-nonexistent-9000",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    # Refused before the provider ran, so no RequestLog row was written.
+    assert (await session.execute(select(RequestLog))).first() is None
+
+
 async def test_streaming_completion(client, raw_key):
     async with client.stream(
         "POST",

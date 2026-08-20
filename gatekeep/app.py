@@ -23,7 +23,12 @@ from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from gatekeep.accounting import calculate_cost, estimate_tokens, log_request
+from gatekeep.accounting import (
+    calculate_cost,
+    enforce_pricing_policy,
+    estimate_tokens,
+    log_request,
+)
 from gatekeep.api.anthropic_schemas import MessagesRequest
 from gatekeep.api.anthropic_translation import (
     content_block_delta_event,
@@ -519,6 +524,10 @@ async def chat_completions(
             model = chosen
             payload["model"] = chosen
 
+    rejection = enforce_pricing_policy(provider_name, model)
+    if rejection is not None:
+        return openai_error(400, rejection, "invalid_request_error")
+
     requests_total.labels(model=model).inc()
     mark(request, model=model)
 
@@ -746,6 +755,10 @@ async def messages(
             routed_from = model
             model = chosen
             payload["model"] = chosen
+
+    rejection = enforce_pricing_policy(provider_name, model)
+    if rejection is not None:
+        return anthropic_error(400, rejection, "invalid_request_error")
 
     requests_total.labels(model=model).inc()
     mark(request, model=model)

@@ -32,9 +32,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-# The four providers `resolve_route` can return. Only these three are billed
-# (ollama is self-hosted and genuinely free), so pricing only ever covers them.
-_BILLED_PROVIDERS = ("anthropic", "openai", "google")
+# Of the four providers `resolve_route` can return, only these three are billed
+# (ollama is self-hosted and genuinely free), so pricing only ever covers them -
+# and the miss policy (issue #25) only ever governs them.
+BILLED_PROVIDERS = frozenset({"anthropic", "openai", "google"})
 
 # Maps a LiteLLM `litellm_provider` value onto one of our provider names. Only
 # clean, unambiguous provider names are mapped; Vertex/Bedrock/Azure re-hosts
@@ -188,6 +189,25 @@ def _load_overrides(path: Path) -> dict[str, ModelPrice]:
         key: ModelPrice(price.input_per_1m, price.output_per_1m, source="override")
         for key, price in entries.items()
     }
+
+
+def is_billed_provider(provider: str) -> bool:
+    """Return whether `provider` is one gatekeep pays an upstream for.
+
+    Ollama is self-hosted and free, so it is never billed - and an unpriced
+    Ollama model is expected, not a governance gap.
+    """
+    return provider in BILLED_PROVIDERS
+
+
+def is_unpriced(provider: str, model: str) -> bool:
+    """Return whether a (provider, model) is on a billed provider yet has no price.
+
+    False for any Ollama model (never billed) and for any model the pricing
+    table covers. True only for the case the miss policy exists to govern: a
+    request that will cost real money upstream but that gatekeep cannot price.
+    """
+    return is_billed_provider(provider) and get_pricing_table().lookup(provider, model) is None
 
 
 @lru_cache
