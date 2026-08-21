@@ -38,6 +38,11 @@ interface DashboardPageProps {
    * shown - those routes are fleet-wide and gated to operators (see
    * `gatekeep/api/dashboard.py`), so a non-operator would only get 403s. */
   me: MeResponse | null;
+  /** Set when the initial GET /me failed for a reason other than 401
+   * (5xx, network error), so the operator-only section can offer a retry
+   * instead of silently staying hidden forever. */
+  meError: string | null;
+  onRetryMe: () => void;
   /** Called when any dashboard API call comes back 401, so the app can drop
    * back to the API key entry screen and clear the stale stored key. */
   onUnauthorized: () => void;
@@ -50,7 +55,7 @@ interface DashboardPageProps {
  * filters, stat cards, charts, breakdowns, and - for operators - prompts and
  * eval history).
  */
-export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps) {
+export default function DashboardPage({ me, meError, onRetryMe, onUnauthorized }: DashboardPageProps) {
   const isOperator = me?.is_operator ?? false;
   const [filters, setFilters] = useState<DashboardFilters>({
     rangeDays: 7,
@@ -67,50 +72,62 @@ export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps
   const [prompts, setPrompts] = useState<PromptOut[]>([]);
   const { error, setError, handleError } = useApiErrorHandler(onUnauthorized);
 
+  // Per-tenant usage/latency data doesn't depend on operator status at all
+  // (see `gatekeep/api/dashboard.py`), so it's fetched independently of
+  // `me`/`isOperator` - it shouldn't wait on, or be blanked by a failure of,
+  // the unrelated GET /me call.
   const load = useCallback(async () => {
     setError(null);
     const end = new Date();
     const start = new Date(end.getTime() - filters.rangeDays * 24 * 60 * 60 * 1000);
     const windowParams = { start: start.toISOString(), end: end.toISOString() };
     try {
-      // Prompt/eval data is fleet-wide and operator-only on the backend, so
-      // a non-operator would only get 403s - skip those two fetches entirely
-      // for them rather than failing the whole batch (`Promise.all` rejects
-      // on the first rejection, which would blank the usage/latency panels
-      // they *are* allowed to see).
-      const [summaryRes, timeseriesRes, byModelRes, latencyRes, latencySeriesRes, evalsRes, promptsRes] =
-        await Promise.all([
-          getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
-          getUsageTimeseries({
-            ...windowParams,
-            interval: filters.interval,
-            model: filters.model ?? undefined,
-          }),
-          getUsageTimeseriesByModel({
-            ...windowParams,
-            interval: filters.interval,
-            model: filters.model ?? undefined,
-          }),
-          getLatencySummary({ ...windowParams, model: filters.model ?? undefined }),
-          getLatencyTimeseries({
-            ...windowParams,
-            interval: filters.interval,
-            model: filters.model ?? undefined,
-          }),
-          isOperator ? getEvalHistory() : Promise.resolve(null),
-          isOperator ? getPrompts() : Promise.resolve(null),
-        ]);
+      const [summaryRes, timeseriesRes, byModelRes, latencyRes, latencySeriesRes] = await Promise.all([
+        getUsageSummary({ ...windowParams, model: filters.model ?? undefined }),
+        getUsageTimeseries({
+          ...windowParams,
+          interval: filters.interval,
+          model: filters.model ?? undefined,
+        }),
+        getUsageTimeseriesByModel({
+          ...windowParams,
+          interval: filters.interval,
+          model: filters.model ?? undefined,
+        }),
+        getLatencySummary({ ...windowParams, model: filters.model ?? undefined }),
+        getLatencyTimeseries({
+          ...windowParams,
+          interval: filters.interval,
+          model: filters.model ?? undefined,
+        }),
+      ]);
       setSummary(summaryRes);
       setTimeseries(timeseriesRes);
       setByModel(byModelRes);
       setLatency(latencyRes);
       setLatencySeries(latencySeriesRes);
-      setRuns(evalsRes?.runs ?? []);
-      setPrompts(promptsRes?.prompts ?? []);
     } catch (err) {
       handleError(err, "Failed to load dashboard data");
     }
-  }, [filters, isOperator, setError, handleError]);
+  }, [filters, setError, handleError]);
+
+  // Prompt/eval data is fleet-wide and operator-only on the backend, so a
+  // non-operator would only get 403s - this only fires once `me` has
+  // resolved with `is_operator: true`, and is fully independent of `load()`
+  // above so it never duplicates the per-tenant fetches.
+  const loadOperatorData = useCallback(async () => {
+    try {
+      const [evalsRes, promptsRes] = await Promise.all([getEvalHistory(), getPrompts()]);
+      setRuns(evalsRes.runs);
+      setPrompts(promptsRes.prompts);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      handleError(err, "Failed to load operator data");
+    }
+  }, [handleError, onUnauthorized]);
 
   // Fetch the model list from an *unfiltered* summary (no `model` param) so
   // the dropdown always lists every model seen in the current time window,
@@ -134,19 +151,17 @@ export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps
   }, [filters.rangeDays, onUnauthorized]);
 
   useEffect(() => {
-    // `isOperator` (and so `load`'s identity) starts as `false` until GET
-    // /me resolves, then may flip to `true` for an operator account.
-    // Waiting for `me` here avoids firing `load()` once with the wrong
-    // (default-false) `isOperator` and again when it flips - which would
-    // otherwise duplicate every usage/latency fetch on each operator page
-    // load.
-    if (!me) return;
     load();
-  }, [load, me]);
+  }, [load]);
 
   useEffect(() => {
     loadAllModels();
   }, [loadAllModels]);
+
+  useEffect(() => {
+    if (!isOperator) return;
+    loadOperatorData();
+  }, [isOperator, loadOperatorData]);
 
   return (
     <div>
@@ -175,6 +190,17 @@ export default function DashboardPage({ me, onUnauthorized }: DashboardPageProps
           <PromptsPanel prompts={prompts} onUnauthorized={onUnauthorized} />
           <EvalHistoryPanel runs={runs} />
         </>
+      )}
+      {!me && meError && (
+        <div className="mx-6 mt-4 flex items-center justify-between rounded-lg border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-300">
+          <span>Couldn't determine operator status - {meError}</span>
+          <button
+            onClick={onRetryMe}
+            className="rounded border border-red-800 px-3 py-1 text-xs text-red-200 hover:bg-red-900"
+          >
+            Retry
+          </button>
+        </div>
       )}
     </div>
   );

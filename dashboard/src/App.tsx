@@ -82,7 +82,12 @@ export default function App() {
         onLogout={handleUnauthorized}
       />
       {tab === "analytics" ? (
-        <DashboardPage me={me} onUnauthorized={handleUnauthorized} />
+        <DashboardPage
+          me={me}
+          meError={meError}
+          onRetryMe={loadMe}
+          onUnauthorized={handleUnauthorized}
+        />
       ) : (
         <ManagementPage
           me={me}
