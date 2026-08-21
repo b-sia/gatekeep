@@ -555,7 +555,7 @@ async def test_usage_timeseries_by_model_groups_by_bucket_and_model(client, raw_
 
 
 async def test_evals_history_returns_runs_newest_first_and_filters_by_prompt(
-    client, raw_key, session
+    client, operator_key, session
 ):
     await create_prompt("dash-prompt-a", "template a", session)
     suite_a = await create_suite("dash-prompt-a", session, pass_threshold=0.5)
@@ -610,7 +610,7 @@ async def test_evals_history_returns_runs_newest_first_and_filters_by_prompt(
 
     r = await client.get(
         "/dashboard/api/evals",
-        headers={"Authorization": f"Bearer {raw_key}"},
+        headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert r.status_code == 200
     body = r.json()
@@ -620,7 +620,7 @@ async def test_evals_history_returns_runs_newest_first_and_filters_by_prompt(
 
     r2 = await client.get(
         "/dashboard/api/evals",
-        headers={"Authorization": f"Bearer {raw_key}"},
+        headers={"Authorization": f"Bearer {operator_key}"},
         params={"prompt_name": "dash-prompt-a"},
     )
     body2 = r2.json()
@@ -634,14 +634,14 @@ async def test_evals_history_returns_runs_newest_first_and_filters_by_prompt(
 # -- prompts ----------------------------------------------------------------
 
 
-async def test_prompts_list_returns_active_version_num(client, raw_key, session):
+async def test_prompts_list_returns_active_version_num(client, operator_key, session):
     await create_prompt("dash-list-prompt", "v1 text", session)
     await add_prompt_version("dash-list-prompt", "v2 text", session)
     await promote_prompt("dash-list-prompt", 2, session)
 
     r = await client.get(
         "/dashboard/api/prompts",
-        headers={"Authorization": f"Bearer {raw_key}"},
+        headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert r.status_code == 200
     body = r.json()
@@ -649,7 +649,7 @@ async def test_prompts_list_returns_active_version_num(client, raw_key, session)
     assert row["active_version_num"] == 2
 
 
-async def test_prompt_versions_timeline_ordered_with_active_flag(client, raw_key, session):
+async def test_prompt_versions_timeline_ordered_with_active_flag(client, operator_key, session):
     await create_prompt("dash-timeline-prompt", "v1 text", session, created_by="alice")
     await add_prompt_version(
         "dash-timeline-prompt", "v2 text", session, created_by="bob", notes="tweak"
@@ -658,7 +658,7 @@ async def test_prompt_versions_timeline_ordered_with_active_flag(client, raw_key
 
     r = await client.get(
         "/dashboard/api/prompts/dash-timeline-prompt/versions",
-        headers={"Authorization": f"Bearer {raw_key}"},
+        headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert r.status_code == 200
     body = r.json()
@@ -670,12 +670,45 @@ async def test_prompt_versions_timeline_ordered_with_active_flag(client, raw_key
     assert versions[1]["notes"] == "tweak"
 
 
-async def test_prompt_versions_timeline_404_for_unknown_prompt(client, raw_key):
+async def test_prompt_versions_timeline_404_for_unknown_prompt(client, operator_key):
     r = await client.get(
         "/dashboard/api/prompts/does-not-exist/versions",
-        headers={"Authorization": f"Bearer {raw_key}"},
+        headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert r.status_code == 404
+
+
+# -- prompt/eval routes are operator-only ------------------------------------
+# Prompt, PromptVersion, EvalSuite and EvalRun are fleet-wide rows with no
+# account_id (see gatekeep/models.py and issue #28): prompt names, authorship,
+# and quality-eval trends are shared across the fleet by design. The dashboard
+# views over them are therefore gated to operators, matching the /accounts
+# management routes, so a non-operator tenant cannot browse another team's
+# prompts/evals.
+
+
+async def test_evals_history_forbidden_for_non_operator(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/evals",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 403
+
+
+async def test_prompts_list_forbidden_for_non_operator(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 403
+
+
+async def test_prompt_versions_timeline_forbidden_for_non_operator(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/prompts/anything/versions",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 403
 
 
 # -- dashboard SPA fallback ---------------------------------------------

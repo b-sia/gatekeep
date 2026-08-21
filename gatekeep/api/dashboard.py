@@ -28,6 +28,20 @@ from gatekeep.prompts import PromptNotFoundError, _get_prompt_row
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
+# Prompt/eval routes are operator-only, by design (see issue #28).
+#
+# `Prompt`, `PromptVersion`, `EvalSuite` and `EvalRun` are fleet-wide rows:
+# they carry no `account_id`, prompt names are globally unique, and prompt
+# mutation is CLI-only (there is no per-tenant prompt registry, nor an HTTP
+# write path). Because there is no tenant to scope them to, the dashboard's
+# read views over them (`/evals`, `/prompts`, `/prompts/{name}/versions`)
+# would otherwise expose every team's prompt names, authorship, notes, and
+# eval trends to any authenticated tenant. Rather than adding per-tenant
+# ownership to a deliberately fleet-wide model, these three routes are gated
+# to operators via `require_operator`, matching the `/accounts` management
+# routes. The usage/latency routes stay per-tenant (`_account_scope`) because
+# their underlying rows (`RequestLog`) do carry `account_id`.
+
 _NO_PROMPT_LABEL = "(none)"
 _FAILED_OUTCOMES = ("provider_error", "client_disconnect")
 
@@ -1051,13 +1065,17 @@ async def eval_history(
     prompt_name: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    _operator: Account = Depends(require_operator),
 ) -> EvalHistoryResponse:
     """Return eval run history (score/pass-fail trend), newest first.
 
     Optionally filtered to a single prompt's suite via `prompt_name`.
-    `limit` caps the number of runs returned (default 50, max 500). Requires
-    a valid API key (`require_api_key`).
+    `limit` caps the number of runs returned (default 50, max 500).
+
+    Eval runs are fleet-wide (`EvalSuite`/`EvalRun` carry no `account_id`),
+    so this view is gated to operators (`require_operator`) to avoid leaking
+    one team's eval trends to another tenant. See the module note on the
+    prompt/eval routes.
     """
     query = (
         select(EvalRun, EvalSuite.prompt_name, PromptVersion.version_num)
@@ -1105,10 +1123,14 @@ class PromptListResponse(BaseModel):
 @router.get("/prompts", response_model=PromptListResponse)
 async def list_prompts_dashboard(
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    _operator: Account = Depends(require_operator),
 ) -> PromptListResponse:
     """List every registered prompt with its active version number, for the
-    dashboard's prompt picker. Requires a valid API key (`require_api_key`)."""
+    dashboard's prompt picker.
+
+    Prompts are fleet-wide (`Prompt` carries no `account_id`), so this view
+    is gated to operators (`require_operator`). See the module note on the
+    prompt/eval routes."""
     active_version = PromptVersion.__table__.alias("active_version")
     rows = (
         await session.execute(
@@ -1155,13 +1177,15 @@ class PromptVersionTimelineResponse(BaseModel):
 async def prompt_version_timeline(
     name: str,
     session: AsyncSession = Depends(get_session),
-    _caller: ApiKey = Depends(require_api_key),
+    _operator: Account = Depends(require_operator),
 ) -> PromptVersionTimelineResponse:
     """Return `name`'s full version timeline (creation time, author, notes,
     and which version is currently active), ordered oldest-to-newest.
 
-    Raises a 404 if no prompt is registered under `name`. Requires a valid
-    API key (`require_api_key`).
+    Raises a 404 if no prompt is registered under `name`. Prompt version
+    history (including author identity and free-text notes) is fleet-wide, so
+    this view is gated to operators (`require_operator`). See the module note
+    on the prompt/eval routes.
     """
     try:
         prompt = await _get_prompt_row(name, session)
