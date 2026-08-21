@@ -6,7 +6,7 @@ import logging
 import pathlib
 import time
 from collections.abc import AsyncIterator, Coroutine
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import ollama
@@ -66,7 +66,7 @@ from gatekeep.config import get_settings
 from gatekeep.db import SessionLocal, get_session
 from gatekeep.embeddings import embed_text_async
 from gatekeep.embeddings import warm as warm_embedding_model
-from gatekeep.middleware.budget import require_budget
+from gatekeep.middleware.budget import require_budget, run_budget_reconciliation_loop
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
@@ -145,10 +145,29 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     the container at startup - loud and before it takes traffic - rather than
     surface as a generic 500 on whichever request happens to be first to call
     enforce_pricing_policy/calculate_cost.
+
+    Also starts the budget-reconciliation background task (see
+    `gatekeep.middleware.budget.run_budget_reconciliation_loop`), which
+    periodically overwrites every account's Redis spend counter with a
+    fresh DB aggregate so a dropped `record_spend` increment or float
+    drift doesn't under-enforce budgets for the rest of the billing
+    period (issue #27). Cancelled on shutdown along with everything else.
     """
     await asyncio.to_thread(warm_embedding_model)
     get_pricing_table()
-    yield
+    reconciliation_task = asyncio.create_task(
+        run_budget_reconciliation_loop(
+            SessionLocal,
+            get_redis(),
+            interval_seconds=get_settings().budget_reconcile_interval_seconds,
+        )
+    )
+    try:
+        yield
+    finally:
+        reconciliation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reconciliation_task
 
 
 app = FastAPI(title="gatekeep", lifespan=_lifespan)

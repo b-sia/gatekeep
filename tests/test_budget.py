@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import HTTPException
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -9,8 +11,10 @@ from gatekeep.middleware.budget import (
     check_budget,
     get_period_spend,
     get_period_spend_batch,
+    reconcile_period_spend,
     record_spend,
     require_budget,
+    run_budget_reconciliation_loop,
 )
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import Account, ApiKey
@@ -177,6 +181,68 @@ async def test_get_period_spend_excludes_cached_requests_on_db_fallback(session)
     assert spent == pytest.approx(1.0)
 
 
+async def test_stale_redis_counter_is_trusted_forever_without_reconciliation(session):
+    """Reproduces issue #27: a present-but-wrong Redis counter never
+    self-heals, because get_period_spend's DB fallback only triggers on a
+    cache miss, not on staleness. Simulates a dropped record_spend
+    increment (e.g. a transient Redis blip during log_request) by directly
+    overwriting the Redis counter to $0 after the DB row is committed, then
+    shows get_period_spend keeps trusting that wrong value indefinitely.
+    """
+    from gatekeep.middleware import budget as budget_module
+
+    account, key = await _make_account_and_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        account_id=account.id,
+        provider="anthropic",
+        model="claude-sonnet-5",
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        response_id="r1",
+    )
+    redis = get_redis()
+    # Simulate the record_spend increment for this request being lost: the
+    # counter reflects $0 spent instead of the true $2.00 in request_logs.
+    redis_key = budget_module._spend_redis_key(account.id, budget_module._current_period())
+    await redis.set(redis_key, 0.0)
+
+    spent = await get_period_spend(session, redis, account_id=account.id)
+    assert spent == pytest.approx(0.0)  # wrong - the DB truth is $2.00
+
+
+async def test_reconcile_period_spend_overwrites_stale_redis_counter(session):
+    """reconcile_period_spend must fix the drift the test above exposes:
+    it recomputes every account's spend from request_logs and overwrites
+    the Redis counter unconditionally, healing a stale-but-present key.
+    """
+    from gatekeep.middleware import budget as budget_module
+
+    account, key = await _make_account_and_key(session)
+    other_account, _other_key = await _make_account_and_key(session)
+    await log_request(
+        session,
+        key_id=key.id,
+        account_id=account.id,
+        provider="anthropic",
+        model="claude-sonnet-5",
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        response_id="r1",
+    )
+    redis = get_redis()
+    redis_key = budget_module._spend_redis_key(account.id, budget_module._current_period())
+    await redis.set(redis_key, 0.0)  # dropped increment
+
+    totals = await reconcile_period_spend(session, redis)
+    assert totals[account.id] == pytest.approx(2.0)
+    assert totals[other_account.id] == pytest.approx(0.0)
+
+    spent = await get_period_spend(session, redis, account_id=account.id)
+    assert spent == pytest.approx(2.0)
+
+
 async def test_get_period_spend_falls_back_to_db_on_redis_error(session, monkeypatch):
     account, key = await _make_account_and_key(session)
     await log_request(
@@ -335,3 +401,57 @@ async def test_require_budget_rejects_with_429_once_cap_reached(session):
         await require_budget(key=key, session=session)
     assert ei.value.status_code == 429
     assert ei.value.detail["error"]["type"] == "budget_exceeded_error"
+
+
+async def test_run_budget_reconciliation_loop_runs_immediately(monkeypatch):
+    """The loop must reconcile on start rather than waiting a full interval
+    first, so drift accumulated before a deploy is healed right away."""
+    from gatekeep.db import SessionLocal
+    from gatekeep.middleware import budget as budget_module
+
+    calls = []
+
+    async def _fake_reconcile(session_arg, redis_arg, *, now=None):
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(budget_module, "reconcile_period_spend", _fake_reconcile)
+
+    redis = get_redis()
+    task = asyncio.create_task(
+        run_budget_reconciliation_loop(SessionLocal, redis, interval_seconds=3600)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == [1]
+
+
+async def test_run_budget_reconciliation_loop_survives_a_failed_cycle(monkeypatch):
+    """A single cycle's exception (e.g. a DB hiccup) must not kill the
+    loop - the next cycle should still run."""
+    from gatekeep.db import SessionLocal
+    from gatekeep.middleware import budget as budget_module
+
+    calls = []
+
+    async def _fake_reconcile(session_arg, redis_arg, *, now=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated DB hiccup")
+        return {}
+
+    monkeypatch.setattr(budget_module, "reconcile_period_spend", _fake_reconcile)
+
+    redis = get_redis()
+    task = asyncio.create_task(
+        run_budget_reconciliation_loop(SessionLocal, redis, interval_seconds=0.01)
+    )
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(calls) >= 2
