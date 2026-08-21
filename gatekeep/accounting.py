@@ -178,9 +178,12 @@ async def log_request(
     Also best-effort increments the account's current-period Redis spend
     counter (`budget.record_spend`) so `require_budget` can enforce a monthly
     cap without aggregating `request_logs` on every request; budget is pooled
-    at the account. A Redis outage here
-    only degrades that accelerator (the next budget check falls back to a
-    DB aggregate) - it never fails this call or drops the RequestLog row.
+    at the account. A Redis outage here only degrades that accelerator - it
+    never fails this call or drops the RequestLog row - but a dropped
+    increment does leave the counter under-counted until the next periodic
+    reconciliation cycle (`budget.run_budget_reconciliation_loop`) overwrites
+    it from the DB aggregate; a same-request DB fallback only happens if the
+    key is missing entirely, not merely stale (see issue #27).
 
     A cache hit contributes $0 to that budget counter even though `cost_usd`
     itself (and therefore `request_logs.cost_usd`) still records the full
@@ -239,9 +242,11 @@ async def log_request(
     try:
         await record_spend(get_redis(), account_id=account_id, cost_usd=0.0 if cached else cost_usd)
     except RedisError:
-        # Best-effort accelerator: a missed increment here just means the
-        # next budget check falls back to a DB aggregate (get_period_spend),
-        # not that spend goes untracked or the request fails.
+        # Best-effort accelerator: a missed increment here doesn't fail the
+        # request or drop the RequestLog row, but it does leave the Redis
+        # counter under-counted until the next reconciliation cycle
+        # (budget.run_budget_reconciliation_loop) - get_period_spend's DB
+        # fallback only triggers on a missing key, not a stale one.
         logger.warning(
             "Failed to record spend for budget tracking (Redis unavailable).",
             extra={"account_id": account_id},

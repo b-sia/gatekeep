@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -274,6 +275,30 @@ async def test_lifespan_fails_startup_when_pricing_table_is_unloadable(monkeypat
     with pytest.raises(PricingIntegrityError):
         async with app_module._lifespan(app_module.app):
             pytest.fail("lifespan should not have completed startup")
+
+
+async def test_lifespan_starts_and_cleanly_stops_budget_reconciliation(monkeypatch):
+    """_lifespan also starts the budget-reconciliation background task
+    (issue #27) and must cancel it cleanly on shutdown rather than leaking
+    it or letting CancelledError escape."""
+    import gatekeep.app as app_module
+    from gatekeep.middleware import budget as budget_module
+
+    monkeypatch.setattr(app_module, "warm_embedding_model", lambda: None)
+    monkeypatch.setattr(app_module, "get_pricing_table", lambda: None)
+
+    calls = []
+
+    async def _fake_reconcile(session_arg, redis_arg, *, now=None):
+        calls.append(1)
+        return {}
+
+    monkeypatch.setattr(budget_module, "reconcile_period_spend", _fake_reconcile)
+
+    async with app_module._lifespan(app_module.app):
+        await asyncio.sleep(0.05)
+
+    assert calls == [1]
 
 
 def test_load_allows_an_unpinned_non_default_baseline(tmp_path):

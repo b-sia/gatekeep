@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # observational - does not affect enforcement, which always blocks at
     # spend >= monthly_budget_usd regardless of this setting.
     budget_alert_threshold: float = 0.8
+    # How often (seconds) the background job reconciles every account's
+    # Redis spend counter against the request_logs DB aggregate, overwriting
+    # any drift from a lost record_spend increment or INCRBYFLOAT rounding.
+    # See gatekeep.middleware.budget.run_budget_reconciliation_loop.
+    budget_reconcile_interval_seconds: int = 3600
 
 
 @lru_cache

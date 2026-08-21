@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
+from collections.abc import Callable
 
 from fastapi import Depends, HTTPException
 from redis.asyncio import Redis
@@ -68,8 +70,12 @@ async def record_spend(
     Raises:
         redis.exceptions.RedisError: if Redis is unreachable. Callers should
             treat this as best-effort and not let it fail the request that
-            triggered the write - the next budget check will fall back to a
-            DB aggregate instead (see `get_period_spend`).
+            triggered the write. Note this is NOT self-healing on its own:
+            `get_period_spend`'s DB fallback only fires when the Redis key
+            is missing, not when it's merely stale, so a lost increment
+            here under-counts the account until the periodic
+            `run_budget_reconciliation_loop` next overwrites the counter
+            from the DB aggregate (see issue #27).
     """
     now = now or dt.datetime.now(dt.UTC)
     period = _current_period(now)
@@ -235,6 +241,67 @@ async def get_period_spend_batch(
                 )
                 redis = None  # subsequent seeds would fail the same way
     return results
+
+
+async def reconcile_period_spend(
+    session: AsyncSession, redis: Redis, *, now: dt.datetime | None = None
+) -> dict[int, float]:
+    """Recompute every account's Redis spend counter from `request_logs` and overwrite it.
+
+    Unlike `get_period_spend`, this always overwrites the Redis counter with
+    the freshly aggregated DB value, even when a key is already present. It
+    is the self-heal for the drift `record_spend`'s docstring can't
+    actually promise on its own: an increment lost to a transient Redis
+    error, a process crash between the DB commit and the Redis call, or
+    ordinary `INCRBYFLOAT` float accumulation over a month all leave the
+    Redis counter permanently wrong, and `get_period_spend`'s DB fallback
+    only fires on a *missing* key, never a stale one (see issue #27).
+
+    Meant to be run periodically (`run_budget_reconciliation_loop`) rather
+    than on the request path: it does one grouped DB aggregate covering
+    every account per call.
+
+    Returns the freshly computed per-account totals for the current period.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    period = _current_period(now)
+    account_ids = list((await session.execute(select(Account.id))).scalars().all())
+    if not account_ids:
+        return {}
+    totals = await _aggregate_spend_from_db_batch(session, account_ids, _period_start(period))
+    for account_id in account_ids:
+        spent = totals.get(account_id, 0.0)
+        try:
+            await redis.set(_spend_redis_key(account_id, period), spent, ex=_PERIOD_TTL_SECONDS)
+        except RedisError:
+            logger.warning(
+                "Budget reconciliation failed to write Redis counter; will retry next cycle.",
+                extra={"account_id": account_id},
+            )
+    return {account_id: totals.get(account_id, 0.0) for account_id in account_ids}
+
+
+async def run_budget_reconciliation_loop(
+    session_factory: Callable[[], AsyncSession], redis: Redis, *, interval_seconds: int
+) -> None:
+    """Run `reconcile_period_spend` on a fixed interval until the task is cancelled.
+
+    Intended to be launched as a background asyncio task from the app
+    lifespan (`gatekeep.app._lifespan`), one per process. Runs a cycle
+    immediately on start (so drift accumulated before a deploy is healed
+    right away) and then every `interval_seconds`. A single cycle's
+    failure (e.g. a DB hiccup) is logged and swallowed rather than killing
+    the loop - the next cycle just tries again.
+    """
+    while True:
+        try:
+            async with session_factory() as session:
+                await reconcile_period_spend(session, redis)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Budget reconciliation cycle failed; will retry next interval.")
+        await asyncio.sleep(interval_seconds)
 
 
 async def _fire_alert_if_new(redis: Redis, account_id: int, period: str, label: str) -> bool:
