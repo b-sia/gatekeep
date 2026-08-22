@@ -107,6 +107,13 @@ from gatekeep.providers.openai import OpenAIProvider
 from gatekeep.routing import select_model
 from gatekeep.samples import record_request_sample
 
+_gatekeep_logger = logging.getLogger("gatekeep")
+_gatekeep_logger.setLevel(logging.INFO)
+_gatekeep_handler = logging.StreamHandler()
+_gatekeep_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+_gatekeep_logger.addHandler(_gatekeep_handler)
+_gatekeep_logger.propagate = False
+
 logger = logging.getLogger(__name__)
 
 # The four values the `path` label/column can take, matching the Prometheus
