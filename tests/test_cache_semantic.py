@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -14,6 +15,8 @@ from gatekeep.middleware.cache_semantic import (
     build_response_from_cache,
     extract_embeddable_text,
     find_semantic_match,
+    purge_expired_cached_responses,
+    run_cache_purge_loop,
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
@@ -402,6 +405,111 @@ async def test_find_semantic_match_excludes_expired_rows(session, account):
         max_age_seconds=500,
     )
     assert match is None
+
+
+# -- purge_expired_cached_responses / run_cache_purge_loop -----------------
+
+
+async def test_purge_expired_cached_responses_deletes_only_expired_rows(session, account):
+    """Rows past ttl_seconds are deleted; rows still within it are kept."""
+    expired = CachedResponse(
+        account_id=account.id,
+        exact_hash="hash-expired",
+        user_messages_text="old",
+        embedding=[0.0] * 384,
+        response_text="old answer",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        created_at=datetime.now(UTC) - timedelta(seconds=1000),
+    )
+    fresh = CachedResponse(
+        account_id=account.id,
+        exact_hash="hash-fresh",
+        user_messages_text="new",
+        embedding=[0.0] * 384,
+        response_text="new answer",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        created_at=datetime.now(UTC),
+    )
+    session.add_all([expired, fresh])
+    await session.commit()
+
+    deleted = await purge_expired_cached_responses(session, ttl_seconds=500)
+    assert deleted == 1
+
+    remaining = (await session.execute(select(CachedResponse))).scalars().all()
+    assert [row.exact_hash for row in remaining] == ["hash-fresh"]
+
+
+async def test_purge_expired_cached_responses_no_op_when_nothing_expired(session, account):
+    row = CachedResponse(
+        account_id=account.id,
+        exact_hash="hash-fresh",
+        user_messages_text="new",
+        embedding=[0.0] * 384,
+        response_text="new answer",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        created_at=datetime.now(UTC),
+    )
+    session.add(row)
+    await session.commit()
+
+    deleted = await purge_expired_cached_responses(session, ttl_seconds=500)
+    assert deleted == 0
+
+
+async def test_run_cache_purge_loop_runs_immediately(monkeypatch):
+    """The loop must purge on start rather than waiting a full interval
+    first, so rows accumulated before a deploy are cleaned up right away."""
+    from gatekeep.db import SessionLocal
+    from gatekeep.middleware import cache_semantic as cache_semantic_module
+
+    calls = []
+
+    async def _fake_purge(session_arg, *, ttl_seconds):
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr(cache_semantic_module, "purge_expired_cached_responses", _fake_purge)
+
+    task = asyncio.create_task(
+        run_cache_purge_loop(SessionLocal, ttl_seconds=604800, interval_seconds=3600)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == [1]
+
+
+async def test_run_cache_purge_loop_survives_a_failed_cycle(monkeypatch):
+    """A single cycle's exception (e.g. a DB hiccup) must not kill the
+    loop - the next cycle should still run."""
+    from gatekeep.db import SessionLocal
+    from gatekeep.middleware import cache_semantic as cache_semantic_module
+
+    calls = []
+
+    async def _fake_purge(session_arg, *, ttl_seconds):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated DB hiccup")
+        return 0
+
+    monkeypatch.setattr(cache_semantic_module, "purge_expired_cached_responses", _fake_purge)
+
+    task = asyncio.create_task(
+        run_cache_purge_loop(SessionLocal, ttl_seconds=604800, interval_seconds=0.01)
+    )
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(calls) >= 2
 
 
 # -- build_response_from_cache ---------------------------------------------

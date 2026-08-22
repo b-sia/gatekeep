@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     rate_limit_refill_rate: float = 100 / 60
     cache_exact_ttl_seconds: int = 604800
     semantic_cache_similarity_threshold: float = 0.95
+    cache_purge_interval_seconds: int = 3600
     eval_judge_model: str = "claude-sonnet-5"
     eval_pass_threshold_default: float = 0.9
     # Fraction of a key's monthly_budget_usd at which a "warning" alert fires

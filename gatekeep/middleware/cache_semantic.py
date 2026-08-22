@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,6 +20,8 @@ from gatekeep.api.openai_schemas import (
 )
 from gatekeep.api.translation import new_completion_id
 from gatekeep.models import CachedResponse
+
+logger = logging.getLogger(__name__)
 
 
 def extract_embeddable_text(payload: dict[str, Any]) -> str:
@@ -91,6 +96,51 @@ async def delete_cached_responses_by_prompt(session: AsyncSession, prompt_name: 
     No-op if no rows are tagged with this prompt name.
     """
     await session.execute(delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name))
+
+
+async def purge_expired_cached_responses(session: AsyncSession, *, ttl_seconds: int) -> int:
+    """Delete every `cached_responses` row older than `ttl_seconds` and commit.
+
+    `find_semantic_match` already excludes rows past their TTL at query time,
+    but nothing previously deleted them: the only other delete path,
+    `delete_cached_responses_by_prompt`, only fires on prompt promotion and
+    only removes rows tagged with that prompt name, so a row written for a
+    request with no `prompt_name` accumulated forever. That let the table
+    (and the per-request cosine-distance scan cost against it) grow
+    unboundedly (issue #26). Meant to be run periodically
+    (`run_cache_purge_loop`) rather than on the request path.
+
+    Returns the number of rows deleted.
+    """
+    cutoff = datetime.now(UTC) - timedelta(seconds=ttl_seconds)
+    result = await session.execute(delete(CachedResponse).where(CachedResponse.created_at < cutoff))
+    await session.commit()
+    return result.rowcount or 0
+
+
+async def run_cache_purge_loop(
+    session_factory: Callable[[], AsyncSession], *, ttl_seconds: int, interval_seconds: int
+) -> None:
+    """Run `purge_expired_cached_responses` on a fixed interval until cancelled.
+
+    Intended to be launched as a background asyncio task from the app
+    lifespan (`gatekeep.app._lifespan`), one per process. Runs a cycle
+    immediately on start (so rows accumulated before a deploy are cleaned up
+    right away) and then every `interval_seconds`. A single cycle's failure
+    (e.g. a DB hiccup) is logged and swallowed rather than killing the loop -
+    the next cycle just tries again.
+    """
+    while True:
+        try:
+            async with session_factory() as session:
+                deleted = await purge_expired_cached_responses(session, ttl_seconds=ttl_seconds)
+                if deleted:
+                    logger.info("Purged %d expired semantic-cache row(s).", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Cache purge cycle failed; will retry next interval.")
+        await asyncio.sleep(interval_seconds)
 
 
 @dataclass

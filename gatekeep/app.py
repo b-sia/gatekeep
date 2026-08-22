@@ -76,6 +76,7 @@ from gatekeep.middleware.cache_semantic import (
     build_response_from_cache,
     extract_embeddable_text,
     find_semantic_match,
+    run_cache_purge_loop,
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
@@ -151,23 +152,39 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     periodically overwrites every account's Redis spend counter with a
     fresh DB aggregate so a dropped `record_spend` increment or float
     drift doesn't under-enforce budgets for the rest of the billing
-    period (issue #27). Cancelled on shutdown along with everything else.
+    period (issue #27), and the semantic-cache purge background task (see
+    `gatekeep.middleware.cache_semantic.run_cache_purge_loop`), which
+    periodically deletes cached_responses rows past their TTL so the table
+    (and the per-request cosine-distance scan cost against it) doesn't grow
+    unboundedly (issue #26). Both are cancelled on shutdown along with
+    everything else.
     """
     await asyncio.to_thread(warm_embedding_model)
     get_pricing_table()
+    settings = get_settings()
     reconciliation_task = asyncio.create_task(
         run_budget_reconciliation_loop(
             SessionLocal,
             get_redis(),
-            interval_seconds=get_settings().budget_reconcile_interval_seconds,
+            interval_seconds=settings.budget_reconcile_interval_seconds,
+        )
+    )
+    cache_purge_task = asyncio.create_task(
+        run_cache_purge_loop(
+            SessionLocal,
+            ttl_seconds=settings.cache_exact_ttl_seconds,
+            interval_seconds=settings.cache_purge_interval_seconds,
         )
     )
     try:
         yield
     finally:
         reconciliation_task.cancel()
+        cache_purge_task.cancel()
         with suppress(asyncio.CancelledError):
             await reconciliation_task
+        with suppress(asyncio.CancelledError):
+            await cache_purge_task
 
 
 app = FastAPI(title="gatekeep", lifespan=_lifespan)
