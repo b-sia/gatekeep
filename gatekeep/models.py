@@ -268,17 +268,17 @@ class CachedResponse(Base):
             "model",
             "prompt_version_num",
         ),
-        # Speeds up find_semantic_match's ORDER BY cosine_distance LIMIT 1:
-        # without this, pgvector falls back to a full sequential scan
-        # computing cosine distance row by row, which grows linearly with
-        # the table (issue #26). lists=100 is the pgvector-docs starting
-        # point (~sqrt(row_count)); revisit once real row counts are known.
+        # find_semantic_match filters to one tenant+model's non-expired rows
+        # before sorting by cosine distance. This btree lets Postgres narrow
+        # to that partition first instead of scanning the whole table
+        # equality columns lead, created_at trails for the
+        # cutoff range. Revisit with a filtered ANN index if a single
+        # partition's exact sort ever becomes the bottleneck.
         Index(
-            "ix_cached_responses_embedding_cosine",
-            "embedding",
-            postgresql_using="ivfflat",
-            postgresql_ops={"embedding": "vector_cosine_ops"},
-            postgresql_with={"lists": 100},
+            "ix_cached_responses_account_model_created_at",
+            "account_id",
+            "model",
+            "created_at",
         ),
         # exact_hash is unique per account, not globally, so two
         # tenants can independently cache the same request.
