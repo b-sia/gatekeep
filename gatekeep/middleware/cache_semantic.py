@@ -98,8 +98,13 @@ async def delete_cached_responses_by_prompt(session: AsyncSession, prompt_name: 
     await session.execute(delete(CachedResponse).where(CachedResponse.prompt_name == prompt_name))
 
 
-async def purge_expired_cached_responses(session: AsyncSession, *, ttl_seconds: int) -> int:
-    """Delete every `cached_responses` row older than `ttl_seconds` and commit.
+PURGE_BATCH_SIZE = 1000
+
+
+async def purge_expired_cached_responses(
+    session: AsyncSession, *, ttl_seconds: int, batch_size: int = PURGE_BATCH_SIZE
+) -> int:
+    """Delete every `cached_responses` row older than `ttl_seconds`, in batches.
 
     `find_semantic_match` already excludes rows past their TTL at query time,
     but nothing previously deleted them: the only other delete path,
@@ -110,12 +115,30 @@ async def purge_expired_cached_responses(session: AsyncSession, *, ttl_seconds: 
     unboundedly (issue #26). Meant to be run periodically
     (`run_cache_purge_loop`) rather than on the request path.
 
-    Returns the number of rows deleted.
+    Deletes at most `batch_size` rows per statement, committing after each
+    batch, instead of one `DELETE ... WHERE created_at < cutoff` for
+    everything expired. Since purging never ran before this feature, the
+    first cycle after deploy can face a large backlog; deleting it in one
+    transaction would hold locks on `cached_responses` (blocking concurrent
+    cache writes) for as long as the delete takes, and risks the statement
+    outright failing on a timeout - which, since the backlog never shrinks,
+    would then fail every subsequent cycle too. Bounded batches keep each
+    transaction short regardless of backlog size.
+
+    Returns the total number of rows deleted.
     """
     cutoff = datetime.now(UTC) - timedelta(seconds=ttl_seconds)
-    result = await session.execute(delete(CachedResponse).where(CachedResponse.created_at < cutoff))
-    await session.commit()
-    return result.rowcount or 0
+    subquery = select(CachedResponse.id).where(CachedResponse.created_at < cutoff).limit(batch_size)
+    total_deleted = 0
+    while True:
+        stmt = delete(CachedResponse).where(CachedResponse.id.in_(subquery))
+        result = await session.execute(stmt)
+        await session.commit()
+        deleted = result.rowcount or 0
+        total_deleted += deleted
+        if deleted < batch_size:
+            break
+    return total_deleted
 
 
 async def run_cache_purge_loop(

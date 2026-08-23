@@ -442,6 +442,32 @@ async def test_purge_expired_cached_responses_deletes_only_expired_rows(session,
     assert [row.exact_hash for row in remaining] == ["hash-fresh"]
 
 
+async def test_purge_expired_cached_responses_batches_across_multiple_passes(session, account):
+    """More expired rows than batch_size still get deleted, in multiple
+    batch_size-bounded DELETE statements rather than one unbounded one."""
+    expired_rows = [
+        CachedResponse(
+            account_id=account.id,
+            exact_hash=f"hash-expired-{i}",
+            user_messages_text="old",
+            embedding=[0.0] * 384,
+            response_text="old answer",
+            model="claude-sonnet-5",
+            cost_usd=0.001,
+            created_at=datetime.now(UTC) - timedelta(seconds=1000),
+        )
+        for i in range(5)
+    ]
+    session.add_all(expired_rows)
+    await session.commit()
+
+    deleted = await purge_expired_cached_responses(session, ttl_seconds=500, batch_size=2)
+    assert deleted == 5
+
+    remaining = (await session.execute(select(CachedResponse))).scalars().all()
+    assert remaining == []
+
+
 async def test_purge_expired_cached_responses_no_op_when_nothing_expired(session, account):
     row = CachedResponse(
         account_id=account.id,
