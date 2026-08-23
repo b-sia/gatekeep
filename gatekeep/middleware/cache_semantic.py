@@ -49,6 +49,8 @@ async def store_cached_response(
     response_text: str,
     model: str,
     cost_usd: float,
+    max_tokens: int,
+    stop_sequences: list[str] | None = None,
     prompt_name: str | None = None,
     prompt_version_num: int | None = None,
 ) -> CachedResponse | None:
@@ -57,6 +59,12 @@ async def store_cached_response(
     `account_id` scopes the row to its tenant; the cache is
     partitioned per account, so exact_hash is unique per (account_id,
     exact_hash) rather than globally.
+
+    `max_tokens`/`stop_sequences` record the constraints the response was
+    generated under, matching the fields the exact cache already hashes on
+    (see `hash_request`'s docstring) - `find_semantic_match` filters on them
+    so a semantic hit can't violate a constraint the exact cache would have
+    enforced.
 
     If a row with the same `(account_id, exact_hash)` was inserted concurrently
     by another request (unique-constraint violation), rolls back and returns
@@ -76,6 +84,8 @@ async def store_cached_response(
         response_text=response_text,
         model=model,
         cost_usd=cost_usd,
+        max_tokens=max_tokens,
+        stop_sequences=stop_sequences,
         prompt_name=prompt_name,
         prompt_version_num=prompt_version_num,
     )
@@ -182,6 +192,8 @@ async def find_semantic_match(
     model: str,
     threshold: float,
     max_age_seconds: int,
+    max_tokens: int,
+    stop_sequences: list[str] | None = None,
     prompt_version_num: int | None = None,
 ) -> SemanticMatch | None:
     """Find the most similar non-expired cached response above `threshold`, or None.
@@ -192,6 +204,17 @@ async def find_semantic_match(
     considered, so a semantically-similar prompt never returns a different
     model's cached answer. Only rows belonging to `account_id` are considered,
     so a match never crosses tenants.
+
+    `max_tokens`/`stop_sequences` guard the same correctness rule the exact
+    cache enforces (see `hash_request`'s docstring in cache_exact.py): only
+    rows whose recorded `max_tokens` is at least the current request's
+    `max_tokens` are considered, so a response truncated under a lower cap is
+    never served to a request that allows a longer completion; rows with
+    `max_tokens` NULL (written before this column existed) never match,
+    since what they were generated under is unknowable. `stop_sequences` must
+    match exactly (None counts as its own value) - a response generated with
+    different stop sequences could have stopped earlier or later than the
+    current request needs.
 
     If `prompt_version_num` is given (the caller resolved a `prompt_name` to
     a specific PromptVersion for this request), only rows tagged with that
@@ -215,7 +238,13 @@ async def find_semantic_match(
         .where(CachedResponse.account_id == account_id)
         .where(CachedResponse.created_at >= cutoff)
         .where(CachedResponse.model == model)
+        .where(CachedResponse.max_tokens.is_not(None))
+        .where(CachedResponse.max_tokens >= max_tokens)
     )
+    if stop_sequences is None:
+        stmt = stmt.where(CachedResponse.stop_sequences.is_(None))
+    else:
+        stmt = stmt.where(CachedResponse.stop_sequences == stop_sequences)
     if prompt_version_num is not None:
         stmt = stmt.where(CachedResponse.prompt_version_num == prompt_version_num)
     stmt = stmt.order_by(distance).limit(1)

@@ -664,6 +664,8 @@ async def chat_completions(
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
+            max_tokens=payload["max_tokens"],
+            stop_sequences=payload.get("stop_sequences"),
             prompt_version_num=served_prompt_version,
         )
         if semantic_match is not None:
@@ -738,6 +740,8 @@ async def chat_completions(
             cost_usd=calculate_cost(
                 provider_name, model, result.input_tokens, result.output_tokens
             ),
+            max_tokens=payload["max_tokens"],
+            stop_sequences=payload.get("stop_sequences"),
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
         )
@@ -896,6 +900,8 @@ async def messages(
             model=model,
             threshold=settings.semantic_cache_similarity_threshold,
             max_age_seconds=settings.cache_exact_ttl_seconds,
+            max_tokens=payload["max_tokens"],
+            stop_sequences=payload.get("stop_sequences"),
             prompt_version_num=served_prompt_version,
         )
         if semantic_match is not None:
@@ -971,6 +977,8 @@ async def messages(
             cost_usd=calculate_cost(
                 provider_name, model, result.input_tokens, result.output_tokens
             ),
+            max_tokens=payload["max_tokens"],
+            stop_sequences=payload.get("stop_sequences"),
             prompt_name=req.prompt_name,
             prompt_version_num=served_prompt_version,
         )

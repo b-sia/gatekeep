@@ -258,6 +258,21 @@ class CachedResponse(Base):
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
     prompt_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     prompt_version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The request-time constraints this row's response was generated under.
+    # find_semantic_match filters on these so a request is never served a
+    # cached response that violates a constraint the exact cache already
+    # enforces (see hash_request's docstring in cache_exact.py). Nullable so
+    # rows written before this column existed stay NULL; find_semantic_match
+    # treats NULL max_tokens as "unknown, never match" rather than assuming
+    # it's safe.
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # none_as_null=True: without it, JSONB stores a Python None as the JSON
+    # `null` literal rather than a SQL NULL, so `find_semantic_match`'s
+    # `.is_(None)` filter (matching "no stop_sequences on this request")
+    # would never match a row written with stop_sequences=None.
+    stop_sequences: Mapped[list[str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     __table_args__ = (
         # Speeds up find_semantic_match's equality filters (model, and

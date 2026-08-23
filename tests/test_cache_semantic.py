@@ -110,6 +110,7 @@ async def test_store_cached_response_persists_row(session, account):
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     row = (
         await session.execute(select(CachedResponse).where(CachedResponse.exact_hash == "hash-1"))
@@ -131,6 +132,7 @@ async def test_store_cached_response_ignores_duplicate_exact_hash(session, accou
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     assert first is not None
 
@@ -143,6 +145,7 @@ async def test_store_cached_response_ignores_duplicate_exact_hash(session, accou
         response_text="Paris (from the losing request)",
         model="claude-sonnet-5",
         cost_usd=0.002,
+        max_tokens=1000,
     )
     assert second is None
 
@@ -174,6 +177,7 @@ async def test_find_semantic_match_is_account_scoped(session):
         response_text="secret-a1",
         model="claude-sonnet-5",
         cost_usd=0.01,
+        max_tokens=1000,
     )
     hit = await find_semantic_match(
         session,
@@ -182,6 +186,7 @@ async def test_find_semantic_match_is_account_scoped(session):
         model="claude-sonnet-5",
         threshold=0.5,
         max_age_seconds=3600,
+        max_tokens=1000,
     )
     assert hit is not None
     assert hit.cached.response_text == "secret-a1"
@@ -193,6 +198,7 @@ async def test_find_semantic_match_is_account_scoped(session):
         model="claude-sonnet-5",
         threshold=0.5,
         max_age_seconds=3600,
+        max_tokens=1000,
     )
     assert miss is None
 
@@ -207,6 +213,7 @@ async def test_find_semantic_match_returns_none_when_empty(session, account):
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is None
 
@@ -223,6 +230,7 @@ async def test_find_semantic_match_finds_similar_above_threshold(session, accoun
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     query_embedding = embed_text("What is the capital of France?")
     match = await find_semantic_match(
@@ -232,6 +240,7 @@ async def test_find_semantic_match_finds_similar_above_threshold(session, accoun
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is not None
     assert match.cached.response_text == "Paris"
@@ -250,6 +259,7 @@ async def test_find_semantic_match_ignores_row_from_different_model(session, acc
         response_text="Paris",
         model="claude-haiku-4-5-20251001",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     query_embedding = embed_text(stored_text)
     match = await find_semantic_match(
@@ -259,6 +269,7 @@ async def test_find_semantic_match_ignores_row_from_different_model(session, acc
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is None
 
@@ -281,6 +292,7 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         prompt_name="system-context",
         prompt_version_num=1,
     )
@@ -292,6 +304,7 @@ async def test_find_semantic_match_ignores_row_from_different_prompt_version(ses
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
         prompt_version_num=2,
     )
     assert match is None
@@ -309,6 +322,7 @@ async def test_find_semantic_match_finds_row_from_same_prompt_version(session, a
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         prompt_name="system-context",
         prompt_version_num=2,
     )
@@ -320,6 +334,7 @@ async def test_find_semantic_match_finds_row_from_same_prompt_version(session, a
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
         prompt_version_num=2,
     )
     assert match is not None
@@ -340,6 +355,7 @@ async def test_find_semantic_match_without_prompt_version_num_is_unscoped(sessio
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         prompt_name="system-context",
         prompt_version_num=1,
     )
@@ -351,6 +367,7 @@ async def test_find_semantic_match_without_prompt_version_num_is_unscoped(sessio
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is not None
 
@@ -366,6 +383,7 @@ async def test_find_semantic_match_none_below_threshold(session, account):
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     query_embedding = embed_text("Please write a haiku about a walrus.")
     match = await find_semantic_match(
@@ -375,8 +393,147 @@ async def test_find_semantic_match_none_below_threshold(session, account):
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is None
+
+
+async def test_find_semantic_match_rejects_row_with_lower_max_tokens(session, account):
+    """A row generated under a lower max_tokens than the request allows must
+    not be served - it may be truncated shorter than this request permits."""
+    stored_text = "What is the capital of France?"
+    query_embedding = embed_text(stored_text)
+    await store_cached_response(
+        session,
+        account_id=account.id,
+        exact_hash="hash-low-max-tokens",
+        user_messages_text=stored_text,
+        embedding=query_embedding,
+        response_text="Paris",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        max_tokens=10,
+    )
+    match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=1000,
+    )
+    assert match is None
+
+
+async def test_find_semantic_match_accepts_row_with_higher_max_tokens(session, account):
+    """A row generated under a max_tokens at least as high as the request's
+    is safe to serve."""
+    stored_text = "What is the capital of France?"
+    query_embedding = embed_text(stored_text)
+    await store_cached_response(
+        session,
+        account_id=account.id,
+        exact_hash="hash-high-max-tokens",
+        user_messages_text=stored_text,
+        embedding=query_embedding,
+        response_text="Paris",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        max_tokens=1000,
+    )
+    match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=10,
+    )
+    assert match is not None
+
+
+async def test_find_semantic_match_rejects_row_with_null_max_tokens(session, account):
+    """A row written before this column existed (max_tokens NULL) never
+    matches - what it was generated under is unknowable."""
+    stored_text = "What is the capital of France?"
+    query_embedding = embed_text(stored_text)
+    row = CachedResponse(
+        account_id=account.id,
+        exact_hash="hash-null-max-tokens",
+        user_messages_text=stored_text,
+        embedding=query_embedding,
+        response_text="Paris",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+    )
+    session.add(row)
+    await session.commit()
+    match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=10,
+    )
+    assert match is None
+
+
+async def test_find_semantic_match_rejects_row_with_different_stop_sequences(session, account):
+    """A row generated with different stop_sequences than the request must
+    not be served - it may have stopped earlier or later than this request
+    needs."""
+    stored_text = "What is the capital of France?"
+    query_embedding = embed_text(stored_text)
+    await store_cached_response(
+        session,
+        account_id=account.id,
+        exact_hash="hash-stop-seq",
+        user_messages_text=stored_text,
+        embedding=query_embedding,
+        response_text="Paris",
+        model="claude-sonnet-5",
+        cost_usd=0.001,
+        max_tokens=1000,
+        stop_sequences=["\n\n"],
+    )
+    no_stop_match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=1000,
+    )
+    assert no_stop_match is None
+
+    different_stop_match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=1000,
+        stop_sequences=["STOP"],
+    )
+    assert different_stop_match is None
+
+    same_stop_match = await find_semantic_match(
+        session,
+        query_embedding,
+        account_id=account.id,
+        model="claude-sonnet-5",
+        threshold=0.95,
+        max_age_seconds=604800,
+        max_tokens=1000,
+        stop_sequences=["\n\n"],
+    )
+    assert same_stop_match is not None
 
 
 async def test_find_semantic_match_excludes_expired_rows(session, account):
@@ -390,6 +547,7 @@ async def test_find_semantic_match_excludes_expired_rows(session, account):
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         created_at=datetime.now(UTC) - timedelta(seconds=1000),
     )
     session.add(row)
@@ -403,6 +561,7 @@ async def test_find_semantic_match_excludes_expired_rows(session, account):
         model="claude-sonnet-5",
         threshold=0.95,
         max_age_seconds=500,
+        max_tokens=1000,
     )
     assert match is None
 
@@ -420,6 +579,7 @@ async def test_purge_expired_cached_responses_deletes_only_expired_rows(session,
         response_text="old answer",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         created_at=datetime.now(UTC) - timedelta(seconds=1000),
     )
     fresh = CachedResponse(
@@ -430,6 +590,7 @@ async def test_purge_expired_cached_responses_deletes_only_expired_rows(session,
         response_text="new answer",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         created_at=datetime.now(UTC),
     )
     session.add_all([expired, fresh])
@@ -477,6 +638,7 @@ async def test_purge_expired_cached_responses_no_op_when_nothing_expired(session
         response_text="new answer",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
         created_at=datetime.now(UTC),
     )
     session.add(row)

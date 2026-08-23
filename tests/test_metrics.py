@@ -98,6 +98,7 @@ async def test_find_semantic_match_returns_similarity_score(session):
         response_text="Paris",
         model="claude-sonnet-5",
         cost_usd=0.001,
+        max_tokens=1000,
     )
     match = await find_semantic_match(
         session,
@@ -106,6 +107,7 @@ async def test_find_semantic_match_returns_similarity_score(session):
         model="claude-sonnet-5",
         threshold=0.5,
         max_age_seconds=604800,
+        max_tokens=1000,
     )
     assert match is not None
     assert match.cached.response_text == "Paris"

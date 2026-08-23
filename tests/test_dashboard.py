@@ -117,6 +117,25 @@ async def test_prompts_requires_auth(client):
     assert r.status_code == 401
 
 
+async def test_require_caller_account_raises_401_when_account_missing(session):
+    """If an ApiKey's account_id points at a since-deleted Account,
+    `_require_caller_account` must raise a clean 401 rather than let `None`
+    flow into `require_operator`/`_account_scope`/`require_account_access`,
+    which would immediately hit `AttributeError` on `None.is_operator`/`.id`
+    (issue #29, sub-finding 3). There is no account-delete path today, so the
+    orphaned key is simulated directly rather than through a real delete
+    (which the FK constraint would reject anyway)."""
+    from fastapi import HTTPException
+
+    from gatekeep.api.dashboard import _require_caller_account
+
+    fake_key = ApiKey(name="orphan-key", key_hash="irrelevant", account_id=999_999)
+    with pytest.raises(HTTPException) as ei:
+        await _require_caller_account(caller=fake_key, session=session)
+    assert ei.value.status_code == 401
+    assert ei.value.detail["error"]["type"] == "authentication_error"
+
+
 # -- account scoping ---------------------------------------------------------
 
 
