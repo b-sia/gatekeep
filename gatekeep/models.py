@@ -268,6 +268,18 @@ class CachedResponse(Base):
             "model",
             "prompt_version_num",
         ),
+        # find_semantic_match filters to one tenant+model's non-expired rows
+        # before sorting by cosine distance. This btree lets Postgres narrow
+        # to that partition first instead of scanning the whole table
+        # equality columns lead, created_at trails for the
+        # cutoff range. Revisit with a filtered ANN index if a single
+        # partition's exact sort ever becomes the bottleneck.
+        Index(
+            "ix_cached_responses_account_model_created_at",
+            "account_id",
+            "model",
+            "created_at",
+        ),
         # exact_hash is unique per account, not globally, so two
         # tenants can independently cache the same request.
         UniqueConstraint(

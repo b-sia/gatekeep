@@ -76,6 +76,7 @@ from gatekeep.middleware.cache_semantic import (
     build_response_from_cache,
     extract_embeddable_text,
     find_semantic_match,
+    run_cache_purge_loop,
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
@@ -107,6 +108,30 @@ from gatekeep.routing import select_model
 from gatekeep.samples import record_request_sample
 
 logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    """Attach a handler to the "gatekeep" logger namespace, once.
+
+    Only INFO-level logs under this namespace (e.g. the semantic-cache purge
+    loop's "Purged N expired rows" line) get a handler here, not the root
+    logger, so third-party libraries (httpx, huggingface_hub,
+    sentence_transformers) don't gain INFO-level noise as a side effect.
+
+    Called from `_lifespan` rather than at import time, so merely importing
+    this module (e.g. a test grabbing `app` for a TestClient) has no global
+    logging side effects. Guarded by the handler-count check so starting the
+    app more than once in the same process - or any other double-invocation -
+    can't stack duplicate handlers and duplicate every log line.
+    """
+    gatekeep_logger = logging.getLogger("gatekeep")
+    if gatekeep_logger.handlers:
+        return
+    gatekeep_logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    gatekeep_logger.addHandler(handler)
+
 
 # The four values the `path` label/column can take, matching the Prometheus
 # `path` label one-for-one (observability/metrics.py) and RequestLog.path
@@ -151,23 +176,40 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     periodically overwrites every account's Redis spend counter with a
     fresh DB aggregate so a dropped `record_spend` increment or float
     drift doesn't under-enforce budgets for the rest of the billing
-    period (issue #27). Cancelled on shutdown along with everything else.
+    period (issue #27), and the semantic-cache purge background task (see
+    `gatekeep.middleware.cache_semantic.run_cache_purge_loop`), which
+    periodically deletes cached_responses rows past their TTL so the table
+    (and the per-request cosine-distance scan cost against it) doesn't grow
+    unboundedly (issue #26). Both are cancelled on shutdown along with
+    everything else.
     """
+    configure_logging()
     await asyncio.to_thread(warm_embedding_model)
     get_pricing_table()
+    settings = get_settings()
     reconciliation_task = asyncio.create_task(
         run_budget_reconciliation_loop(
             SessionLocal,
             get_redis(),
-            interval_seconds=get_settings().budget_reconcile_interval_seconds,
+            interval_seconds=settings.budget_reconcile_interval_seconds,
+        )
+    )
+    cache_purge_task = asyncio.create_task(
+        run_cache_purge_loop(
+            SessionLocal,
+            ttl_seconds=settings.cache_exact_ttl_seconds,
+            interval_seconds=settings.cache_purge_interval_seconds,
         )
     )
     try:
         yield
     finally:
         reconciliation_task.cancel()
+        cache_purge_task.cancel()
         with suppress(asyncio.CancelledError):
             await reconciliation_task
+        with suppress(asyncio.CancelledError):
+            await cache_purge_task
 
 
 app = FastAPI(title="gatekeep", lifespan=_lifespan)
