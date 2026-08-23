@@ -244,6 +244,7 @@ async def test_promote_invalidates_semantic_cache_rows_tagged_with_prompt(sessio
         response_text="hi",
         model="m",
         cost_usd=0.001,
+        max_tokens=1000,
         prompt_name="system-context",
     )
 
@@ -301,6 +302,7 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
         response_text="y",
         model="m",
         cost_usd=0.001,
+        max_tokens=1000,
         prompt_name="b",
     )
     await store_cached_response(
@@ -312,6 +314,7 @@ async def test_promote_leaves_other_prompts_and_untagged_cache_entries_untouched
         response_text="y2",
         model="m",
         cost_usd=0.001,
+        max_tokens=1000,
     )
 
     await promote_prompt("a", 2, session, redis=redis)
