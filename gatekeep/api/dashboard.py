@@ -54,8 +54,28 @@ async def _require_caller_account(
 
     `account_id` is always derived server-side from the authenticated key,
     never accepted as a client-supplied parameter.
+
+    Raises:
+        HTTPException: 401 if the key's `account_id` no longer resolves to an
+            Account (e.g. a future account-delete path leaves an orphaned
+            key). Without this, callers below (`require_operator`,
+            `_account_scope`, `require_account_access`) would immediately hit
+            `caller_account.is_operator`/`.id` on `None` and raise an
+            unhandled `AttributeError` -> 500.
     """
-    return await session.get(Account, caller.account_id)
+    account = await session.get(Account, caller.account_id)
+    if account is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": {
+                    "message": "API key's account no longer exists.",
+                    "type": "authentication_error",
+                    "code": None,
+                }
+            },
+        )
+    return account
 
 
 def _account_scope(caller_account: Account) -> list:
