@@ -131,7 +131,6 @@ def configure_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     gatekeep_logger.addHandler(handler)
-    gatekeep_logger.propagate = False
 
 
 # The four values the `path` label/column can take, matching the Prometheus
