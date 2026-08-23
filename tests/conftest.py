@@ -112,24 +112,24 @@ async def _reset_ratelimit_redis_client():
     entry left by an earlier test's key of the same id.
 
     The flush only runs if the test actually opened a Redis connection
-    (`ratelimit._redis is not None`) rather than unconditionally calling
-    `get_redis()` in setup: forcing a connection for every test - including
-    ones like test_config.py that monkeypatch REDIS_URL mid-test - ties
-    this fixture to fixture/monkeypatch ordering across tests and caused a
-    ConnectionError cascade in practice.
+    (`redis_token_bucket._redis is not None`) rather than unconditionally
+    calling `get_redis()` in setup: forcing a connection for every test -
+    including ones like test_config.py that monkeypatch REDIS_URL mid-test -
+    ties this fixture to fixture/monkeypatch ordering across tests and caused
+    a ConnectionError cascade in practice.
     """
-    import gatekeep.middleware.ratelimit as ratelimit
+    import gatekeep.redis_token_bucket as redis_token_bucket
 
-    ratelimit._redis = None
+    redis_token_bucket._redis = None
     yield
-    if ratelimit._redis is not None:
-        redis = ratelimit._redis
+    if redis_token_bucket._redis is not None:
+        redis = redis_token_bucket._redis
         async for key in redis.scan_iter("ratelimit:*"):
             await redis.delete(key)
         async for key in redis.scan_iter("cache:exact:*"):
             await redis.delete(key)
         await redis.aclose()
-    ratelimit._redis = None
+    redis_token_bucket._redis = None
 
 
 @pytest_asyncio.fixture

@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     )
     rate_limit_tokens_per_min: int = 100
     rate_limit_refill_rate: float = 100 / 60
+    # Coarse per-client-IP limit checked before API-key auth, so a flood of
+    # requests with missing/invalid tokens can't rack up unmetered DB lookups
+    # (require_api_key's key-hash SELECT runs before an account is even known,
+    # so the per-account limiter below can't cover this). Deliberately looser
+    # than the per-account limit above - many legitimate keys can share one
+    # IP (NAT, shared egress) - this is an abuse backstop, not a per-caller cap.
+    pre_auth_rate_limit_tokens_per_min: int = 300
+    pre_auth_rate_limit_refill_rate: float = 300 / 60
     cache_exact_ttl_seconds: int = 604800
     semantic_cache_similarity_threshold: float = 0.95
     cache_purge_interval_seconds: int = 3600

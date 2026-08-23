@@ -29,6 +29,16 @@ rate_limit_rejections_total = Counter(
     "Requests rejected with 429 for exceeding a key's rate limit.",
 )
 
+pre_auth_rate_limit_rejections_total = Counter(
+    "gatekeep_pre_auth_rate_limit_rejections_total",
+    "Unauthenticated requests rejected with 429 by the per-IP pre-auth rate limit.",
+)
+
+auth_failures_total = Counter(
+    "gatekeep_auth_failures_total",
+    "Requests rejected with 401 for a missing, unknown, or inactive API key.",
+)
+
 cache_exact_hits = Counter(
     "gatekeep_cache_exact_hits",
     "Exact-match cache hits.",
