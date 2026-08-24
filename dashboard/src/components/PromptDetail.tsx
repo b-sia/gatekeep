@@ -8,6 +8,7 @@ import VersionsSection from "./prompts/VersionsSection";
 import CandidateSection from "./prompts/CandidateSection";
 import EvalsSection from "./prompts/EvalsSection";
 import CurationSection from "./prompts/CurationSection";
+import AuditFeed from "./prompts/AuditFeed";
 
 interface PromptDetailProps {
   name: string;
@@ -63,6 +64,7 @@ export default function PromptDetail({
       />
       <EvalsSection name={name} versions={versions} onUnauthorized={onUnauthorized} />
       <CurationSection name={name} onUnauthorized={onUnauthorized} />
+      <AuditFeed entityRef={name} onUnauthorized={onUnauthorized} />
     </div>
   );
 }
