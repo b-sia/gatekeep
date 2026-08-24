@@ -31,10 +31,13 @@ from gatekeep.models import (
 )
 from gatekeep.prompts import (
     PromptNotFoundError,
+    PromptVersionNotFoundError,
     _get_prompt_row,
     add_prompt_version,
+    clear_candidate_version,
     create_prompt,
     rollback_prompt,
+    set_candidate_version,
 )
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
@@ -1486,6 +1489,96 @@ async def rollback_prompt_route(
         details={"to_version": version.version_num},
     )
     return PromptMutationResponse(name=name, version_num=version.version_num)
+
+
+class CandidateSetRequest(BaseModel):
+    """Request body for setting/adjusting a prompt's A/B candidate."""
+
+    version_num: int
+    traffic_pct: float
+
+
+class CandidateResponse(BaseModel):
+    """A prompt's current A/B candidate config (null when none)."""
+
+    name: str
+    candidate_version_num: int | None
+    traffic_pct: float | None
+
+
+async def _candidate_response(
+    name: str, prompt: Prompt, session: AsyncSession
+) -> CandidateResponse:
+    """Build a CandidateResponse, resolving candidate_version_id to a version_num."""
+    version_num = None
+    if prompt.candidate_version_id is not None:
+        version = await session.get(PromptVersion, prompt.candidate_version_id)
+        version_num = version.version_num if version is not None else None
+    return CandidateResponse(
+        name=name,
+        candidate_version_num=version_num,
+        traffic_pct=prompt.candidate_traffic_pct,
+    )
+
+
+@router.put("/prompts/{name}/candidate", response_model=CandidateResponse)
+async def set_candidate_route(
+    name: str,
+    body: CandidateSetRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CandidateResponse:
+    """Configure or adjust a prompt's A/B candidate version + traffic split.
+
+    Never runs the eval gate or invalidates cache (a candidate is not
+    "active"). Records a `prompt.set_candidate` audit event. 404 if the
+    prompt or version is unknown, 400 if `traffic_pct` is outside [0, 100].
+    """
+    try:
+        prompt = await set_candidate_version(name, body.version_num, body.traffic_pct, session)
+    except (PromptNotFoundError, PromptVersionNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.set_candidate",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=body.version_num,
+        result="success",
+        details={"traffic_pct": body.traffic_pct},
+    )
+    return await _candidate_response(name, prompt, session)
+
+
+@router.delete("/prompts/{name}/candidate", response_model=CandidateResponse)
+async def clear_candidate_route(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CandidateResponse:
+    """Clear a prompt's A/B candidate (100% traffic back to active). Operator only.
+
+    Records a `prompt.clear_candidate` audit event. 404 if the prompt is
+    unknown. A no-op (but still success) when no candidate was configured.
+    """
+    try:
+        prompt = await clear_candidate_version(name, session)
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.clear_candidate",
+        entity_type="prompt",
+        entity_ref=name,
+        result="success",
+    )
+    return await _candidate_response(name, prompt, session)
 
 
 @router.get("/prompts/{name}/suite", response_model=PromptSuiteResponse)

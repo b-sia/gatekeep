@@ -13,7 +13,12 @@ from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.evals import add_case, create_suite, run_eval_suite
 from gatekeep.models import ApiKey, RequestLog
-from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
+from gatekeep.prompts import (
+    add_prompt_version,
+    create_prompt,
+    promote_prompt,
+    set_candidate_version,
+)
 from tests.helpers import create_account, create_key
 
 
@@ -1315,6 +1320,55 @@ async def test_revoke_flips_active(client, raw_key):
     )
     assert resp.status_code == 200
     assert resp.json()["active"] is False
+
+
+async def test_set_candidate_configures_split(client, operator_key, session):
+    await create_prompt("cand-prompt", "v1", session)
+    await add_prompt_version("cand-prompt", "v2", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-prompt/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 2, "traffic_pct": 25},
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "name": "cand-prompt",
+        "candidate_version_num": 2,
+        "traffic_pct": 25.0,
+    }
+
+
+async def test_set_candidate_invalid_pct_is_400(client, operator_key, session):
+    await create_prompt("cand-bad", "v1", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-bad/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 1, "traffic_pct": 150},
+    )
+    assert r.status_code == 400
+
+
+async def test_set_candidate_unknown_version_is_404(client, operator_key, session):
+    await create_prompt("cand-nov", "v1", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-nov/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 9, "traffic_pct": 10},
+    )
+    assert r.status_code == 404
+
+
+async def test_clear_candidate_resets(client, operator_key, session):
+    await create_prompt("cand-clear", "v1", session)
+    await add_prompt_version("cand-clear", "v2", session)
+    await set_candidate_version("cand-clear", 2, 30, session)
+    r = await client.delete(
+        "/dashboard/api/prompts/cand-clear/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["candidate_version_num"] is None
+    assert r.json()["traffic_pct"] is None
 
 
 async def test_non_operator_cannot_touch_other_account_keys(client, raw_key, session):
