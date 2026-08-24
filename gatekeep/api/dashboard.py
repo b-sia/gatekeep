@@ -1978,11 +1978,12 @@ async def mint_account_key(
     account_id: int,
     body: KeyCreateRequest,
     session: AsyncSession = Depends(get_session),
-    _caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_account_access),
 ) -> KeyCreatedResponse:
     """Mint a key for an account, returning the raw key exactly once.
 
-    Raises 403 (wrong account), 404 (unknown account), 409 (duplicate name).
+    Records a `key.mint` audit event. Raises 403 (wrong account), 404
+    (unknown account), 409 (duplicate name).
     """
     try:
         key, raw = await account_service.create_key(session, account_id, body.name)
@@ -1990,6 +1991,16 @@ async def mint_account_key(
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
     except account_service.KeyNameConflictError as exc:
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=caller_account.id,
+        actor_label=caller_account.name,
+        action="key.mint",
+        entity_type="api_key",
+        entity_ref=key.name,
+        result="success",
+        details={"account_id": account_id, "key_id": key.id},
+    )
     return KeyCreatedResponse(
         id=key.id, name=key.name, active=key.active, created_at=key.created_at, key=raw
     )
@@ -2000,15 +2011,25 @@ async def revoke_account_key(
     account_id: int,
     key_id: int,
     session: AsyncSession = Depends(get_session),
-    _caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_account_access),
 ) -> KeyOut:
-    """Soft-revoke a key on an account. Raises 403 (wrong account) or 404
-    (no such key on the account).
+    """Soft-revoke a key on an account. Records a `key.revoke` audit event.
+    Raises 403 (wrong account) or 404 (no such key on the account).
     """
     try:
         key = await account_service.revoke_key(session, account_id, key_id)
     except account_service.KeyNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=caller_account.id,
+        actor_label=caller_account.name,
+        action="key.revoke",
+        entity_type="api_key",
+        entity_ref=key.name,
+        result="success",
+        details={"account_id": account_id, "key_id": key.id},
+    )
     return KeyOut(id=key.id, name=key.name, active=key.active, created_at=key.created_at)
 
 
@@ -2104,9 +2125,11 @@ async def list_accounts(
 async def create_account_route(
     body: AccountCreateRequest,
     session: AsyncSession = Depends(get_session),
-    _operator: Account = Depends(require_operator),
+    operator: Account = Depends(require_operator),
 ) -> AccountOut:
-    """Create an account. Operator only. 409 on name collision, 422 on bad name/budget."""
+    """Create an account. Operator only. Records an `account.create` audit
+    event. 409 on name collision, 422 on bad name/budget.
+    """
     try:
         account = await account_service.create_account(
             session,
@@ -2121,6 +2144,19 @@ async def create_account_route(
         raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
     except account_service.AccountNameConflictError as exc:
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="account.create",
+        entity_type="account",
+        entity_ref=account.name,
+        result="success",
+        details={
+            "monthly_budget_usd": body.monthly_budget_usd,
+            "is_operator": body.is_operator,
+        },
+    )
     return _account_out(account)
 
 
@@ -2129,7 +2165,7 @@ async def patch_account_route(
     account_id: int,
     body: AccountPatchRequest,
     session: AsyncSession = Depends(get_session),
-    _operator: Account = Depends(require_operator),
+    operator: Account = Depends(require_operator),
 ) -> AccountOut:
     """Rename, set/clear budget, and/or toggle operator on an account.
 
@@ -2139,7 +2175,8 @@ async def patch_account_route(
     change has succeeded - then this route commits once. That single commit
     makes the whole PATCH atomic: if a later field fails validation (e.g. a
     bad budget after a valid rename), the rename is rolled back too, rather
-    than silently persisting while the client sees an error.
+    than silently persisting while the client sees an error. Records an
+    `account.update` audit event when a mutation actually occurred.
 
     Maps 404 (unknown account), 409 (name collision, last-operator), 422
     (bad name, bad budget).
@@ -2165,6 +2202,21 @@ async def patch_account_route(
             account = await account_service.get_account(session, account_id)
         else:
             await session.commit()
+            await record_audit_event(
+                session,
+                actor_account_id=operator.id,
+                actor_label=operator.name,
+                action="account.update",
+                entity_type="account",
+                entity_ref=account.name,
+                result="success",
+                details={
+                    "name": body.name,
+                    "monthly_budget_usd": body.monthly_budget_usd,
+                    "clear_budget": body.clear_budget,
+                    "is_operator": body.is_operator,
+                },
+            )
     except account_service.AccountNotFoundError as exc:
         await session.rollback()
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
