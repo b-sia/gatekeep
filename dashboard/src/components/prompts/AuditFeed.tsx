@@ -25,9 +25,12 @@ export default function AuditFeed({ onUnauthorized, entityRef }: AuditFeedProps)
   const load = useCallback(async () => {
     setError(null);
     try {
-      const res = await getAuditFeed(
-        entityRef ? { entityType: "prompt", entityRef } : { limit: 100 },
-      );
+      // Scoped by entityRef alone (not entityType: "prompt"): eval-suite
+      // (eval.create_suite/eval.add_case) and curated-case (curation.review)
+      // events also carry entity_ref = the prompt name, just under a
+      // different entity_type, so filtering on entityType too would
+      // silently drop them from this prompt's feed.
+      const res = await getAuditFeed(entityRef ? { entityRef } : { limit: 100 });
       setEvents(res.events);
     } catch (err) {
       if (err instanceof UnauthorizedError) return onUnauthorized();

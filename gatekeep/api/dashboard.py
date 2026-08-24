@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Literal
 
 from anthropic import AsyncAnthropic
@@ -117,6 +118,7 @@ def _get_redis() -> Redis:
     return get_redis(get_settings())
 
 
+@lru_cache
 def _get_eval_provider() -> AnthropicProvider:
     """FastAPI dependency yielding the provider used for eval/curation LLM calls.
 
@@ -124,6 +126,13 @@ def _get_eval_provider() -> AnthropicProvider:
     Isolated as a dependency so tests can override it with a fake provider via
     `app.dependency_overrides`, keeping eval/curation endpoints and their
     background jobs off the real Anthropic API in the suite.
+
+    `lru_cache`d (no arguments, so effectively a singleton after the first
+    call) so every request reuses the same `AsyncAnthropic` client instead of
+    opening a fresh httpx connection pool per request that is never closed -
+    mirrors `gatekeep.config.get_settings`'s use of the same pattern.
+    `app.dependency_overrides` replaces this callable entirely, bypassing the
+    cache, so tests overriding it with a fake provider are unaffected.
     """
     settings = get_settings()
     return AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
@@ -1808,9 +1817,23 @@ async def curation_review_route(
 ) -> CurationReviewResponse:
     """Approve (keep, mark reviewed) or reject (delete) one curated case.
 
-    Operator only. Records a `curation.review` audit event. 404 if the case
-    id does not exist.
+    Operator only. Verifies `case_id`'s suite belongs to prompt `name` before
+    delegating to the service layer, so a mismatched prompt name + case id
+    combination 404s instead of writing an audit row against the wrong
+    `entity_ref`. Records a `curation.review` audit event. 404 if the case id
+    does not exist, or belongs to a different prompt's suite.
     """
+    case = await session.get(EvalCase, case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=404, detail=_error_body(f"no curated case with id {case_id}")
+        )
+    suite = await session.get(EvalSuite, case.suite_id)
+    if suite is None or suite.prompt_name != name:
+        raise HTTPException(
+            status_code=404,
+            detail=_error_body(f"no curated case with id {case_id} for prompt {name!r}"),
+        )
     try:
         await review_case(case_id, session, approve=body.approved)
     except ValueError as exc:

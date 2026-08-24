@@ -41,6 +41,7 @@ export default function VersionsSection({
       setJobId(null);
       onChanged();
     },
+    onUnauthorized,
   });
 
   const fail = (err: unknown, fallback: string) => {

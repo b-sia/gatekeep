@@ -66,6 +66,7 @@ export default function EvalsSection({
       setJobId(null);
       load();
     },
+    onUnauthorized,
   });
 
   const create = async () => {

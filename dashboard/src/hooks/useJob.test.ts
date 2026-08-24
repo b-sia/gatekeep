@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { useJob } from "./useJob";
 import * as client from "../api/client";
+import { UnauthorizedError } from "../api/client";
 import type { JobStatusResponse } from "../api/types";
 
 function job(status: JobStatusResponse["status"]): JobStatusResponse {
@@ -72,5 +73,41 @@ describe("useJob", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(spy).not.toHaveBeenCalled();
     expect(result.current.job).toBeNull();
+  });
+
+  it("keeps the terminal job snapshot visible after the consumer clears jobId in onSettled", async () => {
+    vi.spyOn(client, "getJob")
+      .mockResolvedValueOnce(job("running"))
+      .mockResolvedValueOnce(job("blocked"));
+
+    // Mirrors VersionsSection/EvalsSection: onSettled clears jobId, which
+    // re-renders the hook with jobId=null.
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | null }) =>
+        useJob(id, {
+          onSettled: () => rerender({ id: null }),
+        }),
+      { initialProps: { id: "j" as string | null } },
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(result.current.job?.status).toBe("running"));
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitFor(() => expect(result.current.job?.status).toBe("blocked"));
+
+    // The consumer's onSettled has now cleared jobId back to null (via
+    // rerender), which re-runs the hook's effect. The terminal snapshot
+    // must still be visible, not wiped back to null.
+    expect(result.current.job?.status).toBe("blocked");
+  });
+
+  it("calls onUnauthorized (not the generic error) on a 401 from getJob", async () => {
+    vi.spyOn(client, "getJob").mockRejectedValue(new UnauthorizedError("API key was rejected"));
+    const onUnauthorized = vi.fn();
+    const { result } = renderHook(() => useJob("j", { onUnauthorized }));
+
+    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalledTimes(1));
+    expect(result.current.error).toBeNull();
   });
 });

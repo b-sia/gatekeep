@@ -134,12 +134,6 @@ async def run_eval_job(
                 result="success",
                 details={"score": run.score, "passed": run.passed, "run_id": run.id},
             )
-        await update_job(
-            redis,
-            job_id,
-            status="succeeded",
-            result={"score": run.score, "passed": run.passed},
-        )
     except Exception as exc:  # noqa: BLE001 - terminal outcome is recorded, not swallowed
         async with session_factory() as session:
             await record_audit_event(
@@ -154,6 +148,15 @@ async def run_eval_job(
                 details={"error": str(exc)},
             )
         await update_job(redis, job_id, status="failed", error=str(exc))
+    else:
+        # Outside the try: a Redis failure here must not be miscategorized as
+        # a failed eval run - the suite already ran and was audited once.
+        await update_job(
+            redis,
+            job_id,
+            status="succeeded",
+            result={"score": run.score, "passed": run.passed},
+        )
 
 
 async def run_promote_job(
@@ -204,7 +207,6 @@ async def run_promote_job(
                 result="success",
                 details={"to_version": promoted.version_num},
             )
-        await update_job(redis, job_id, status="succeeded", result={"passed": True})
     except EvalGateFailure as exc:
         async with session_factory() as session:
             await record_audit_event(
@@ -238,6 +240,11 @@ async def run_promote_job(
                 details={"error": str(exc)},
             )
         await update_job(redis, job_id, status="failed", error=str(exc))
+    else:
+        # Outside the try: a Redis failure here must not be miscategorized as
+        # a failed/blocked promotion - the flip already succeeded and was
+        # audited once.
+        await update_job(redis, job_id, status="succeeded", result={"passed": True})
 
 
 def spawn(coro) -> asyncio.Task:
