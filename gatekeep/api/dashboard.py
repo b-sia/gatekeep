@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep import account_service
+from gatekeep.audit import record_audit_event
 from gatekeep.config import get_settings
 from gatekeep.curation import list_unreviewed
 from gatekeep.db import get_session
@@ -28,7 +29,13 @@ from gatekeep.models import (
     PromptVersion,
     RequestLog,
 )
-from gatekeep.prompts import PromptNotFoundError, _get_prompt_row
+from gatekeep.prompts import (
+    PromptNotFoundError,
+    _get_prompt_row,
+    add_prompt_version,
+    create_prompt,
+    rollback_prompt,
+)
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
@@ -1356,6 +1363,129 @@ def _case_out(case: EvalCase) -> EvalCaseOut:
         created_at=case.created_at,
         input_messages=case.input_messages,
     )
+
+
+class PromptCreateRequest(BaseModel):
+    """Request body for creating a prompt (initial version 1, active)."""
+
+    name: str
+    template: str
+    notes: str | None = None
+
+
+class PromptVersionCreateRequest(BaseModel):
+    """Request body for appending a new inactive version to a prompt."""
+
+    template: str
+    notes: str | None = None
+
+
+class PromptMutationResponse(BaseModel):
+    """The prompt name and the version number a mutation produced/left active."""
+
+    name: str
+    version_num: int
+
+
+@router.post("/prompts", response_model=PromptMutationResponse)
+async def create_prompt_route(
+    body: PromptCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Create a prompt with an initial active version 1. Operator only.
+
+    Sets `created_by` to the operator's account name and records a
+    `prompt.create` audit event. 400 if the name already exists.
+    """
+    try:
+        prompt = await create_prompt(
+            body.name,
+            body.template,
+            session,
+            created_by=operator.name,
+            notes=body.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.create",
+        entity_type="prompt",
+        entity_ref=body.name,
+        version_num=1,
+        result="success",
+        details={"notes": body.notes},
+    )
+    return PromptMutationResponse(name=prompt.name, version_num=1)
+
+
+@router.post("/prompts/{name}/versions", response_model=PromptMutationResponse)
+async def add_prompt_version_route(
+    name: str,
+    body: PromptVersionCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Append a new inactive version to an existing prompt. Operator only.
+
+    Sets `created_by` to the operator's account name and records a
+    `prompt.add_version` audit event. 404 if the prompt is unknown.
+    """
+    try:
+        version = await add_prompt_version(
+            name, body.template, session, created_by=operator.name, notes=body.notes
+        )
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.add_version",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=version.version_num,
+        result="success",
+        details={"notes": body.notes},
+    )
+    return PromptMutationResponse(name=name, version_num=version.version_num)
+
+
+@router.post("/prompts/{name}/rollback", response_model=PromptMutationResponse)
+async def rollback_prompt_route(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Revert a prompt to its previously-active version. Operator only.
+
+    Rollback is never eval-gated (reverting to an already-proven version).
+    Invalidates the prompt's caches via the service layer and records a
+    `prompt.rollback` audit event. 404 if the prompt is unknown, 400 if
+    there is no earlier version to roll back to.
+    """
+    try:
+        version = await rollback_prompt(name, session, redis=redis)
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.rollback",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=version.version_num,
+        result="success",
+        details={"to_version": version.version_num},
+    )
+    return PromptMutationResponse(name=name, version_num=version.version_num)
 
 
 @router.get("/prompts/{name}/suite", response_model=PromptSuiteResponse)

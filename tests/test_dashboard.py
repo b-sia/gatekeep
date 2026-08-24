@@ -1690,3 +1690,91 @@ async def test_audit_feed_filters_and_orders_newest_first(client, operator_key, 
 async def test_audit_feed_requires_operator(client, raw_key):
     r = await client.get("/dashboard/api/audit", headers={"Authorization": f"Bearer {raw_key}"})
     assert r.status_code == 403
+
+
+async def test_create_prompt_persists_and_audits(client, operator_key, session):
+    r = await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "new-prompt", "template": "hello", "notes": "first"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"name": "new-prompt", "version_num": 1}
+
+    from sqlalchemy import select as _select
+
+    from gatekeep.models import AuditEvent
+
+    events = (
+        (await session.execute(_select(AuditEvent).where(AuditEvent.entity_ref == "new-prompt")))
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].action == "prompt.create"
+    assert events[0].result == "success"
+    assert events[0].actor_label == "op-acct"
+
+
+async def test_create_prompt_sets_created_by_to_operator(client, operator_key, session):
+    await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "attrib-prompt", "template": "hi"},
+    )
+    from gatekeep.prompts import get_active_prompt_version
+
+    version = await get_active_prompt_version("attrib-prompt", session)
+    assert version.created_by == "op-acct"
+
+
+async def test_create_prompt_duplicate_is_400(client, operator_key, session):
+    await create_prompt("dupe-prompt", "x", session)
+    r = await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe-prompt", "template": "y"},
+    )
+    assert r.status_code == 400
+
+
+async def test_add_version_appends_inactive(client, operator_key, session):
+    await create_prompt("addver-prompt", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/addver-prompt/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"template": "v2", "notes": "second"},
+    )
+    assert r.status_code == 200
+    assert r.json()["version_num"] == 2
+
+
+async def test_add_version_unknown_prompt_is_404(client, operator_key):
+    r = await client.post(
+        "/dashboard/api/prompts/ghost/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"template": "v2"},
+    )
+    assert r.status_code == 404
+
+
+async def test_rollback_reverts_and_audits(client, operator_key, session):
+    await create_prompt("rb-prompt", "v1", session)
+    await add_prompt_version("rb-prompt", "v2", session)
+    await promote_prompt("rb-prompt", 2, session)
+
+    r = await client.post(
+        "/dashboard/api/prompts/rb-prompt/rollback",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["version_num"] == 1
+
+
+async def test_rollback_without_history_is_400(client, operator_key, session):
+    await create_prompt("rb-none", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/rb-none/rollback",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 400
