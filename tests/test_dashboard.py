@@ -1832,3 +1832,107 @@ async def test_rollback_without_history_is_400(client, operator_key, session):
         headers={"Authorization": f"Bearer {operator_key}"},
     )
     assert r.status_code == 400
+
+
+async def test_create_suite_defaults_threshold_from_settings(client, operator_key, session):
+    await create_prompt("suite-create", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/suite-create/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={},
+    )
+    assert r.status_code == 200
+    assert r.json()["prompt_name"] == "suite-create"
+    assert r.json()["pass_threshold"] == 0.9  # eval_pass_threshold_default
+
+
+async def test_add_case_contains_requires_expected(client, operator_key, session):
+    await create_prompt("case-prompt", "v1", session)
+    await create_suite("case-prompt", session, pass_threshold=0.5)
+    r = await client.post(
+        "/dashboard/api/prompts/case-prompt/suite/cases",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"input_messages": [{"role": "user", "content": "hi"}], "check_type": "contains"},
+    )
+    assert r.status_code == 400
+
+
+async def test_add_case_persists_reviewed_case(client, operator_key, session):
+    await create_prompt("case-ok", "v1", session)
+    await create_suite("case-ok", session, pass_threshold=0.5)
+    r = await client.post(
+        "/dashboard/api/prompts/case-ok/suite/cases",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={
+            "input_messages": [{"role": "user", "content": "hi"}],
+            "check_type": "contains",
+            "expected": "hello",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["reviewed"] is True
+    assert r.json()["source"] == "manual"
+
+
+async def test_curation_review_approves_case(client, operator_key, session):
+    await create_prompt("rev-prompt", "v1", session)
+    suite = await create_suite("rev-prompt", session, pass_threshold=0.5)
+    case = await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=False,
+        source="curated",
+    )
+    r = await client.post(
+        f"/dashboard/api/prompts/rev-prompt/curation/{case.id}/review",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"approved": True},
+    )
+    assert r.status_code == 200
+    await session.refresh(case)
+    assert case.reviewed is True
+
+
+async def test_curation_mine_uses_injected_provider(client, operator_key, session):
+    from gatekeep.api.dashboard import _get_eval_provider
+    from gatekeep.app import app
+    from gatekeep.samples import record_request_sample
+
+    await create_prompt("mine-prompt", "v1", session)
+    await create_suite("mine-prompt", session, pass_threshold=0.5)
+    # a key/account to attribute the sample to
+    from gatekeep.models import ApiKey as _ApiKey
+
+    acct = (await session.execute(select(_ApiKey))).scalars().first()
+    await record_request_sample(
+        session,
+        key_id=acct.id,
+        account_id=acct.account_id,
+        prompt_name="mine-prompt",
+        model="claude-sonnet-5",
+        input_messages=[{"role": "user", "content": "hi"}],
+        output_text="hello there",
+    )
+
+    class _FakeProvider:
+        async def complete(self, payload):
+            class R:
+                text = "generated rubric"
+
+            return R()
+
+    app.dependency_overrides[_get_eval_provider] = lambda: _FakeProvider()
+    try:
+        r = await client.post(
+            "/dashboard/api/prompts/mine-prompt/curation/mine",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json={"limit": 5},
+        )
+    finally:
+        app.dependency_overrides.pop(_get_eval_provider, None)
+    assert r.status_code == 200
+    assert len(r.json()["cases"]) == 1
+    assert r.json()["cases"][0]["source"] == "curated"

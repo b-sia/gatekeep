@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from anthropic import AsyncAnthropic
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -13,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep import account_service
 from gatekeep.audit import record_audit_event
 from gatekeep.config import get_settings
-from gatekeep.curation import list_unreviewed
+from gatekeep.curation import curate_cases, list_unreviewed, review_case
 from gatekeep.db import get_session
-from gatekeep.evals import get_suite_for_prompt
+from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
@@ -39,6 +40,7 @@ from gatekeep.prompts import (
     rollback_prompt,
     set_candidate_version,
 )
+from gatekeep.providers.anthropic import AnthropicProvider
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
@@ -113,6 +115,18 @@ def _get_redis() -> Redis:
     Postgres, so this is scoped to the routes that need it.
     """
     return get_redis(get_settings())
+
+
+def _get_eval_provider() -> AnthropicProvider:
+    """FastAPI dependency yielding the provider used for eval/curation LLM calls.
+
+    Mirrors how the CLI builds its provider (`AnthropicProvider(AsyncAnthropic(...))`).
+    Isolated as a dependency so tests can override it with a fake provider via
+    `app.dependency_overrides`, keeping eval/curation endpoints and their
+    background jobs off the real Anthropic API in the suite.
+    """
+    settings = get_settings()
+    return AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
 
 
 def _forbidden(message: str) -> HTTPException:
@@ -1625,6 +1639,193 @@ async def prompt_curation(
     """Return `name`'s unreviewed curated eval cases, oldest first. Operator only."""
     cases = await list_unreviewed(name, session)
     return CurationResponse(cases=[_case_out(c) for c in cases])
+
+
+class SuiteCreateRequest(BaseModel):
+    """Request body for creating an eval suite (threshold defaults from settings)."""
+
+    threshold: float | None = None
+
+
+class CaseCreateRequest(BaseModel):
+    """Request body for adding a reviewed manual eval case."""
+
+    input_messages: list[dict]
+    check_type: str
+    expected: str | None = None
+    judge_criteria: str | None = None
+
+
+class CurationMineRequest(BaseModel):
+    """Request body for mining recent samples into unreviewed curated cases."""
+
+    limit: int = 20
+
+
+class CurationReviewRequest(BaseModel):
+    """Request body for approving/rejecting one curated case."""
+
+    approved: bool
+
+
+@router.post("/prompts/{name}/suite", response_model=SuiteOut)
+async def create_suite_route(
+    name: str,
+    body: SuiteCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> SuiteOut:
+    """Create an eval suite for a prompt (one per prompt). Operator only.
+
+    Threshold defaults to `eval_pass_threshold_default`. Records an
+    `eval.create_suite` audit event. 400 if a suite already exists.
+    """
+    threshold = (
+        body.threshold if body.threshold is not None else get_settings().eval_pass_threshold_default
+    )
+    try:
+        suite = await create_suite(name, session, pass_threshold=threshold)
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=_error_body(f"an eval suite already exists for prompt {name!r}"),
+        ) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="eval.create_suite",
+        entity_type="eval_suite",
+        entity_ref=name,
+        result="success",
+        details={"threshold": threshold},
+    )
+    return SuiteOut(
+        id=suite.id,
+        name=suite.name,
+        prompt_name=suite.prompt_name,
+        pass_threshold=suite.pass_threshold,
+        created_at=suite.created_at,
+    )
+
+
+@router.post("/prompts/{name}/suite/cases", response_model=EvalCaseOut)
+async def add_case_route(
+    name: str,
+    body: CaseCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> EvalCaseOut:
+    """Add a reviewed manual eval case to a prompt's suite. Operator only.
+
+    Records an `eval.add_case` audit event. 404 if no suite is registered,
+    400 if the check_type/argument combination is invalid.
+    """
+    suite = await get_suite_for_prompt(name, session)
+    if suite is None:
+        raise HTTPException(
+            status_code=404,
+            detail=_error_body(f"no eval suite registered for prompt {name!r}"),
+        )
+    try:
+        case = await add_case(
+            suite.id,
+            session,
+            input_messages=body.input_messages,
+            check_type=body.check_type,
+            expected=body.expected,
+            judge_criteria=body.judge_criteria,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="eval.add_case",
+        entity_type="eval_suite",
+        entity_ref=name,
+        result="success",
+        details={"check_type": body.check_type, "case_id": case.id},
+    )
+    return _case_out(case)
+
+
+@router.post("/prompts/{name}/curation/mine", response_model=CurationResponse)
+async def curation_mine_route(
+    name: str,
+    body: CurationMineRequest,
+    session: AsyncSession = Depends(get_session),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> CurationResponse:
+    """Mine recent request samples for a prompt into unreviewed curated cases.
+
+    Operator only. Uses the eval provider to draft a judge rubric per sample.
+    Records a `curation.mine` audit event with the mined case count. 404 if
+    no suite is registered.
+    """
+    try:
+        cases = await curate_cases(
+            name,
+            session,
+            limit=body.limit,
+            provider=provider,
+            generate_model=get_settings().default_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="curation.mine",
+        entity_type="prompt",
+        entity_ref=name,
+        result="success",
+        details={"case_count": len(cases)},
+    )
+    return CurationResponse(cases=[_case_out(c) for c in cases])
+
+
+class CurationReviewResponse(BaseModel):
+    """Terminal state of a reviewed curated case."""
+
+    status: str
+
+
+@router.post(
+    "/prompts/{name}/curation/{case_id}/review",
+    response_model=CurationReviewResponse,
+)
+async def curation_review_route(
+    name: str,
+    case_id: int,
+    body: CurationReviewRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CurationReviewResponse:
+    """Approve (keep, mark reviewed) or reject (delete) one curated case.
+
+    Operator only. Records a `curation.review` audit event. 404 if the case
+    id does not exist.
+    """
+    try:
+        await review_case(case_id, session, approve=body.approved)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="curation.review",
+        entity_type="curated_case",
+        entity_ref=name,
+        result="success",
+        details={"case_id": case_id, "approved": body.approved},
+    )
+    return CurationReviewResponse(status="reviewed" if body.approved else "rejected")
 
 
 class MeResponse(BaseModel):
