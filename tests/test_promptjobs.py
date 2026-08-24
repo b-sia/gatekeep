@@ -203,3 +203,60 @@ async def test_run_promote_job_blocked_by_eval_gate(redis, session):
             .all()
         )
         assert events[0].result == "blocked"
+
+
+async def test_run_promote_job_audit_write_failure_does_not_misreport_success(
+    redis, session, monkeypatch
+):
+    """Fix verification for PR #35 finding #2.
+
+    `promote_prompt` commits the version flip on its own session before
+    `record_audit_event` is ever called (see gatekeep/prompts.py:174). The
+    success-path audit write now happens outside the failure-handling try
+    block in `run_promote_job`, so a failure there is logged but does not
+    flip the job to "failed" or produce a contradictory result="error" audit
+    row - the promotion already succeeded and is durably committed. This
+    test simulates an audit write failure via monkeypatch and asserts the
+    job still reports the true outcome.
+    """
+    await create_prompt("job-promote-auditfail", "v1", session)
+    await add_prompt_version("job-promote-auditfail", "v2", session)
+
+    async def _failing_record_audit_event(*args, **kwargs):
+        raise RuntimeError("simulated audit DB failure")
+
+    monkeypatch.setattr(promptjobs, "record_audit_event", _failing_record_audit_event)
+
+    job_id = await promptjobs.create_job(
+        redis, kind="promote", prompt_name="job-promote-auditfail", version_num=2
+    )
+    await promptjobs.run_promote_job(
+        job_id,
+        prompt_name="job-promote-auditfail",
+        version_num=2,
+        provider=_FakeProvider(),
+        generate_model="claude-sonnet-5",
+        judge_model="claude-sonnet-5",
+        max_tokens=64,
+        actor_account_id=None,
+        actor_label="op",
+        redis=redis,
+        session_factory=SessionLocal,
+    )
+    job = await promptjobs.get_job(redis, job_id)
+
+    async with SessionLocal() as s:
+        active = await get_active_prompt_version("job-promote-auditfail", s)
+        assert active.version_num == 2
+
+    # The job correctly reports success, matching the actual DB state, even
+    # though the audit write for it failed.
+    assert job["status"] == "succeeded"
+    assert job["result"]["passed"] is True
+    async with SessionLocal() as s:
+        events = (
+            (await s.execute(select(AuditEvent).where(AuditEvent.action == "prompt.promote")))
+            .scalars()
+            .all()
+        )
+        assert events == []

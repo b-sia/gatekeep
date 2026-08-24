@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from gatekeep.audit import record_audit_event
 from gatekeep.evals import EvalGateFailure, make_eval_gate, run_suite_for_prompt
 from gatekeep.prompts import promote_prompt
+
+logger = logging.getLogger(__name__)
 
 _JOB_KEY_PREFIX = "promptjob:"
 _JOB_TTL_SECONDS = 3600
@@ -123,17 +126,6 @@ async def run_eval_job(
                 max_tokens=max_tokens,
                 version_num=version_num,
             )
-            await record_audit_event(
-                session,
-                actor_account_id=actor_account_id,
-                actor_label=actor_label,
-                action="eval.run",
-                entity_type="prompt",
-                entity_ref=prompt_name,
-                version_num=version_num,
-                result="success",
-                details={"score": run.score, "passed": run.passed, "run_id": run.id},
-            )
     except Exception as exc:  # noqa: BLE001 - terminal outcome is recorded, not swallowed
         async with session_factory() as session:
             await record_audit_event(
@@ -148,15 +140,35 @@ async def run_eval_job(
                 details={"error": str(exc)},
             )
         await update_job(redis, job_id, status="failed", error=str(exc))
-    else:
-        # Outside the try: a Redis failure here must not be miscategorized as
-        # a failed eval run - the suite already ran and was audited once.
-        await update_job(
-            redis,
+        return
+
+    # The suite already ran and its EvalRun is persisted; a failure past this
+    # point (audit write, Redis) must not be miscategorized as a failed run.
+    try:
+        async with session_factory() as session:
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="eval.run",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="success",
+                details={"score": run.score, "passed": run.passed, "run_id": run.id},
+            )
+    except Exception:  # noqa: BLE001 - logged, not allowed to mask the real outcome
+        logger.exception(
+            "audit write failed after successful eval run job_id=%s prompt=%s",
             job_id,
-            status="succeeded",
-            result={"score": run.score, "passed": run.passed},
+            prompt_name,
         )
+    await update_job(
+        redis,
+        job_id,
+        status="succeeded",
+        result={"score": run.score, "passed": run.passed},
+    )
 
 
 async def run_promote_job(
@@ -179,10 +191,16 @@ async def run_promote_job(
     `promote_prompt` with it, so the whole gate + version flip runs inside
     the service's atomic path. A gate failure (`EvalGateFailure`) yields a
     terminal `blocked` status and audit `result="blocked"` with the failing
-    score, leaving the active version untouched. Any other error yields
-    `failed` / `result="error"`. Success yields `succeeded` /
-    `result="success"`. Passes `redis` to `promote_prompt` so the exact-cache
-    is invalidated on a successful flip.
+    score, leaving the active version untouched. Any other error before the
+    flip commits yields `failed` / `result="error"`. Success yields
+    `succeeded` / `result="success"`. Passes `redis` to `promote_prompt` so
+    the exact-cache is invalidated on a successful flip.
+
+    The audit write for a successful promotion happens after `promote_prompt`
+    has already committed the version flip, outside the failure-handling try
+    block: if the audit write itself fails, that failure is logged but does
+    not flip the job to `failed` or produce a contradictory `result="error"`
+    event, since the promotion already succeeded and is durably persisted.
     """
     await update_job(redis, job_id, status="running")
     gate = make_eval_gate(
@@ -195,17 +213,6 @@ async def run_promote_job(
         async with session_factory() as session:
             promoted = await promote_prompt(
                 prompt_name, version_num, session, redis=redis, gate=gate
-            )
-            await record_audit_event(
-                session,
-                actor_account_id=actor_account_id,
-                actor_label=actor_label,
-                action="prompt.promote",
-                entity_type="prompt",
-                entity_ref=prompt_name,
-                version_num=version_num,
-                result="success",
-                details={"to_version": promoted.version_num},
             )
     except EvalGateFailure as exc:
         async with session_factory() as session:
@@ -226,6 +233,7 @@ async def run_promote_job(
             status="blocked",
             result={"score": exc.eval_run.score, "passed": False},
         )
+        return
     except Exception as exc:  # noqa: BLE001 - terminal outcome is recorded, not swallowed
         async with session_factory() as session:
             await record_audit_event(
@@ -240,11 +248,31 @@ async def run_promote_job(
                 details={"error": str(exc)},
             )
         await update_job(redis, job_id, status="failed", error=str(exc))
-    else:
-        # Outside the try: a Redis failure here must not be miscategorized as
-        # a failed/blocked promotion - the flip already succeeded and was
-        # audited once.
-        await update_job(redis, job_id, status="succeeded", result={"passed": True})
+        return
+
+    # The version flip already committed; a failure past this point (audit
+    # write, Redis) must not be miscategorized as a failed promotion.
+    try:
+        async with session_factory() as session:
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="prompt.promote",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="success",
+                details={"to_version": promoted.version_num},
+            )
+    except Exception:  # noqa: BLE001 - logged, not allowed to mask the real outcome
+        logger.exception(
+            "audit write failed after successful promotion job_id=%s prompt=%s version=%s",
+            job_id,
+            prompt_name,
+            version_num,
+        )
+    await update_job(redis, job_id, status="succeeded", result={"passed": True})
 
 
 def spawn(coro) -> asyncio.Task:
