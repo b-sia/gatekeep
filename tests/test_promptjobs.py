@@ -8,7 +8,7 @@ from gatekeep.db import SessionLocal
 from gatekeep.evals import add_case, create_suite
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import AuditEvent, EvalRun
-from gatekeep.prompts import create_prompt
+from gatekeep.prompts import add_prompt_version, create_prompt, get_active_prompt_version
 
 
 @pytest.fixture
@@ -122,3 +122,84 @@ async def test_run_eval_job_records_error_on_missing_suite(redis, session):
             .all()
         )
         assert events[0].result == "error"
+
+
+async def test_run_promote_job_no_suite_succeeds(redis, session):
+    await create_prompt("job-promote", "v1", session)
+    await add_prompt_version("job-promote", "v2", session)
+    job_id = await promptjobs.create_job(
+        redis, kind="promote", prompt_name="job-promote", version_num=2
+    )
+    await promptjobs.run_promote_job(
+        job_id,
+        prompt_name="job-promote",
+        version_num=2,
+        provider=_FakeProvider(),
+        generate_model="claude-sonnet-5",
+        judge_model="claude-sonnet-5",
+        max_tokens=64,
+        actor_account_id=None,
+        actor_label="op",
+        redis=redis,
+        session_factory=SessionLocal,
+    )
+    job = await promptjobs.get_job(redis, job_id)
+    assert job["status"] == "succeeded"
+    async with SessionLocal() as s:
+        active = await get_active_prompt_version("job-promote", s)
+        assert active.version_num == 2
+        events = (
+            (await s.execute(select(AuditEvent).where(AuditEvent.action == "prompt.promote")))
+            .scalars()
+            .all()
+        )
+        assert events[0].result == "success"
+
+
+async def test_run_promote_job_blocked_by_eval_gate(redis, session):
+    await create_prompt("job-promote-gate", "v1", session)
+    await add_prompt_version("job-promote-gate", "v2", session)
+    suite = await create_suite("job-promote-gate", session, pass_threshold=1.0)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "hi"}],
+        check_type="contains",
+        expected="WILL-NOT-MATCH",
+    )
+
+    class _FailProvider:
+        async def complete(self, payload):
+            class R:
+                text = "nope"
+
+            return R()
+
+    job_id = await promptjobs.create_job(
+        redis, kind="promote", prompt_name="job-promote-gate", version_num=2
+    )
+    await promptjobs.run_promote_job(
+        job_id,
+        prompt_name="job-promote-gate",
+        version_num=2,
+        provider=_FailProvider(),
+        generate_model="claude-sonnet-5",
+        judge_model="claude-sonnet-5",
+        max_tokens=64,
+        actor_account_id=None,
+        actor_label="op",
+        redis=redis,
+        session_factory=SessionLocal,
+    )
+    job = await promptjobs.get_job(redis, job_id)
+    assert job["status"] == "blocked"
+    assert job["result"]["passed"] is False
+    async with SessionLocal() as s:
+        active = await get_active_prompt_version("job-promote-gate", s)
+        assert active.version_num == 1  # NOT promoted
+        events = (
+            (await s.execute(select(AuditEvent).where(AuditEvent.action == "prompt.promote")))
+            .scalars()
+            .all()
+        )
+        assert events[0].result == "blocked"

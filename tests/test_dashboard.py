@@ -1991,3 +1991,41 @@ async def test_eval_run_endpoint_returns_job_id_and_completes(client, operator_k
         assert job["status"] == "succeeded"
     finally:
         app.dependency_overrides.pop(_get_eval_provider, None)
+
+
+async def test_promote_endpoint_returns_job_id(client, operator_key, session):
+    from gatekeep import promptjobs
+    from gatekeep.api.dashboard import _get_eval_provider
+    from gatekeep.app import app
+    from gatekeep.middleware.ratelimit import get_redis
+
+    await create_prompt("ep-promote", "v1", session)
+    await add_prompt_version("ep-promote", "v2", session)
+
+    class _FakeProvider:
+        async def complete(self, payload):
+            class R:
+                text = "x"
+
+            return R()
+
+    app.dependency_overrides[_get_eval_provider] = lambda: _FakeProvider()
+    try:
+        r = await client.post(
+            "/dashboard/api/prompts/ep-promote/promote",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json={"version_num": 2},
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        import asyncio
+
+        redis = get_redis()
+        for _ in range(50):
+            job = await promptjobs.get_job(redis, job_id)
+            if job and job["status"] in ("succeeded", "failed", "blocked"):
+                break
+            await asyncio.sleep(0.1)
+        assert job["status"] == "succeeded"
+    finally:
+        app.dependency_overrides.pop(_get_eval_provider, None)

@@ -2210,6 +2210,49 @@ async def eval_run_route(
     return JobCreatedResponse(job_id=job_id)
 
 
+class PromoteRequest(BaseModel):
+    """Request body for promoting a prompt version (async, eval-gated)."""
+
+    version_num: int
+
+
+@router.post("/prompts/{name}/promote", response_model=JobCreatedResponse)
+async def promote_route(
+    name: str,
+    body: PromoteRequest,
+    redis: Redis = Depends(_get_redis),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> JobCreatedResponse:
+    """Kick off an eval-gated promotion as a background job. Operator only.
+
+    Returns a job id immediately; the UI polls `GET /prompts/jobs/{id}`. The
+    background task runs the eval gate then the version flip, records the
+    `prompt.promote` audit event (success/blocked/error), and invalidates the
+    prompt's caches on success.
+    """
+    settings = get_settings()
+    job_id = await promptjobs.create_job(
+        redis, kind="promote", prompt_name=name, version_num=body.version_num
+    )
+    promptjobs.spawn(
+        promptjobs.run_promote_job(
+            job_id,
+            prompt_name=name,
+            version_num=body.version_num,
+            provider=provider,
+            generate_model=settings.default_model,
+            judge_model=settings.eval_judge_model,
+            max_tokens=settings.default_max_tokens,
+            actor_account_id=operator.id,
+            actor_label=operator.name,
+            redis=redis,
+            session_factory=SessionLocal,
+        )
+    )
+    return JobCreatedResponse(job_id=job_id)
+
+
 @router.get("/prompts/jobs/{job_id}", response_model=JobStatusResponse)
 async def poll_job(
     job_id: str,

@@ -10,7 +10,8 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from gatekeep.audit import record_audit_event
-from gatekeep.evals import run_suite_for_prompt
+from gatekeep.evals import EvalGateFailure, make_eval_gate, run_suite_for_prompt
+from gatekeep.prompts import promote_prompt
 
 _JOB_KEY_PREFIX = "promptjob:"
 _JOB_TTL_SECONDS = 3600
@@ -146,6 +147,90 @@ async def run_eval_job(
                 actor_account_id=actor_account_id,
                 actor_label=actor_label,
                 action="eval.run",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="error",
+                details={"error": str(exc)},
+            )
+        await update_job(redis, job_id, status="failed", error=str(exc))
+
+
+async def run_promote_job(
+    job_id: str,
+    *,
+    prompt_name: str,
+    version_num: int,
+    provider,
+    generate_model: str,
+    judge_model: str,
+    max_tokens: int,
+    actor_account_id: int | None,
+    actor_label: str,
+    redis: Redis,
+    session_factory: async_sessionmaker,
+) -> None:
+    """Promote a prompt version as a background job, running the eval gate first.
+
+    Builds the eval gate (a no-op when the prompt has no suite) and calls
+    `promote_prompt` with it, so the whole gate + version flip runs inside
+    the service's atomic path. A gate failure (`EvalGateFailure`) yields a
+    terminal `blocked` status and audit `result="blocked"` with the failing
+    score, leaving the active version untouched. Any other error yields
+    `failed` / `result="error"`. Success yields `succeeded` /
+    `result="success"`. Passes `redis` to `promote_prompt` so the exact-cache
+    is invalidated on a successful flip.
+    """
+    await update_job(redis, job_id, status="running")
+    gate = make_eval_gate(
+        provider=provider,
+        generate_model=generate_model,
+        judge_model=judge_model,
+        max_tokens=max_tokens,
+    )
+    try:
+        async with session_factory() as session:
+            promoted = await promote_prompt(
+                prompt_name, version_num, session, redis=redis, gate=gate
+            )
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="prompt.promote",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="success",
+                details={"to_version": promoted.version_num},
+            )
+        await update_job(redis, job_id, status="succeeded", result={"passed": True})
+    except EvalGateFailure as exc:
+        async with session_factory() as session:
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="prompt.promote",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="blocked",
+                details={"score": exc.eval_run.score, "run_id": exc.eval_run.id},
+            )
+        await update_job(
+            redis,
+            job_id,
+            status="blocked",
+            result={"score": exc.eval_run.score, "passed": False},
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal outcome is recorded, not swallowed
+        async with session_factory() as session:
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="prompt.promote",
                 entity_type="prompt",
                 entity_ref=prompt_name,
                 version_num=version_num,
