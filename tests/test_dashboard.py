@@ -1642,3 +1642,51 @@ async def test_prompt_curation_lists_unreviewed_only(client, operator_key, sessi
     cases = r.json()["cases"]
     assert len(cases) == 1
     assert cases[0]["reviewed"] is False
+
+
+async def test_audit_feed_filters_and_orders_newest_first(client, operator_key, session):
+    from gatekeep.audit import record_audit_event
+
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.create",
+        entity_type="prompt",
+        entity_ref="p1",
+        result="success",
+    )
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.promote",
+        entity_type="prompt",
+        entity_ref="p1",
+        result="success",
+        version_num=2,
+    )
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.promote",
+        entity_type="prompt",
+        entity_ref="p2",
+        result="blocked",
+    )
+
+    r = await client.get(
+        "/dashboard/api/audit",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        params={"entity_type": "prompt", "entity_ref": "p1"},
+    )
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert [e["action"] for e in events] == ["prompt.promote", "prompt.create"]
+    assert events[0]["version_num"] == 2
+
+
+async def test_audit_feed_requires_operator(client, raw_key):
+    r = await client.get("/dashboard/api/audit", headers={"Authorization": f"Bearer {raw_key}"})
+    assert r.status_code == 403

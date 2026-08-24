@@ -20,6 +20,7 @@ from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
     Account,
     ApiKey,
+    AuditEvent,
     EvalCase,
     EvalRun,
     EvalSuite,
@@ -1062,6 +1063,27 @@ async def latency_timeseries(
     return LatencyTimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
 
 
+class AuditEventOut(BaseModel):
+    """One audit-log row for the read-only feed."""
+
+    id: int
+    created_at: datetime
+    actor_account_id: int | None
+    actor_label: str
+    action: str
+    entity_type: str
+    entity_ref: str | None
+    version_num: int | None
+    result: str
+    details: dict
+
+
+class AuditFeedResponse(BaseModel):
+    """A page of audit events, newest first."""
+
+    events: list[AuditEventOut]
+
+
 class EvalRunOut(BaseModel):
     """One eval run, joined with its suite's prompt name and the prompt
     version number it evaluated."""
@@ -1081,6 +1103,49 @@ class EvalHistoryResponse(BaseModel):
     """A list of eval runs, newest first."""
 
     runs: list[EvalRunOut]
+
+
+@router.get("/audit", response_model=AuditFeedResponse)
+async def audit_feed(
+    entity_type: str | None = Query(default=None),
+    entity_ref: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AuditFeedResponse:
+    """Return the audit feed, newest first, filterable by entity/action.
+
+    Fleet-wide and operator only. `entity_type`/`entity_ref`/`action` are
+    optional equality filters; `limit` caps the page (default 100, max 500).
+    """
+    query = select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    if entity_type is not None:
+        query = query.where(AuditEvent.entity_type == entity_type)
+    if entity_ref is not None:
+        query = query.where(AuditEvent.entity_ref == entity_ref)
+    if action is not None:
+        query = query.where(AuditEvent.action == action)
+    query = query.limit(limit)
+
+    rows = (await session.execute(query)).scalars().all()
+    return AuditFeedResponse(
+        events=[
+            AuditEventOut(
+                id=e.id,
+                created_at=e.created_at,
+                actor_account_id=e.actor_account_id,
+                actor_label=e.actor_label,
+                action=e.action,
+                entity_type=e.entity_type,
+                entity_ref=e.entity_ref,
+                version_num=e.version_num,
+                result=e.result,
+                details=e.details,
+            )
+            for e in rows
+        ]
+    )
 
 
 @router.get("/evals", response_model=EvalHistoryResponse)
