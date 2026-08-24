@@ -15,7 +15,7 @@ from gatekeep import account_service, promptjobs
 from gatekeep.audit import record_audit_event
 from gatekeep.config import get_settings
 from gatekeep.curation import curate_cases, list_unreviewed, review_case
-from gatekeep.db import get_session
+from gatekeep.db import SessionLocal, get_session
 from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
@@ -2159,6 +2159,55 @@ class JobStatusResponse(BaseModel):
     error: str | None
     created_at: str
     updated_at: str
+
+
+class EvalRunRequest(BaseModel):
+    """Request body for an on-demand eval run (async job)."""
+
+    version_num: int | None = None
+    model: str | None = None
+
+
+class JobCreatedResponse(BaseModel):
+    """The id of a background job the caller should poll."""
+
+    job_id: str
+
+
+@router.post("/prompts/{name}/eval-run", response_model=JobCreatedResponse)
+async def eval_run_route(
+    name: str,
+    body: EvalRunRequest,
+    redis: Redis = Depends(_get_redis),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> JobCreatedResponse:
+    """Kick off an on-demand eval run as a background job. Operator only.
+
+    Returns a job id immediately; the UI polls `GET /prompts/jobs/{id}`. The
+    background task drives Redis status, persists the EvalRun, and writes the
+    `eval.run` audit event with its outcome (success or error).
+    """
+    settings = get_settings()
+    job_id = await promptjobs.create_job(
+        redis, kind="eval_run", prompt_name=name, version_num=body.version_num
+    )
+    promptjobs.spawn(
+        promptjobs.run_eval_job(
+            job_id,
+            prompt_name=name,
+            version_num=body.version_num,
+            model=body.model or settings.default_model,
+            provider=provider,
+            judge_model=settings.eval_judge_model,
+            max_tokens=settings.default_max_tokens,
+            actor_account_id=operator.id,
+            actor_label=operator.name,
+            redis=redis,
+            session_factory=SessionLocal,
+        )
+    )
+    return JobCreatedResponse(job_id=job_id)
 
 
 @router.get("/prompts/jobs/{job_id}", response_model=JobStatusResponse)

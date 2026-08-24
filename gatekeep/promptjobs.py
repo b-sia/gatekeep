@@ -7,6 +7,10 @@ from typing import Any
 from uuid import uuid4
 
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from gatekeep.audit import record_audit_event
+from gatekeep.evals import run_suite_for_prompt
 
 _JOB_KEY_PREFIX = "promptjob:"
 _JOB_TTL_SECONDS = 3600
@@ -79,6 +83,76 @@ async def update_job(redis: Redis, job_id: str, **changes: Any) -> dict | None:
     record["updated_at"] = _now()
     await redis.set(_key(job_id), json.dumps(record), ex=_JOB_TTL_SECONDS)
     return record
+
+
+async def run_eval_job(
+    job_id: str,
+    *,
+    prompt_name: str,
+    version_num: int | None,
+    model: str,
+    provider,
+    judge_model: str,
+    max_tokens: int,
+    actor_account_id: int | None,
+    actor_label: str,
+    redis: Redis,
+    session_factory: async_sessionmaker,
+) -> None:
+    """Run a prompt's eval suite as a background job, driving Redis + audit.
+
+    Transitions the job `queued -> running`, runs the suite via the existing
+    `run_suite_for_prompt` (which persists the EvalRun), then writes the
+    terminal status and a single `eval.run` audit event. A raised error
+    (e.g. no suite, provider failure) yields status `failed` and audit
+    `result="error"`; success yields `succeeded` and `result="success"`.
+
+    Uses its own DB session from `session_factory` (not the request's), since
+    the request has already returned by the time this runs.
+    """
+    await update_job(redis, job_id, status="running")
+    try:
+        async with session_factory() as session:
+            run = await run_suite_for_prompt(
+                prompt_name,
+                session,
+                provider=provider,
+                generate_model=model,
+                judge_model=judge_model,
+                max_tokens=max_tokens,
+                version_num=version_num,
+            )
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="eval.run",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="success",
+                details={"score": run.score, "passed": run.passed, "run_id": run.id},
+            )
+        await update_job(
+            redis,
+            job_id,
+            status="succeeded",
+            result={"score": run.score, "passed": run.passed},
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal outcome is recorded, not swallowed
+        async with session_factory() as session:
+            await record_audit_event(
+                session,
+                actor_account_id=actor_account_id,
+                actor_label=actor_label,
+                action="eval.run",
+                entity_type="prompt",
+                entity_ref=prompt_name,
+                version_num=version_num,
+                result="error",
+                details={"error": str(exc)},
+            )
+        await update_job(redis, job_id, status="failed", error=str(exc))
 
 
 def spawn(coro) -> asyncio.Task:
