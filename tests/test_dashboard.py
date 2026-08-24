@@ -1580,3 +1580,65 @@ async def test_patch_account_operator_only(client, raw_key):
         json={"name": "nope"},
     )
     assert resp.status_code == 403
+
+
+async def test_prompt_suite_returns_suite_and_reviewed_cases(client, operator_key, session):
+    await create_prompt("dash-suite-prompt", "tmpl", session)
+    suite = await create_suite("dash-suite-prompt", session, pass_threshold=0.7)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "hi"}],
+        check_type="contains",
+        expected="hello",
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/dash-suite-prompt/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["suite"]["pass_threshold"] == 0.7
+    assert len(body["cases"]) == 1
+    assert body["cases"][0]["check_type"] == "contains"
+
+
+async def test_prompt_suite_null_when_no_suite(client, operator_key, session):
+    await create_prompt("dash-nosuite-prompt", "tmpl", session)
+    r = await client.get(
+        "/dashboard/api/prompts/dash-nosuite-prompt/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"suite": None, "cases": []}
+
+
+async def test_prompt_curation_lists_unreviewed_only(client, operator_key, session):
+    await create_prompt("dash-cur-prompt", "tmpl", session)
+    suite = await create_suite("dash-cur-prompt", session, pass_threshold=0.5)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=False,
+        source="curated",
+    )
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q2"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=True,
+    )
+    r = await client.get(
+        "/dashboard/api/prompts/dash-cur-prompt/curation",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    cases = r.json()["cases"]
+    assert len(cases) == 1
+    assert cases[0]["reviewed"] is False

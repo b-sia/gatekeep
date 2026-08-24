@@ -12,12 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep import account_service
 from gatekeep.config import get_settings
+from gatekeep.curation import list_unreviewed
 from gatekeep.db import get_session
+from gatekeep.evals import get_suite_for_prompt
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
     Account,
     ApiKey,
+    EvalCase,
     EvalRun,
     EvalSuite,
     Prompt,
@@ -1236,6 +1239,104 @@ async def prompt_version_timeline(
         for v in rows
     ]
     return PromptVersionTimelineResponse(name=name, versions=versions)
+
+
+class SuiteOut(BaseModel):
+    """An eval suite bound to a prompt."""
+
+    id: int
+    name: str
+    prompt_name: str
+    pass_threshold: float
+    created_at: datetime
+
+
+class EvalCaseOut(BaseModel):
+    """One eval case in a suite, reviewed or curated-and-unreviewed."""
+
+    id: int
+    check_type: str
+    expected: str | None
+    judge_criteria: str | None
+    reviewed: bool
+    source: str
+    account_id: int | None
+    created_at: datetime
+    input_messages: list[dict]
+
+
+class PromptSuiteResponse(BaseModel):
+    """A prompt's eval suite and its cases, or null suite / empty cases."""
+
+    suite: SuiteOut | None
+    cases: list[EvalCaseOut]
+
+
+class CurationResponse(BaseModel):
+    """A prompt's unreviewed curated cases."""
+
+    cases: list[EvalCaseOut]
+
+
+def _case_out(case: EvalCase) -> EvalCaseOut:
+    """Map an EvalCase ORM row to its response model."""
+    return EvalCaseOut(
+        id=case.id,
+        check_type=case.check_type,
+        expected=case.expected,
+        judge_criteria=case.judge_criteria,
+        reviewed=case.reviewed,
+        source=case.source,
+        account_id=case.account_id,
+        created_at=case.created_at,
+        input_messages=case.input_messages,
+    )
+
+
+@router.get("/prompts/{name}/suite", response_model=PromptSuiteResponse)
+async def prompt_suite(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PromptSuiteResponse:
+    """Return the eval suite bound to `name` and its cases.
+
+    Returns `{suite: null, cases: []}` when no suite is registered (not a
+    404) - the UI treats "no suite" as an offer to create one. Operator only.
+    """
+    suite = await get_suite_for_prompt(name, session)
+    if suite is None:
+        return PromptSuiteResponse(suite=None, cases=[])
+    rows = (
+        (
+            await session.execute(
+                select(EvalCase).where(EvalCase.suite_id == suite.id).order_by(EvalCase.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PromptSuiteResponse(
+        suite=SuiteOut(
+            id=suite.id,
+            name=suite.name,
+            prompt_name=suite.prompt_name,
+            pass_threshold=suite.pass_threshold,
+            created_at=suite.created_at,
+        ),
+        cases=[_case_out(c) for c in rows],
+    )
+
+
+@router.get("/prompts/{name}/curation", response_model=CurationResponse)
+async def prompt_curation(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> CurationResponse:
+    """Return `name`'s unreviewed curated eval cases, oldest first. Operator only."""
+    cases = await list_unreviewed(name, session)
+    return CurationResponse(cases=[_case_out(c) for c in cases])
 
 
 class MeResponse(BaseModel):
