@@ -1604,6 +1604,39 @@ async def clear_candidate_route(
     return await _candidate_response(name, prompt, session)
 
 
+class PromptTrafficResponse(BaseModel):
+    """Actual observed request traffic per prompt version, over a time window."""
+
+    name: str
+    start: datetime
+    end: datetime
+    by_version: list[UsageBreakdownRow]
+
+
+@router.get("/prompts/{name}/traffic", response_model=PromptTrafficResponse)
+async def prompt_traffic(
+    name: str,
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PromptTrafficResponse:
+    """Return actual per-version request counts for a prompt over a time range.
+
+    Complements the configured A/B candidate `traffic_pct` (the target split)
+    with what was actually observed: routing is probabilistic, so the two can
+    drift, especially at low volume. Grouped on `RequestLog.prompt_version_num`,
+    which is set on every request that names this prompt (active or
+    candidate). `start`/`end` default to the trailing 7 days. Operator only.
+    """
+    default_start, default_end = _default_window()
+    start = start or default_start
+    end = end or default_end
+    filters = _base_filters(start, end, model=None, key_id=None, prompt_name=name)
+    by_version = await _breakdown(session, RequestLog.prompt_version_num, filters)
+    return PromptTrafficResponse(name=name, start=start, end=end, by_version=by_version)
+
+
 @router.get("/prompts/{name}/suite", response_model=PromptSuiteResponse)
 async def prompt_suite(
     name: str,

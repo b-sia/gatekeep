@@ -51,6 +51,7 @@ async def _seed_log(
     cost_usd: float = 0.01,
     cached: bool = False,
     prompt_name: str | None = None,
+    prompt_version_num: int | None = None,
     created_at: datetime | None = None,
     path: str | None = None,
     duration_ms: float | None = None,
@@ -82,6 +83,7 @@ async def _seed_log(
         cached=cached,
         response_id=f"resp-{uuid4()}",
         prompt_name=prompt_name,
+        prompt_version_num=prompt_version_num,
         path=path,
         duration_ms=duration_ms,
         provider_ms=provider_ms,
@@ -1369,6 +1371,61 @@ async def test_clear_candidate_resets(client, operator_key, session):
     assert r.status_code == 200
     assert r.json()["candidate_version_num"] is None
     assert r.json()["traffic_pct"] is None
+
+
+async def test_traffic_breaks_down_by_actual_version(client, operator_key, session):
+    """GET .../traffic reflects requests actually served by each version, not
+    the candidate's configured target split."""
+    await create_prompt("cand-traffic", "v1", session)
+    await add_prompt_version("cand-traffic", "v2", session)
+    await set_candidate_version("cand-traffic", 2, 30, session)
+    raw, key_id, _acct_id = await _account_with_key(session, name="traffic-caller")
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=2
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/cand-traffic/traffic",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    by_version = {row["key"]: row["request_count"] for row in r.json()["by_version"]}
+    assert by_version == {"1": 2, "2": 1}
+
+
+async def test_traffic_excludes_other_prompts(client, operator_key, session):
+    """The breakdown is scoped to the named prompt, not fleet-wide."""
+    await create_prompt("cand-scope-a", "v1", session)
+    await create_prompt("cand-scope-b", "v1", session)
+    raw, key_id, _acct_id = await _account_with_key(session, name="scope-caller")
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-scope-a", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-scope-b", prompt_version_num=1
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/cand-scope-a/traffic",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    by_version = {row["key"]: row["request_count"] for row in r.json()["by_version"]}
+    assert by_version == {"1": 1}
+
+
+async def test_traffic_requires_operator(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/prompts/cand-traffic/traffic",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 403
 
 
 async def test_non_operator_cannot_touch_other_account_keys(client, raw_key, session):

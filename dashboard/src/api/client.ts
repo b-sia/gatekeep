@@ -19,6 +19,7 @@ import type {
   PromptListResponse,
   PromptMutationResponse,
   PromptSuiteResponse,
+  PromptTrafficResponse,
   PromptVersionTimelineResponse,
   SuiteOut,
   TimeseriesResponse,
@@ -389,6 +390,18 @@ export function clearCandidate(name: string): Promise<CandidateResponse> {
     "DELETE",
     `prompts/${encodeURIComponent(name)}/candidate`,
   );
+}
+
+/** Fetches actual per-version request counts for a prompt (trailing 7 days
+ * when start/end are omitted), to compare against the configured candidate split. */
+export function getPromptTraffic(
+  name: string,
+  filters?: { start?: string; end?: string },
+): Promise<PromptTrafficResponse> {
+  return request<PromptTrafficResponse>(`prompts/${encodeURIComponent(name)}/traffic`, {
+    start: filters?.start,
+    end: filters?.end,
+  });
 }
 
 /** Creates an eval suite for a prompt (threshold defaults server-side). */

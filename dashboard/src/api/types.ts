@@ -300,6 +300,15 @@ export interface CandidateResponse {
   traffic_pct: number | null;
 }
 
+/** Actual observed request counts per prompt version, over a time window -
+ * the counterpart to CandidateResponse's configured target split. */
+export interface PromptTrafficResponse {
+  name: string;
+  start: string;
+  end: string;
+  by_version: UsageBreakdownRow[];
+}
+
 /** One audit-log row for the read-only feed. */
 export interface AuditEventOut {
   id: number;

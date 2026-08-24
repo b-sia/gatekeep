@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   UnauthorizedError,
   clearCandidate,
+  getPromptTraffic,
   setCandidate,
 } from "../../api/client";
-import type { CandidateResponse, PromptVersionOut } from "../../api/types";
+import type {
+  CandidateResponse,
+  PromptVersionOut,
+  UsageBreakdownRow,
+} from "../../api/types";
 
 interface CandidateSectionProps {
   name: string;
@@ -12,11 +17,13 @@ interface CandidateSectionProps {
   onUnauthorized: () => void;
 }
 
-/**
+/**gk-XjvKWczlWqfjz7aXnUrtvtS9Tijco59Meb3_11H6xcA
  * A/B candidate sub-section: set or adjust the candidate version + traffic
  * percentage, or clear it. Reflects the server's returned candidate config
  * after each action (setting a candidate never runs the eval gate or
- * invalidates cache).
+ * invalidates cache). Also shows the actual observed request split by
+ * version over the trailing 7 days, since routing is probabilistic and can
+ * drift from the configured target - especially at low volume.
  */
 export default function CandidateSection({
   name,
@@ -26,12 +33,27 @@ export default function CandidateSection({
   const [versionNum, setVersionNum] = useState<number | "">("");
   const [pct, setPct] = useState<number>(10);
   const [current, setCurrent] = useState<CandidateResponse | null>(null);
+  const [traffic, setTraffic] = useState<UsageBreakdownRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fail = (err: unknown, fallback: string) => {
     if (err instanceof UnauthorizedError) return onUnauthorized();
     setError(err instanceof Error ? err.message : fallback);
   };
+
+  const loadTraffic = useCallback(async () => {
+    try {
+      const res = await getPromptTraffic(name);
+      setTraffic(res.by_version);
+    } catch (err) {
+      fail(err, "Failed to load traffic");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name]);
+
+  useEffect(() => {
+    void loadTraffic();
+  }, [loadTraffic]);
 
   const apply = async () => {
     if (versionNum === "") return;
@@ -42,6 +64,7 @@ export default function CandidateSection({
         traffic_pct: pct,
       });
       setCurrent(res);
+      void loadTraffic();
     } catch (err) {
       fail(err, "Failed to set candidate");
     }
@@ -52,10 +75,13 @@ export default function CandidateSection({
     try {
       const res = await clearCandidate(name);
       setCurrent(res);
+      void loadTraffic();
     } catch (err) {
       fail(err, "Failed to clear candidate");
     }
   };
+
+  const totalRequests = traffic?.reduce((sum, row) => sum + row.request_count, 0) ?? 0;
 
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
@@ -108,6 +134,34 @@ export default function CandidateSection({
         >
           Clear
         </button>
+      </div>
+      <div className="mt-4 border-t border-slate-800 pt-3">
+        <h4 className="mb-2 text-xs font-medium text-slate-400">
+          Actual traffic by version (last 7 days)
+        </h4>
+        {traffic === null ? (
+          <p className="text-xs text-slate-500">Loading...</p>
+        ) : totalRequests === 0 ? (
+          <p className="text-xs text-slate-500">No requests in this window.</p>
+        ) : (
+          <ul className="space-y-1">
+            {traffic
+              .slice()
+              .sort((a, b) => a.key.localeCompare(b.key))
+              .map((row) => (
+                <li
+                  key={row.key}
+                  className="flex items-center justify-between text-xs text-slate-300"
+                >
+                  <span>v{row.key}</span>
+                  <span className="text-slate-400">
+                    {row.request_count} req ({((row.request_count / totalRequests) * 100).toFixed(1)}
+                    %)
+                  </span>
+                </li>
+              ))}
+          </ul>
+        )}
       </div>
     </div>
   );
