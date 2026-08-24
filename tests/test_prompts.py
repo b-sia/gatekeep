@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from sqlalchemy import select
 
@@ -7,6 +9,7 @@ from gatekeep.api.openai_schemas import (
     ResponseMessage,
     Usage,
 )
+from gatekeep.db import SessionLocal
 from gatekeep.embeddings import embed_text
 from gatekeep.evals import EvalGateFailure, add_case, create_suite
 from gatekeep.middleware.cache_exact import (
@@ -16,8 +19,7 @@ from gatekeep.middleware.cache_exact import (
 )
 from gatekeep.middleware.cache_semantic import store_cached_response
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import CachedResponse
-from gatekeep.models import Prompt as _Prompt  # noqa: F401  (ensure import path)
+from gatekeep.models import CachedResponse, Prompt, PromptVersion
 from gatekeep.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
@@ -155,6 +157,91 @@ async def test_promote_raises_for_unknown_version(session):
 async def test_promote_raises_for_unknown_prompt(session):
     with pytest.raises(PromptNotFoundError):
         await promote_prompt("does-not-exist", 1, session)
+
+
+# -- Concurrency: promote_prompt's row lock must actually serialize --------
+#
+# These run two independent SessionLocal() sessions (independent Postgres
+# connections) concurrently, which is the only way to observe row-lock
+# contention - a single AsyncSession can't race against itself.
+
+
+async def test_promote_blocks_until_concurrent_holder_of_the_row_lock_commits(session):
+    """A second promote_prompt call must block on the Prompt row lock, not race it.
+
+    Regression test for the fix in 177abe6: before it, two concurrent
+    promote_prompt calls could both read active_version_id before either
+    committed. Here we hold the row lock open on one connection and assert
+    a concurrent promote_prompt on another connection is still blocked
+    after a generous wait, then only proceeds once the lock is released.
+    """
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await session.commit()
+
+    holder = SessionLocal()
+    await holder.execute(select(Prompt).where(Prompt.name == "system-context").with_for_update())
+
+    waiter = SessionLocal()
+    task = asyncio.create_task(promote_prompt("system-context", 2, waiter))
+    try:
+        await asyncio.sleep(0.3)
+        assert not task.done(), "promote_prompt proceeded without waiting for the row lock"
+
+        await holder.commit()
+        promoted = await asyncio.wait_for(task, timeout=2)
+        assert promoted.version_num == 2
+    finally:
+        if not task.done():
+            task.cancel()
+        await holder.close()
+        await waiter.close()
+
+
+async def test_concurrent_promotes_leave_exactly_one_active_version(session):
+    """Many concurrent promote_prompt calls on the same prompt must never
+    leave two PromptVersion rows active at once, and active_version_id
+    must always point at the row that's actually flagged active."""
+    await create_prompt("system-context", "v1", session)
+    await add_prompt_version("system-context", "v2 text", session)
+    await add_prompt_version("system-context", "v3 text", session)
+    await session.commit()
+
+    targets = [2, 3] * 4
+    sessions = [SessionLocal() for _ in targets]
+    try:
+        await asyncio.gather(
+            *(
+                promote_prompt("system-context", target, s)
+                for target, s in zip(targets, sessions, strict=True)
+            )
+        )
+    finally:
+        for s in sessions:
+            await s.close()
+
+    verify = SessionLocal()
+    try:
+        versions = (
+            (
+                await verify.execute(
+                    select(PromptVersion)
+                    .join(Prompt, Prompt.id == PromptVersion.prompt_id)
+                    .where(Prompt.name == "system-context")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        active_versions = [v for v in versions if v.active]
+        assert len(active_versions) == 1
+
+        prompt_row = (
+            await verify.execute(select(Prompt).where(Prompt.name == "system-context"))
+        ).scalar_one()
+        assert prompt_row.active_version_id == active_versions[0].id
+    finally:
+        await verify.close()
 
 
 async def test_rollback_reverts_to_previously_active_version(session):
