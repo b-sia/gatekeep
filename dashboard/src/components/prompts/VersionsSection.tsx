@@ -164,7 +164,8 @@ export default function VersionsSection({
                 {!v.active && (
                   <button
                     onClick={() => setConfirm({ kind: "promote", versionNum: v.version_num })}
-                    className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                    disabled={!!jobId}
+                    className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Promote
                   </button>
@@ -185,7 +186,8 @@ export default function VersionsSection({
       <div className="mt-3">
         <button
           onClick={() => setConfirm({ kind: "rollback", versionNum: 0 })}
-          className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+          disabled={!!jobId}
+          className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Roll back to previous
         </button>
