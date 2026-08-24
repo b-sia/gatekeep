@@ -4,6 +4,7 @@ import type { JobStatusResponse } from "../api/types";
 
 const TERMINAL: ReadonlySet<string> = new Set(["succeeded", "failed", "blocked"]);
 const POLL_INTERVAL_MS = 1000;
+const MAX_CONSECUTIVE_ERRORS = 3;
 
 /**
  * Polls a background job's status until it reaches a terminal state.
@@ -12,9 +13,12 @@ const POLL_INTERVAL_MS = 1000;
  * `GET /prompts/jobs/{id}` every second and returns the latest snapshot.
  * Polling stops as soon as the status is terminal (`succeeded`, `failed`,
  * `blocked`), at which point `onSettled` fires exactly once. A rejected
- * fetch that is a 401 (`UnauthorizedError`) stops polling and calls
- * `onUnauthorized` instead of surfacing an error; any other rejection (e.g.
- * the job TTL lapsed => 404) stops polling and surfaces
+ * fetch that is a 401 (`UnauthorizedError`) stops polling immediately and
+ * calls `onUnauthorized` instead of surfacing an error. Any other rejection
+ * (e.g. a transient network blip) is treated as retryable: polling
+ * continues silently on the same interval, and `error` is only set once
+ * `MAX_CONSECUTIVE_ERRORS` polls in a row have failed (a successful poll in
+ * between resets the count) - at that point polling stops and
  * `error = "status unavailable, refresh"`. Passing `jobId === null` leaves
  * the hook idle (no polling).
  *
@@ -64,16 +68,19 @@ export function useJob(
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let consecutiveErrors = 0;
 
     const poll = async () => {
       try {
         const snapshot = await getJob(jobId);
         if (cancelled) return;
+        consecutiveErrors = 0;
         setJob(snapshot);
         if (TERMINAL.has(snapshot.status)) {
           onSettledRef.current?.(snapshot);
           return; // stop scheduling
         }
+        setError(null);
         timer = setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err) {
         if (cancelled) return;
@@ -81,7 +88,13 @@ export function useJob(
           onUnauthorizedRef.current?.();
           return;
         }
-        setError("status unavailable, refresh");
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          setError("status unavailable, refresh");
+          return;
+        }
+        // Transient failure - keep polling silently rather than giving up.
+        timer = setTimeout(poll, POLL_INTERVAL_MS);
       }
     };
 

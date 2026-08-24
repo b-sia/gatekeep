@@ -58,13 +58,38 @@ describe("useJob", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  it("surfaces an expired job as an error", async () => {
+  it("surfaces an expired job as an error after repeated failures", async () => {
     vi.spyOn(client, "getJob").mockRejectedValue(new Error("job not found or expired"));
     const { result } = renderHook(() => useJob("j"));
+    // A single failure is treated as transient and retried silently.
     await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(result.current.error).toBeNull());
+    // Only after MAX_CONSECUTIVE_ERRORS in a row does it give up.
+    await vi.advanceTimersByTimeAsync(3000);
     await waitFor(() =>
       expect(result.current.error).toBe("status unavailable, refresh"),
     );
+  });
+
+  it("retries silently through a transient failure and keeps polling", async () => {
+    const spy = vi
+      .spyOn(client, "getJob")
+      .mockRejectedValueOnce(new Error("network blip"))
+      .mockResolvedValueOnce(job("running"))
+      .mockResolvedValueOnce(job("succeeded"));
+    const onSettled = vi.fn();
+    const { result } = renderHook(() => useJob("j", { onSettled }));
+
+    await vi.advanceTimersByTimeAsync(0);
+    // The failed poll doesn't surface an error.
+    expect(result.current.error).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitFor(() => expect(result.current.job?.status).toBe("running"));
+    expect(result.current.error).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000);
+    await waitFor(() => expect(result.current.job?.status).toBe("succeeded"));
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   it("is idle when jobId is null", async () => {
