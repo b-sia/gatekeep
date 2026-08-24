@@ -689,6 +689,20 @@ async def test_prompt_versions_timeline_ordered_with_active_flag(client, operato
     assert versions[1]["notes"] == "tweak"
 
 
+async def test_prompt_versions_timeline_includes_template_text(client, operator_key, session):
+    await create_prompt("dash-tmpl-prompt", "the v1 template", session)
+    await add_prompt_version("dash-tmpl-prompt", "the v2 template", session)
+
+    r = await client.get(
+        "/dashboard/api/prompts/dash-tmpl-prompt/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    versions = r.json()["versions"]
+    assert versions[0]["template"] == "the v1 template"
+    assert versions[1]["template"] == "the v2 template"
+
+
 async def test_prompt_versions_timeline_404_for_unknown_prompt(client, operator_key):
     r = await client.get(
         "/dashboard/api/prompts/does-not-exist/versions",

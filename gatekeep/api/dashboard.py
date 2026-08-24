@@ -1181,6 +1181,7 @@ class PromptVersionOut(BaseModel):
 
     version_num: int
     active: bool
+    template: str
     created_at: datetime
     created_by: str | None
     notes: str | None
@@ -1227,6 +1228,7 @@ async def prompt_version_timeline(
         PromptVersionOut(
             version_num=v.version_num,
             active=v.active,
+            template=v.template,
             created_at=v.created_at,
             created_by=v.created_by,
             notes=v.notes,
