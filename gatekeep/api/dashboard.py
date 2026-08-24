@@ -11,7 +11,7 @@ from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep import account_service
+from gatekeep import account_service, promptjobs
 from gatekeep.audit import record_audit_event
 from gatekeep.config import get_settings
 from gatekeep.curation import curate_cases, list_unreviewed, review_case
@@ -2130,3 +2130,49 @@ async def patch_account_route(
             status_code=409, detail=_error_body(f"account name {body.name!r} is already taken")
         ) from exc
     return _account_out(account)
+
+
+class JobProgress(BaseModel):
+    """A job's per-case progress counter."""
+
+    done: int
+    total: int
+
+
+class JobResult(BaseModel):
+    """A completed eval/promote job's outcome payload."""
+
+    score: float | None = None
+    passed: bool | None = None
+
+
+class JobStatusResponse(BaseModel):
+    """Poll response for one background job."""
+
+    id: str
+    kind: str
+    prompt_name: str
+    version_num: int | None
+    status: str
+    progress: JobProgress
+    result: JobResult | None
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+@router.get("/prompts/jobs/{job_id}", response_model=JobStatusResponse)
+async def poll_job(
+    job_id: str,
+    redis: Redis = Depends(_get_redis),
+    _operator: Account = Depends(require_operator),
+) -> JobStatusResponse:
+    """Return the status of a background job. Operator only.
+
+    404 when the job id is unknown or its TTL has lapsed (the UI renders
+    this as "status unavailable, refresh").
+    """
+    record = await promptjobs.get_job(redis, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=_error_body("job not found or expired"))
+    return JobStatusResponse(**record)

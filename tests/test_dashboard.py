@@ -1936,3 +1936,11 @@ async def test_curation_mine_uses_injected_provider(client, operator_key, sessio
     assert r.status_code == 200
     assert len(r.json()["cases"]) == 1
     assert r.json()["cases"][0]["source"] == "curated"
+
+
+async def test_job_poll_404_for_unknown_job(client, operator_key):
+    r = await client.get(
+        "/dashboard/api/prompts/jobs/nope",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 404
