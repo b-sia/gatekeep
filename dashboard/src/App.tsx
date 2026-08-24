@@ -3,6 +3,7 @@ import IdentityPicker from "./components/IdentityPicker";
 import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
+import PromptsPage from "./pages/PromptsPage";
 import { getMe } from "./api/client";
 import {
   clearActiveIdentity,
@@ -83,6 +84,13 @@ export default function App() {
       />
       {tab === "analytics" ? (
         <DashboardPage
+          me={me}
+          meError={meError}
+          onRetryMe={loadMe}
+          onUnauthorized={handleUnauthorized}
+        />
+      ) : tab === "prompts" ? (
+        <PromptsPage
           me={me}
           meError={meError}
           onRetryMe={loadMe}
