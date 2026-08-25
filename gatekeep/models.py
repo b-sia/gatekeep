@@ -382,3 +382,44 @@ class EvalRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class AuditEvent(Base):
+    """One append-only record of a mutating operator action.
+
+    Fleet-wide by design: `actor_account_id` is nullable so events survive
+    the actor account being deleted, with `actor_label` holding the
+    operator's name denormalized at action time so the log stays readable.
+    `result` is one of `success` / `blocked` / `error`, so a promotion
+    stopped by the eval gate and a failed eval run are recorded as
+    first-class outcomes, not just successes. `details` carries
+    action-specific JSON (from/to version, eval score, traffic pct, case
+    count, error message, etc.). Prompt/eval operations are the first
+    producers; account/key producers can be added later with no schema
+    change.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True
+    )
+    actor_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+    actor_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    version_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index(
+            "ix_audit_events_entity",
+            "entity_type",
+            "entity_ref",
+            "created_at",
+        ),
+        Index("ix_audit_events_action_created_at", "action", "created_at"),
+    )

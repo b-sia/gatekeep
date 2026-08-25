@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { UnauthorizedError, getMe, validateKey } from "./client";
+import {
+  UnauthorizedError,
+  getMe,
+  validateKey,
+  createPrompt,
+  promotePrompt,
+  setCandidate,
+  clearCandidate,
+  getJob,
+} from "./client";
 import { addIdentity, getActiveIdentity, listIdentities, setActiveIdentity } from "./identityStore";
 import type { MeResponse } from "./types";
 
@@ -98,5 +107,80 @@ describe("validateKey", () => {
 
     expect(listIdentities()).toEqual(rosterBefore);
     expect(getActiveIdentity()).toEqual(activeBefore);
+  });
+});
+
+describe("prompt-ops client fns", () => {
+  beforeEach(() => {
+    const created = addIdentity({
+      key: "sk-op",
+      accountId: 1,
+      accountName: "Op",
+      isOperator: true,
+    });
+    setActiveIdentity(created.id);
+  });
+
+  it("POSTs a prompt create body", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(fakeResponse(200, { name: "p", version_num: 1 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await createPrompt({ name: "p", template: "t" });
+    expect(res.version_num).toBe(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/dashboard/api/prompts");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ name: "p", template: "t" });
+  });
+
+  it("returns a job id from promote", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(fakeResponse(200, { job_id: "abc" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await promotePrompt("p", 2);
+    expect(res.job_id).toBe("abc");
+    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+  });
+
+  it("PUTs and DELETEs the candidate", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        fakeResponse(200, {
+          name: "p",
+          candidate_version_num: 2,
+          traffic_pct: 10,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await setCandidate("p", { version_num: 2, traffic_pct: 10 });
+    expect(fetchMock.mock.calls[0][1].method).toBe("PUT");
+    await clearCandidate("p");
+    expect(fetchMock.mock.calls[1][1].method).toBe("DELETE");
+  });
+
+  it("GETs a job status", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        fakeResponse(200, {
+          id: "j",
+          kind: "eval_run",
+          prompt_name: "p",
+          version_num: null,
+          status: "running",
+          progress: { done: 1, total: 3 },
+          result: null,
+          error: null,
+          created_at: "",
+          updated_at: "",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await getJob("j");
+    expect(res.status).toBe("running");
   });
 });

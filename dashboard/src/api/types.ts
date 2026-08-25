@@ -104,6 +104,7 @@ export interface PromptListResponse {
 export interface PromptVersionOut {
   version_num: number;
   active: boolean;
+  template: string;
   created_at: string;
   created_by: string | null;
   notes: string | null;
@@ -251,4 +252,117 @@ export interface AccountPatchRequest {
   monthly_budget_usd?: number | null;
   clear_budget?: boolean;
   is_operator?: boolean;
+}
+
+/** An eval suite bound to a prompt. */
+export interface SuiteOut {
+  id: number;
+  name: string;
+  prompt_name: string;
+  pass_threshold: number;
+  created_at: string;
+}
+
+/** One eval case in a suite (reviewed or curated-and-unreviewed). */
+export interface EvalCaseOut {
+  id: number;
+  check_type: string;
+  expected: string | null;
+  judge_criteria: string | null;
+  reviewed: boolean;
+  source: string;
+  account_id: number | null;
+  created_at: string;
+  input_messages: Array<Record<string, unknown>>;
+}
+
+/** A prompt's eval suite and its cases (null suite => none registered). */
+export interface PromptSuiteResponse {
+  suite: SuiteOut | null;
+  cases: EvalCaseOut[];
+}
+
+/** A prompt's unreviewed curated cases. */
+export interface CurationResponse {
+  cases: EvalCaseOut[];
+}
+
+/** The prompt name and version number a mutation produced/left active. */
+export interface PromptMutationResponse {
+  name: string;
+  version_num: number;
+}
+
+/** A prompt's current A/B candidate config (nulls when none). */
+export interface CandidateResponse {
+  name: string;
+  candidate_version_num: number | null;
+  traffic_pct: number | null;
+}
+
+/** Actual observed request counts per prompt version, over a time window -
+ * the counterpart to CandidateResponse's configured target split. */
+export interface PromptTrafficResponse {
+  name: string;
+  start: string;
+  end: string;
+  by_version: UsageBreakdownRow[];
+}
+
+/** One audit-log row for the read-only feed. */
+export interface AuditEventOut {
+  id: number;
+  created_at: string;
+  actor_account_id: number | null;
+  actor_label: string;
+  action: string;
+  entity_type: string;
+  entity_ref: string | null;
+  version_num: number | null;
+  result: string;
+  details: Record<string, unknown>;
+}
+
+/** A page of audit events, newest first. */
+export interface AuditFeedResponse {
+  events: AuditEventOut[];
+}
+
+/** A background job's per-case progress. */
+export interface JobProgress {
+  done: number;
+  total: number;
+}
+
+/** A completed eval/promote job's outcome payload. */
+export interface JobResult {
+  score?: number | null;
+  passed?: boolean | null;
+}
+
+/** Terminal and in-flight states of a background job. */
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "blocked";
+
+/** Poll response for one background job. */
+export interface JobStatusResponse {
+  id: string;
+  kind: string;
+  prompt_name: string;
+  version_num: number | null;
+  status: JobStatus;
+  progress: JobProgress;
+  result: JobResult | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The id of a background job the caller should poll. */
+export interface JobCreatedResponse {
+  job_id: string;
 }

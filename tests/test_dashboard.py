@@ -13,7 +13,12 @@ from gatekeep.app import app
 from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.evals import add_case, create_suite, run_eval_suite
 from gatekeep.models import ApiKey, RequestLog
-from gatekeep.prompts import add_prompt_version, create_prompt, promote_prompt
+from gatekeep.prompts import (
+    add_prompt_version,
+    create_prompt,
+    promote_prompt,
+    set_candidate_version,
+)
 from tests.helpers import create_account, create_key
 
 
@@ -46,6 +51,7 @@ async def _seed_log(
     cost_usd: float = 0.01,
     cached: bool = False,
     prompt_name: str | None = None,
+    prompt_version_num: int | None = None,
     created_at: datetime | None = None,
     path: str | None = None,
     duration_ms: float | None = None,
@@ -77,6 +83,7 @@ async def _seed_log(
         cached=cached,
         response_id=f"resp-{uuid4()}",
         prompt_name=prompt_name,
+        prompt_version_num=prompt_version_num,
         path=path,
         duration_ms=duration_ms,
         provider_ms=provider_ms,
@@ -687,6 +694,20 @@ async def test_prompt_versions_timeline_ordered_with_active_flag(client, operato
     assert versions[1]["active"] is True
     assert versions[1]["created_by"] == "bob"
     assert versions[1]["notes"] == "tweak"
+
+
+async def test_prompt_versions_timeline_includes_template_text(client, operator_key, session):
+    await create_prompt("dash-tmpl-prompt", "the v1 template", session)
+    await add_prompt_version("dash-tmpl-prompt", "the v2 template", session)
+
+    r = await client.get(
+        "/dashboard/api/prompts/dash-tmpl-prompt/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    versions = r.json()["versions"]
+    assert versions[0]["template"] == "the v1 template"
+    assert versions[1]["template"] == "the v2 template"
 
 
 async def test_prompt_versions_timeline_404_for_unknown_prompt(client, operator_key):
@@ -1303,6 +1324,110 @@ async def test_revoke_flips_active(client, raw_key):
     assert resp.json()["active"] is False
 
 
+async def test_set_candidate_configures_split(client, operator_key, session):
+    await create_prompt("cand-prompt", "v1", session)
+    await add_prompt_version("cand-prompt", "v2", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-prompt/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 2, "traffic_pct": 25},
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "name": "cand-prompt",
+        "candidate_version_num": 2,
+        "traffic_pct": 25.0,
+    }
+
+
+async def test_set_candidate_invalid_pct_is_400(client, operator_key, session):
+    await create_prompt("cand-bad", "v1", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-bad/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 1, "traffic_pct": 150},
+    )
+    assert r.status_code == 400
+
+
+async def test_set_candidate_unknown_version_is_404(client, operator_key, session):
+    await create_prompt("cand-nov", "v1", session)
+    r = await client.put(
+        "/dashboard/api/prompts/cand-nov/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"version_num": 9, "traffic_pct": 10},
+    )
+    assert r.status_code == 404
+
+
+async def test_clear_candidate_resets(client, operator_key, session):
+    await create_prompt("cand-clear", "v1", session)
+    await add_prompt_version("cand-clear", "v2", session)
+    await set_candidate_version("cand-clear", 2, 30, session)
+    r = await client.delete(
+        "/dashboard/api/prompts/cand-clear/candidate",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["candidate_version_num"] is None
+    assert r.json()["traffic_pct"] is None
+
+
+async def test_traffic_breaks_down_by_actual_version(client, operator_key, session):
+    """GET .../traffic reflects requests actually served by each version, not
+    the candidate's configured target split."""
+    await create_prompt("cand-traffic", "v1", session)
+    await add_prompt_version("cand-traffic", "v2", session)
+    await set_candidate_version("cand-traffic", 2, 30, session)
+    raw, key_id, _acct_id = await _account_with_key(session, name="traffic-caller")
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-traffic", prompt_version_num=2
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/cand-traffic/traffic",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    by_version = {row["key"]: row["request_count"] for row in r.json()["by_version"]}
+    assert by_version == {"1": 2, "2": 1}
+
+
+async def test_traffic_excludes_other_prompts(client, operator_key, session):
+    """The breakdown is scoped to the named prompt, not fleet-wide."""
+    await create_prompt("cand-scope-a", "v1", session)
+    await create_prompt("cand-scope-b", "v1", session)
+    raw, key_id, _acct_id = await _account_with_key(session, name="scope-caller")
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-scope-a", prompt_version_num=1
+    )
+    await _seed_log(
+        session, key_id=key_id, model="gpt-4o", prompt_name="cand-scope-b", prompt_version_num=1
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/cand-scope-a/traffic",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    by_version = {row["key"]: row["request_count"] for row in r.json()["by_version"]}
+    assert by_version == {"1": 1}
+
+
+async def test_traffic_requires_operator(client, raw_key):
+    r = await client.get(
+        "/dashboard/api/prompts/cand-traffic/traffic",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert r.status_code == 403
+
+
 async def test_non_operator_cannot_touch_other_account_keys(client, raw_key, session):
     """A non-operator listing another account's keys is 403."""
     other = await create_account(session, name="other-acct")
@@ -1566,3 +1691,398 @@ async def test_patch_account_operator_only(client, raw_key):
         json={"name": "nope"},
     )
     assert resp.status_code == 403
+
+
+async def test_prompt_suite_returns_suite_and_reviewed_cases(client, operator_key, session):
+    await create_prompt("dash-suite-prompt", "tmpl", session)
+    suite = await create_suite("dash-suite-prompt", session, pass_threshold=0.7)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "hi"}],
+        check_type="contains",
+        expected="hello",
+    )
+
+    r = await client.get(
+        "/dashboard/api/prompts/dash-suite-prompt/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["suite"]["pass_threshold"] == 0.7
+    assert len(body["cases"]) == 1
+    assert body["cases"][0]["check_type"] == "contains"
+
+
+async def test_prompt_suite_null_when_no_suite(client, operator_key, session):
+    await create_prompt("dash-nosuite-prompt", "tmpl", session)
+    r = await client.get(
+        "/dashboard/api/prompts/dash-nosuite-prompt/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"suite": None, "cases": []}
+
+
+async def test_prompt_curation_lists_unreviewed_only(client, operator_key, session):
+    await create_prompt("dash-cur-prompt", "tmpl", session)
+    suite = await create_suite("dash-cur-prompt", session, pass_threshold=0.5)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=False,
+        source="curated",
+    )
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q2"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=True,
+    )
+    r = await client.get(
+        "/dashboard/api/prompts/dash-cur-prompt/curation",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    cases = r.json()["cases"]
+    assert len(cases) == 1
+    assert cases[0]["reviewed"] is False
+
+
+async def test_audit_feed_filters_and_orders_newest_first(client, operator_key, session):
+    from gatekeep.audit import record_audit_event
+
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.create",
+        entity_type="prompt",
+        entity_ref="p1",
+        result="success",
+    )
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.promote",
+        entity_type="prompt",
+        entity_ref="p1",
+        result="success",
+        version_num=2,
+    )
+    await record_audit_event(
+        session,
+        actor_account_id=None,
+        actor_label="op",
+        action="prompt.promote",
+        entity_type="prompt",
+        entity_ref="p2",
+        result="blocked",
+    )
+
+    r = await client.get(
+        "/dashboard/api/audit",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        params={"entity_type": "prompt", "entity_ref": "p1"},
+    )
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert [e["action"] for e in events] == ["prompt.promote", "prompt.create"]
+    assert events[0]["version_num"] == 2
+
+
+async def test_audit_feed_requires_operator(client, raw_key):
+    r = await client.get("/dashboard/api/audit", headers={"Authorization": f"Bearer {raw_key}"})
+    assert r.status_code == 403
+
+
+async def test_create_prompt_persists_and_audits(client, operator_key, session):
+    r = await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "new-prompt", "template": "hello", "notes": "first"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"name": "new-prompt", "version_num": 1}
+
+    from sqlalchemy import select as _select
+
+    from gatekeep.models import AuditEvent
+
+    events = (
+        (await session.execute(_select(AuditEvent).where(AuditEvent.entity_ref == "new-prompt")))
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].action == "prompt.create"
+    assert events[0].result == "success"
+    assert events[0].actor_label == "op-acct"
+
+
+async def test_create_prompt_sets_created_by_to_operator(client, operator_key, session):
+    await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "attrib-prompt", "template": "hi"},
+    )
+    from gatekeep.prompts import get_active_prompt_version
+
+    version = await get_active_prompt_version("attrib-prompt", session)
+    assert version.created_by == "op-acct"
+
+
+async def test_create_prompt_duplicate_is_400(client, operator_key, session):
+    await create_prompt("dupe-prompt", "x", session)
+    r = await client.post(
+        "/dashboard/api/prompts",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"name": "dupe-prompt", "template": "y"},
+    )
+    assert r.status_code == 400
+
+
+async def test_add_version_appends_inactive(client, operator_key, session):
+    await create_prompt("addver-prompt", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/addver-prompt/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"template": "v2", "notes": "second"},
+    )
+    assert r.status_code == 200
+    assert r.json()["version_num"] == 2
+
+
+async def test_add_version_unknown_prompt_is_404(client, operator_key):
+    r = await client.post(
+        "/dashboard/api/prompts/ghost/versions",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"template": "v2"},
+    )
+    assert r.status_code == 404
+
+
+async def test_rollback_reverts_and_audits(client, operator_key, session):
+    await create_prompt("rb-prompt", "v1", session)
+    await add_prompt_version("rb-prompt", "v2", session)
+    await promote_prompt("rb-prompt", 2, session)
+
+    r = await client.post(
+        "/dashboard/api/prompts/rb-prompt/rollback",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["version_num"] == 1
+
+
+async def test_rollback_without_history_is_400(client, operator_key, session):
+    await create_prompt("rb-none", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/rb-none/rollback",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 400
+
+
+async def test_create_suite_defaults_threshold_from_settings(client, operator_key, session):
+    await create_prompt("suite-create", "v1", session)
+    r = await client.post(
+        "/dashboard/api/prompts/suite-create/suite",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={},
+    )
+    assert r.status_code == 200
+    assert r.json()["prompt_name"] == "suite-create"
+    assert r.json()["pass_threshold"] == 0.9  # eval_pass_threshold_default
+
+
+async def test_add_case_contains_requires_expected(client, operator_key, session):
+    await create_prompt("case-prompt", "v1", session)
+    await create_suite("case-prompt", session, pass_threshold=0.5)
+    r = await client.post(
+        "/dashboard/api/prompts/case-prompt/suite/cases",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"input_messages": [{"role": "user", "content": "hi"}], "check_type": "contains"},
+    )
+    assert r.status_code == 400
+
+
+async def test_add_case_persists_reviewed_case(client, operator_key, session):
+    await create_prompt("case-ok", "v1", session)
+    await create_suite("case-ok", session, pass_threshold=0.5)
+    r = await client.post(
+        "/dashboard/api/prompts/case-ok/suite/cases",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={
+            "input_messages": [{"role": "user", "content": "hi"}],
+            "check_type": "contains",
+            "expected": "hello",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["reviewed"] is True
+    assert r.json()["source"] == "manual"
+
+
+async def test_curation_review_approves_case(client, operator_key, session):
+    await create_prompt("rev-prompt", "v1", session)
+    suite = await create_suite("rev-prompt", session, pass_threshold=0.5)
+    case = await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "q"}],
+        check_type="llm_judge",
+        judge_criteria="ok",
+        reviewed=False,
+        source="curated",
+    )
+    r = await client.post(
+        f"/dashboard/api/prompts/rev-prompt/curation/{case.id}/review",
+        headers={"Authorization": f"Bearer {operator_key}"},
+        json={"approved": True},
+    )
+    assert r.status_code == 200
+    await session.refresh(case)
+    assert case.reviewed is True
+
+
+async def test_curation_mine_uses_injected_provider(client, operator_key, session):
+    from gatekeep.api.dashboard import _get_eval_provider
+    from gatekeep.app import app
+    from gatekeep.samples import record_request_sample
+
+    await create_prompt("mine-prompt", "v1", session)
+    await create_suite("mine-prompt", session, pass_threshold=0.5)
+    # a key/account to attribute the sample to
+    from gatekeep.models import ApiKey as _ApiKey
+
+    acct = (await session.execute(select(_ApiKey))).scalars().first()
+    await record_request_sample(
+        session,
+        key_id=acct.id,
+        account_id=acct.account_id,
+        prompt_name="mine-prompt",
+        model="claude-sonnet-5",
+        input_messages=[{"role": "user", "content": "hi"}],
+        output_text="hello there",
+    )
+
+    class _FakeProvider:
+        async def complete(self, payload):
+            class R:
+                text = "generated rubric"
+
+            return R()
+
+    app.dependency_overrides[_get_eval_provider] = lambda: _FakeProvider()
+    try:
+        r = await client.post(
+            "/dashboard/api/prompts/mine-prompt/curation/mine",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json={"limit": 5},
+        )
+    finally:
+        app.dependency_overrides.pop(_get_eval_provider, None)
+    assert r.status_code == 200
+    assert len(r.json()["cases"]) == 1
+    assert r.json()["cases"][0]["source"] == "curated"
+
+
+async def test_job_poll_404_for_unknown_job(client, operator_key):
+    r = await client.get(
+        "/dashboard/api/prompts/jobs/nope",
+        headers={"Authorization": f"Bearer {operator_key}"},
+    )
+    assert r.status_code == 404
+
+
+async def test_eval_run_endpoint_returns_job_id_and_completes(client, operator_key, session):
+    from gatekeep import promptjobs
+    from gatekeep.api.dashboard import _get_eval_provider
+    from gatekeep.app import app
+    from gatekeep.middleware.ratelimit import get_redis
+
+    await create_prompt("ep-eval", "tmpl", session)
+    suite = await create_suite("ep-eval", session, pass_threshold=0.5)
+    await add_case(
+        suite.id,
+        session,
+        input_messages=[{"role": "user", "content": "hi"}],
+        check_type="contains",
+        expected="hello",
+    )
+
+    class _FakeProvider:
+        async def complete(self, payload):
+            class R:
+                text = "hello"
+
+            return R()
+
+    app.dependency_overrides[_get_eval_provider] = lambda: _FakeProvider()
+    try:
+        r = await client.post(
+            "/dashboard/api/prompts/ep-eval/eval-run",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json={},
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+
+        # Poll until the background task reaches a terminal state.
+        import asyncio
+
+        redis = get_redis()
+        for _ in range(50):
+            job = await promptjobs.get_job(redis, job_id)
+            if job and job["status"] in ("succeeded", "failed", "blocked"):
+                break
+            await asyncio.sleep(0.1)
+        assert job["status"] == "succeeded"
+    finally:
+        app.dependency_overrides.pop(_get_eval_provider, None)
+
+
+async def test_promote_endpoint_returns_job_id(client, operator_key, session):
+    from gatekeep import promptjobs
+    from gatekeep.api.dashboard import _get_eval_provider
+    from gatekeep.app import app
+    from gatekeep.middleware.ratelimit import get_redis
+
+    await create_prompt("ep-promote", "v1", session)
+    await add_prompt_version("ep-promote", "v2", session)
+
+    class _FakeProvider:
+        async def complete(self, payload):
+            class R:
+                text = "x"
+
+            return R()
+
+    app.dependency_overrides[_get_eval_provider] = lambda: _FakeProvider()
+    try:
+        r = await client.post(
+            "/dashboard/api/prompts/ep-promote/promote",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json={"version_num": 2},
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        import asyncio
+
+        redis = get_redis()
+        for _ in range(50):
+            job = await promptjobs.get_job(redis, job_id)
+            if job and job["status"] in ("succeeded", "failed", "blocked"):
+                break
+            await asyncio.sleep(0.1)
+        assert job["status"] == "succeeded"
+    finally:
+        app.dependency_overrides.pop(_get_eval_provider, None)

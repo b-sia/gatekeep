@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Literal
 
+from anthropic import AsyncAnthropic
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -10,21 +12,36 @@ from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep import account_service
+from gatekeep import account_service, promptjobs
+from gatekeep.audit import record_audit_event
 from gatekeep.config import get_settings
-from gatekeep.db import get_session
+from gatekeep.curation import curate_cases, list_unreviewed, review_case
+from gatekeep.db import SessionLocal, get_session
+from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.models import (
     Account,
     ApiKey,
+    AuditEvent,
+    EvalCase,
     EvalRun,
     EvalSuite,
     Prompt,
     PromptVersion,
     RequestLog,
 )
-from gatekeep.prompts import PromptNotFoundError, _get_prompt_row
+from gatekeep.prompts import (
+    PromptNotFoundError,
+    PromptVersionNotFoundError,
+    _get_prompt_row,
+    add_prompt_version,
+    clear_candidate_version,
+    create_prompt,
+    rollback_prompt,
+    set_candidate_version,
+)
+from gatekeep.providers.anthropic import AnthropicProvider
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 
@@ -99,6 +116,26 @@ def _get_redis() -> Redis:
     Postgres, so this is scoped to the routes that need it.
     """
     return get_redis(get_settings())
+
+
+@lru_cache
+def _get_eval_provider() -> AnthropicProvider:
+    """FastAPI dependency yielding the provider used for eval/curation LLM calls.
+
+    Mirrors how the CLI builds its provider (`AnthropicProvider(AsyncAnthropic(...))`).
+    Isolated as a dependency so tests can override it with a fake provider via
+    `app.dependency_overrides`, keeping eval/curation endpoints and their
+    background jobs off the real Anthropic API in the suite.
+
+    `lru_cache`d (no arguments, so effectively a singleton after the first
+    call) so every request reuses the same `AsyncAnthropic` client instead of
+    opening a fresh httpx connection pool per request that is never closed -
+    mirrors `gatekeep.config.get_settings`'s use of the same pattern.
+    `app.dependency_overrides` replaces this callable entirely, bypassing the
+    cache, so tests overriding it with a fake provider are unaffected.
+    """
+    settings = get_settings()
+    return AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key))
 
 
 def _forbidden(message: str) -> HTTPException:
@@ -1059,6 +1096,27 @@ async def latency_timeseries(
     return LatencyTimeseriesResponse(start=start, end=end, interval=interval, buckets=buckets)
 
 
+class AuditEventOut(BaseModel):
+    """One audit-log row for the read-only feed."""
+
+    id: int
+    created_at: datetime
+    actor_account_id: int | None
+    actor_label: str
+    action: str
+    entity_type: str
+    entity_ref: str | None
+    version_num: int | None
+    result: str
+    details: dict
+
+
+class AuditFeedResponse(BaseModel):
+    """A page of audit events, newest first."""
+
+    events: list[AuditEventOut]
+
+
 class EvalRunOut(BaseModel):
     """One eval run, joined with its suite's prompt name and the prompt
     version number it evaluated."""
@@ -1078,6 +1136,49 @@ class EvalHistoryResponse(BaseModel):
     """A list of eval runs, newest first."""
 
     runs: list[EvalRunOut]
+
+
+@router.get("/audit", response_model=AuditFeedResponse)
+async def audit_feed(
+    entity_type: str | None = Query(default=None),
+    entity_ref: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> AuditFeedResponse:
+    """Return the audit feed, newest first, filterable by entity/action.
+
+    Fleet-wide and operator only. `entity_type`/`entity_ref`/`action` are
+    optional equality filters; `limit` caps the page (default 100, max 500).
+    """
+    query = select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    if entity_type is not None:
+        query = query.where(AuditEvent.entity_type == entity_type)
+    if entity_ref is not None:
+        query = query.where(AuditEvent.entity_ref == entity_ref)
+    if action is not None:
+        query = query.where(AuditEvent.action == action)
+    query = query.limit(limit)
+
+    rows = (await session.execute(query)).scalars().all()
+    return AuditFeedResponse(
+        events=[
+            AuditEventOut(
+                id=e.id,
+                created_at=e.created_at,
+                actor_account_id=e.actor_account_id,
+                actor_label=e.actor_label,
+                action=e.action,
+                entity_type=e.entity_type,
+                entity_ref=e.entity_ref,
+                version_num=e.version_num,
+                result=e.result,
+                details=e.details,
+            )
+            for e in rows
+        ]
+    )
 
 
 @router.get("/evals", response_model=EvalHistoryResponse)
@@ -1181,6 +1282,7 @@ class PromptVersionOut(BaseModel):
 
     version_num: int
     active: bool
+    template: str
     created_at: datetime
     created_by: str | None
     notes: str | None
@@ -1227,6 +1329,7 @@ async def prompt_version_timeline(
         PromptVersionOut(
             version_num=v.version_num,
             active=v.active,
+            template=v.template,
             created_at=v.created_at,
             created_by=v.created_by,
             notes=v.notes,
@@ -1234,6 +1337,551 @@ async def prompt_version_timeline(
         for v in rows
     ]
     return PromptVersionTimelineResponse(name=name, versions=versions)
+
+
+class SuiteOut(BaseModel):
+    """An eval suite bound to a prompt."""
+
+    id: int
+    name: str
+    prompt_name: str
+    pass_threshold: float
+    created_at: datetime
+
+
+class EvalCaseOut(BaseModel):
+    """One eval case in a suite, reviewed or curated-and-unreviewed."""
+
+    id: int
+    check_type: str
+    expected: str | None
+    judge_criteria: str | None
+    reviewed: bool
+    source: str
+    account_id: int | None
+    created_at: datetime
+    input_messages: list[dict]
+
+
+class PromptSuiteResponse(BaseModel):
+    """A prompt's eval suite and its cases, or null suite / empty cases."""
+
+    suite: SuiteOut | None
+    cases: list[EvalCaseOut]
+
+
+class CurationResponse(BaseModel):
+    """A prompt's unreviewed curated cases."""
+
+    cases: list[EvalCaseOut]
+
+
+def _case_out(case: EvalCase) -> EvalCaseOut:
+    """Map an EvalCase ORM row to its response model."""
+    return EvalCaseOut(
+        id=case.id,
+        check_type=case.check_type,
+        expected=case.expected,
+        judge_criteria=case.judge_criteria,
+        reviewed=case.reviewed,
+        source=case.source,
+        account_id=case.account_id,
+        created_at=case.created_at,
+        input_messages=case.input_messages,
+    )
+
+
+class PromptCreateRequest(BaseModel):
+    """Request body for creating a prompt (initial version 1, active)."""
+
+    name: str
+    template: str
+    notes: str | None = None
+
+
+class PromptVersionCreateRequest(BaseModel):
+    """Request body for appending a new inactive version to a prompt."""
+
+    template: str
+    notes: str | None = None
+
+
+class PromptMutationResponse(BaseModel):
+    """The prompt name and the version number a mutation produced/left active."""
+
+    name: str
+    version_num: int
+
+
+@router.post("/prompts", response_model=PromptMutationResponse)
+async def create_prompt_route(
+    body: PromptCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Create a prompt with an initial active version 1. Operator only.
+
+    Sets `created_by` to the operator's account name and records a
+    `prompt.create` audit event. 400 if the name already exists.
+    """
+    try:
+        prompt = await create_prompt(
+            body.name,
+            body.template,
+            session,
+            created_by=operator.name,
+            notes=body.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.create",
+        entity_type="prompt",
+        entity_ref=body.name,
+        version_num=1,
+        result="success",
+        details={"notes": body.notes},
+    )
+    return PromptMutationResponse(name=prompt.name, version_num=1)
+
+
+@router.post("/prompts/{name}/versions", response_model=PromptMutationResponse)
+async def add_prompt_version_route(
+    name: str,
+    body: PromptVersionCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Append a new inactive version to an existing prompt. Operator only.
+
+    Sets `created_by` to the operator's account name and records a
+    `prompt.add_version` audit event. 404 if the prompt is unknown.
+    """
+    try:
+        version = await add_prompt_version(
+            name, body.template, session, created_by=operator.name, notes=body.notes
+        )
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.add_version",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=version.version_num,
+        result="success",
+        details={"notes": body.notes},
+    )
+    return PromptMutationResponse(name=name, version_num=version.version_num)
+
+
+@router.post("/prompts/{name}/rollback", response_model=PromptMutationResponse)
+async def rollback_prompt_route(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(_get_redis),
+    operator: Account = Depends(require_operator),
+) -> PromptMutationResponse:
+    """Revert a prompt to its previously-active version. Operator only.
+
+    Rollback is never eval-gated (reverting to an already-proven version).
+    Invalidates the prompt's caches via the service layer and records a
+    `prompt.rollback` audit event. 404 if the prompt is unknown, 400 if
+    there is no earlier version to roll back to.
+    """
+    try:
+        version = await rollback_prompt(name, session, redis=redis)
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.rollback",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=version.version_num,
+        result="success",
+        details={"to_version": version.version_num},
+    )
+    return PromptMutationResponse(name=name, version_num=version.version_num)
+
+
+class CandidateSetRequest(BaseModel):
+    """Request body for setting/adjusting a prompt's A/B candidate."""
+
+    version_num: int
+    traffic_pct: float
+
+
+class CandidateResponse(BaseModel):
+    """A prompt's current A/B candidate config (null when none)."""
+
+    name: str
+    candidate_version_num: int | None
+    traffic_pct: float | None
+
+
+async def _candidate_response(
+    name: str, prompt: Prompt, session: AsyncSession
+) -> CandidateResponse:
+    """Build a CandidateResponse, resolving candidate_version_id to a version_num."""
+    version_num = None
+    if prompt.candidate_version_id is not None:
+        version = await session.get(PromptVersion, prompt.candidate_version_id)
+        version_num = version.version_num if version is not None else None
+    return CandidateResponse(
+        name=name,
+        candidate_version_num=version_num,
+        traffic_pct=prompt.candidate_traffic_pct,
+    )
+
+
+@router.put("/prompts/{name}/candidate", response_model=CandidateResponse)
+async def set_candidate_route(
+    name: str,
+    body: CandidateSetRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CandidateResponse:
+    """Configure or adjust a prompt's A/B candidate version + traffic split.
+
+    Never runs the eval gate or invalidates cache (a candidate is not
+    "active"). Records a `prompt.set_candidate` audit event. 404 if the
+    prompt or version is unknown, 400 if `traffic_pct` is outside [0, 100].
+    """
+    try:
+        prompt = await set_candidate_version(name, body.version_num, body.traffic_pct, session)
+    except (PromptNotFoundError, PromptVersionNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.set_candidate",
+        entity_type="prompt",
+        entity_ref=name,
+        version_num=body.version_num,
+        result="success",
+        details={"traffic_pct": body.traffic_pct},
+    )
+    return await _candidate_response(name, prompt, session)
+
+
+@router.delete("/prompts/{name}/candidate", response_model=CandidateResponse)
+async def clear_candidate_route(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CandidateResponse:
+    """Clear a prompt's A/B candidate (100% traffic back to active). Operator only.
+
+    Records a `prompt.clear_candidate` audit event. 404 if the prompt is
+    unknown. A no-op (but still success) when no candidate was configured.
+    """
+    try:
+        prompt = await clear_candidate_version(name, session)
+    except PromptNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="prompt.clear_candidate",
+        entity_type="prompt",
+        entity_ref=name,
+        result="success",
+    )
+    return await _candidate_response(name, prompt, session)
+
+
+class PromptTrafficResponse(BaseModel):
+    """Actual observed request traffic per prompt version, over a time window."""
+
+    name: str
+    start: datetime
+    end: datetime
+    by_version: list[UsageBreakdownRow]
+
+
+@router.get("/prompts/{name}/traffic", response_model=PromptTrafficResponse)
+async def prompt_traffic(
+    name: str,
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PromptTrafficResponse:
+    """Return actual per-version request counts for a prompt over a time range.
+
+    Complements the configured A/B candidate `traffic_pct` (the target split)
+    with what was actually observed: routing is probabilistic, so the two can
+    drift, especially at low volume. Grouped on `RequestLog.prompt_version_num`,
+    which is set on every request that names this prompt (active or
+    candidate). `start`/`end` default to the trailing 7 days. Operator only.
+    """
+    default_start, default_end = _default_window()
+    start = start or default_start
+    end = end or default_end
+    filters = _base_filters(start, end, model=None, key_id=None, prompt_name=name)
+    by_version = await _breakdown(session, RequestLog.prompt_version_num, filters)
+    return PromptTrafficResponse(name=name, start=start, end=end, by_version=by_version)
+
+
+@router.get("/prompts/{name}/suite", response_model=PromptSuiteResponse)
+async def prompt_suite(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PromptSuiteResponse:
+    """Return the eval suite bound to `name` and its cases.
+
+    Returns `{suite: null, cases: []}` when no suite is registered (not a
+    404) - the UI treats "no suite" as an offer to create one. Operator only.
+    """
+    suite = await get_suite_for_prompt(name, session)
+    if suite is None:
+        return PromptSuiteResponse(suite=None, cases=[])
+    rows = (
+        (
+            await session.execute(
+                select(EvalCase).where(EvalCase.suite_id == suite.id).order_by(EvalCase.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return PromptSuiteResponse(
+        suite=SuiteOut(
+            id=suite.id,
+            name=suite.name,
+            prompt_name=suite.prompt_name,
+            pass_threshold=suite.pass_threshold,
+            created_at=suite.created_at,
+        ),
+        cases=[_case_out(c) for c in rows],
+    )
+
+
+@router.get("/prompts/{name}/curation", response_model=CurationResponse)
+async def prompt_curation(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> CurationResponse:
+    """Return `name`'s unreviewed curated eval cases, oldest first. Operator only."""
+    cases = await list_unreviewed(name, session)
+    return CurationResponse(cases=[_case_out(c) for c in cases])
+
+
+class SuiteCreateRequest(BaseModel):
+    """Request body for creating an eval suite (threshold defaults from settings)."""
+
+    threshold: float | None = None
+
+
+class CaseCreateRequest(BaseModel):
+    """Request body for adding a reviewed manual eval case."""
+
+    input_messages: list[dict]
+    check_type: str
+    expected: str | None = None
+    judge_criteria: str | None = None
+
+
+class CurationMineRequest(BaseModel):
+    """Request body for mining recent samples into unreviewed curated cases."""
+
+    limit: int = 20
+
+
+class CurationReviewRequest(BaseModel):
+    """Request body for approving/rejecting one curated case."""
+
+    approved: bool
+
+
+@router.post("/prompts/{name}/suite", response_model=SuiteOut)
+async def create_suite_route(
+    name: str,
+    body: SuiteCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> SuiteOut:
+    """Create an eval suite for a prompt (one per prompt). Operator only.
+
+    Threshold defaults to `eval_pass_threshold_default`. Records an
+    `eval.create_suite` audit event. 400 if a suite already exists.
+    """
+    threshold = (
+        body.threshold if body.threshold is not None else get_settings().eval_pass_threshold_default
+    )
+    try:
+        suite = await create_suite(name, session, pass_threshold=threshold)
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=_error_body(f"an eval suite already exists for prompt {name!r}"),
+        ) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="eval.create_suite",
+        entity_type="eval_suite",
+        entity_ref=name,
+        result="success",
+        details={"threshold": threshold},
+    )
+    return SuiteOut(
+        id=suite.id,
+        name=suite.name,
+        prompt_name=suite.prompt_name,
+        pass_threshold=suite.pass_threshold,
+        created_at=suite.created_at,
+    )
+
+
+@router.post("/prompts/{name}/suite/cases", response_model=EvalCaseOut)
+async def add_case_route(
+    name: str,
+    body: CaseCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> EvalCaseOut:
+    """Add a reviewed manual eval case to a prompt's suite. Operator only.
+
+    Records an `eval.add_case` audit event. 404 if no suite is registered,
+    400 if the check_type/argument combination is invalid.
+    """
+    suite = await get_suite_for_prompt(name, session)
+    if suite is None:
+        raise HTTPException(
+            status_code=404,
+            detail=_error_body(f"no eval suite registered for prompt {name!r}"),
+        )
+    try:
+        case = await add_case(
+            suite.id,
+            session,
+            input_messages=body.input_messages,
+            check_type=body.check_type,
+            expected=body.expected,
+            judge_criteria=body.judge_criteria,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="eval.add_case",
+        entity_type="eval_suite",
+        entity_ref=name,
+        result="success",
+        details={"check_type": body.check_type, "case_id": case.id},
+    )
+    return _case_out(case)
+
+
+@router.post("/prompts/{name}/curation/mine", response_model=CurationResponse)
+async def curation_mine_route(
+    name: str,
+    body: CurationMineRequest,
+    session: AsyncSession = Depends(get_session),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> CurationResponse:
+    """Mine recent request samples for a prompt into unreviewed curated cases.
+
+    Operator only. Uses the eval provider to draft a judge rubric per sample.
+    Records a `curation.mine` audit event with the mined case count. 404 if
+    no suite is registered.
+    """
+    try:
+        cases = await curate_cases(
+            name,
+            session,
+            limit=body.limit,
+            provider=provider,
+            generate_model=get_settings().default_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="curation.mine",
+        entity_type="prompt",
+        entity_ref=name,
+        result="success",
+        details={"case_count": len(cases)},
+    )
+    return CurationResponse(cases=[_case_out(c) for c in cases])
+
+
+class CurationReviewResponse(BaseModel):
+    """Terminal state of a reviewed curated case."""
+
+    status: str
+
+
+@router.post(
+    "/prompts/{name}/curation/{case_id}/review",
+    response_model=CurationReviewResponse,
+)
+async def curation_review_route(
+    name: str,
+    case_id: int,
+    body: CurationReviewRequest,
+    session: AsyncSession = Depends(get_session),
+    operator: Account = Depends(require_operator),
+) -> CurationReviewResponse:
+    """Approve (keep, mark reviewed) or reject (delete) one curated case.
+
+    Operator only. Verifies `case_id`'s suite belongs to prompt `name` before
+    delegating to the service layer, so a mismatched prompt name + case id
+    combination 404s instead of writing an audit row against the wrong
+    `entity_ref`. Records a `curation.review` audit event. 404 if the case id
+    does not exist, or belongs to a different prompt's suite.
+    """
+    case = await session.get(EvalCase, case_id)
+    if case is None:
+        raise HTTPException(
+            status_code=404, detail=_error_body(f"no curated case with id {case_id}")
+        )
+    suite = await session.get(EvalSuite, case.suite_id)
+    if suite is None or suite.prompt_name != name:
+        raise HTTPException(
+            status_code=404,
+            detail=_error_body(f"no curated case with id {case_id} for prompt {name!r}"),
+        )
+    try:
+        await review_case(case_id, session, approve=body.approved)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="curation.review",
+        entity_type="curated_case",
+        entity_ref=name,
+        result="success",
+        details={"case_id": case_id, "approved": body.approved},
+    )
+    return CurationReviewResponse(status="reviewed" if body.approved else "rejected")
 
 
 class MeResponse(BaseModel):
@@ -1330,11 +1978,12 @@ async def mint_account_key(
     account_id: int,
     body: KeyCreateRequest,
     session: AsyncSession = Depends(get_session),
-    _caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_account_access),
 ) -> KeyCreatedResponse:
     """Mint a key for an account, returning the raw key exactly once.
 
-    Raises 403 (wrong account), 404 (unknown account), 409 (duplicate name).
+    Records a `key.mint` audit event. Raises 403 (wrong account), 404
+    (unknown account), 409 (duplicate name).
     """
     try:
         key, raw = await account_service.create_key(session, account_id, body.name)
@@ -1342,6 +1991,16 @@ async def mint_account_key(
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
     except account_service.KeyNameConflictError as exc:
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=caller_account.id,
+        actor_label=caller_account.name,
+        action="key.mint",
+        entity_type="api_key",
+        entity_ref=key.name,
+        result="success",
+        details={"account_id": account_id, "key_id": key.id},
+    )
     return KeyCreatedResponse(
         id=key.id, name=key.name, active=key.active, created_at=key.created_at, key=raw
     )
@@ -1352,15 +2011,25 @@ async def revoke_account_key(
     account_id: int,
     key_id: int,
     session: AsyncSession = Depends(get_session),
-    _caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_account_access),
 ) -> KeyOut:
-    """Soft-revoke a key on an account. Raises 403 (wrong account) or 404
-    (no such key on the account).
+    """Soft-revoke a key on an account. Records a `key.revoke` audit event.
+    Raises 403 (wrong account) or 404 (no such key on the account).
     """
     try:
         key = await account_service.revoke_key(session, account_id, key_id)
     except account_service.KeyNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=caller_account.id,
+        actor_label=caller_account.name,
+        action="key.revoke",
+        entity_type="api_key",
+        entity_ref=key.name,
+        result="success",
+        details={"account_id": account_id, "key_id": key.id},
+    )
     return KeyOut(id=key.id, name=key.name, active=key.active, created_at=key.created_at)
 
 
@@ -1456,9 +2125,11 @@ async def list_accounts(
 async def create_account_route(
     body: AccountCreateRequest,
     session: AsyncSession = Depends(get_session),
-    _operator: Account = Depends(require_operator),
+    operator: Account = Depends(require_operator),
 ) -> AccountOut:
-    """Create an account. Operator only. 409 on name collision, 422 on bad name/budget."""
+    """Create an account. Operator only. Records an `account.create` audit
+    event. 409 on name collision, 422 on bad name/budget.
+    """
     try:
         account = await account_service.create_account(
             session,
@@ -1473,6 +2144,19 @@ async def create_account_route(
         raise HTTPException(status_code=422, detail=_error_body(str(exc))) from exc
     except account_service.AccountNameConflictError as exc:
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    await record_audit_event(
+        session,
+        actor_account_id=operator.id,
+        actor_label=operator.name,
+        action="account.create",
+        entity_type="account",
+        entity_ref=account.name,
+        result="success",
+        details={
+            "monthly_budget_usd": body.monthly_budget_usd,
+            "is_operator": body.is_operator,
+        },
+    )
     return _account_out(account)
 
 
@@ -1481,7 +2165,7 @@ async def patch_account_route(
     account_id: int,
     body: AccountPatchRequest,
     session: AsyncSession = Depends(get_session),
-    _operator: Account = Depends(require_operator),
+    operator: Account = Depends(require_operator),
 ) -> AccountOut:
     """Rename, set/clear budget, and/or toggle operator on an account.
 
@@ -1491,7 +2175,8 @@ async def patch_account_route(
     change has succeeded - then this route commits once. That single commit
     makes the whole PATCH atomic: if a later field fails validation (e.g. a
     bad budget after a valid rename), the rename is rolled back too, rather
-    than silently persisting while the client sees an error.
+    than silently persisting while the client sees an error. Records an
+    `account.update` audit event when a mutation actually occurred.
 
     Maps 404 (unknown account), 409 (name collision, last-operator), 422
     (bad name, bad budget).
@@ -1517,6 +2202,21 @@ async def patch_account_route(
             account = await account_service.get_account(session, account_id)
         else:
             await session.commit()
+            await record_audit_event(
+                session,
+                actor_account_id=operator.id,
+                actor_label=operator.name,
+                action="account.update",
+                entity_type="account",
+                entity_ref=account.name,
+                result="success",
+                details={
+                    "name": body.name,
+                    "monthly_budget_usd": body.monthly_budget_usd,
+                    "clear_budget": body.clear_budget,
+                    "is_operator": body.is_operator,
+                },
+            )
     except account_service.AccountNotFoundError as exc:
         await session.rollback()
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
@@ -1538,3 +2238,141 @@ async def patch_account_route(
             status_code=409, detail=_error_body(f"account name {body.name!r} is already taken")
         ) from exc
     return _account_out(account)
+
+
+class JobProgress(BaseModel):
+    """A job's per-case progress counter."""
+
+    done: int
+    total: int
+
+
+class JobResult(BaseModel):
+    """A completed eval/promote job's outcome payload."""
+
+    score: float | None = None
+    passed: bool | None = None
+
+
+class JobStatusResponse(BaseModel):
+    """Poll response for one background job."""
+
+    id: str
+    kind: str
+    prompt_name: str
+    version_num: int | None
+    status: str
+    progress: JobProgress
+    result: JobResult | None
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+class EvalRunRequest(BaseModel):
+    """Request body for an on-demand eval run (async job)."""
+
+    version_num: int | None = None
+    model: str | None = None
+
+
+class JobCreatedResponse(BaseModel):
+    """The id of a background job the caller should poll."""
+
+    job_id: str
+
+
+@router.post("/prompts/{name}/eval-run", response_model=JobCreatedResponse)
+async def eval_run_route(
+    name: str,
+    body: EvalRunRequest,
+    redis: Redis = Depends(_get_redis),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> JobCreatedResponse:
+    """Kick off an on-demand eval run as a background job. Operator only.
+
+    Returns a job id immediately; the UI polls `GET /prompts/jobs/{id}`. The
+    background task drives Redis status, persists the EvalRun, and writes the
+    `eval.run` audit event with its outcome (success or error).
+    """
+    settings = get_settings()
+    job_id = await promptjobs.create_job(
+        redis, kind="eval_run", prompt_name=name, version_num=body.version_num
+    )
+    promptjobs.spawn(
+        promptjobs.run_eval_job(
+            job_id,
+            prompt_name=name,
+            version_num=body.version_num,
+            model=body.model or settings.default_model,
+            provider=provider,
+            judge_model=settings.eval_judge_model,
+            max_tokens=settings.default_max_tokens,
+            actor_account_id=operator.id,
+            actor_label=operator.name,
+            redis=redis,
+            session_factory=SessionLocal,
+        )
+    )
+    return JobCreatedResponse(job_id=job_id)
+
+
+class PromoteRequest(BaseModel):
+    """Request body for promoting a prompt version (async, eval-gated)."""
+
+    version_num: int
+
+
+@router.post("/prompts/{name}/promote", response_model=JobCreatedResponse)
+async def promote_route(
+    name: str,
+    body: PromoteRequest,
+    redis: Redis = Depends(_get_redis),
+    provider: AnthropicProvider = Depends(_get_eval_provider),
+    operator: Account = Depends(require_operator),
+) -> JobCreatedResponse:
+    """Kick off an eval-gated promotion as a background job. Operator only.
+
+    Returns a job id immediately; the UI polls `GET /prompts/jobs/{id}`. The
+    background task runs the eval gate then the version flip, records the
+    `prompt.promote` audit event (success/blocked/error), and invalidates the
+    prompt's caches on success.
+    """
+    settings = get_settings()
+    job_id = await promptjobs.create_job(
+        redis, kind="promote", prompt_name=name, version_num=body.version_num
+    )
+    promptjobs.spawn(
+        promptjobs.run_promote_job(
+            job_id,
+            prompt_name=name,
+            version_num=body.version_num,
+            provider=provider,
+            generate_model=settings.default_model,
+            judge_model=settings.eval_judge_model,
+            max_tokens=settings.default_max_tokens,
+            actor_account_id=operator.id,
+            actor_label=operator.name,
+            redis=redis,
+            session_factory=SessionLocal,
+        )
+    )
+    return JobCreatedResponse(job_id=job_id)
+
+
+@router.get("/prompts/jobs/{job_id}", response_model=JobStatusResponse)
+async def poll_job(
+    job_id: str,
+    redis: Redis = Depends(_get_redis),
+    _operator: Account = Depends(require_operator),
+) -> JobStatusResponse:
+    """Return the status of a background job. Operator only.
+
+    404 when the job id is unknown or its TTL has lapsed (the UI renders
+    this as "status unavailable, refresh").
+    """
+    record = await promptjobs.get_job(redis, job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=_error_body("job not found or expired"))
+    return JobStatusResponse(**record)

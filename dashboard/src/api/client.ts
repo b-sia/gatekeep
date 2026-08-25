@@ -3,7 +3,13 @@ import type {
   AccountListResponse,
   AccountOut,
   AccountPatchRequest,
+  AuditFeedResponse,
+  CandidateResponse,
+  CurationResponse,
+  EvalCaseOut,
   EvalHistoryResponse,
+  JobCreatedResponse,
+  JobStatusResponse,
   KeyCreatedResponse,
   KeyListResponse,
   KeyOut,
@@ -11,7 +17,11 @@ import type {
   LatencyTimeseriesResponse,
   MeResponse,
   PromptListResponse,
+  PromptMutationResponse,
+  PromptSuiteResponse,
+  PromptTrafficResponse,
   PromptVersionTimelineResponse,
+  SuiteOut,
   TimeseriesResponse,
   UsageByModelTimeseriesResponse,
   UsageSummaryResponse,
@@ -122,7 +132,7 @@ async function request<T>(
  * Issues an authenticated POST/PATCH against `/dashboard/api/<path>` with a
  * JSON body, mirroring `request`'s bearer-auth and 401 handling.
  *
- * @param method - "POST" or "PATCH".
+ * @param method - "POST", "PATCH", "PUT", or "DELETE".
  * @param path - API path under `/dashboard/api/`, without a leading slash.
  * @param body - JSON-serializable request body, or undefined for none.
  * @returns The parsed JSON response body.
@@ -132,7 +142,7 @@ async function request<T>(
  *   the server's error message when the body is OpenAI-shaped.
  */
 async function mutate<T>(
-  method: "POST" | "PATCH",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -289,4 +299,173 @@ export function patchAccount(
   body: AccountPatchRequest,
 ): Promise<AccountOut> {
   return mutate<AccountOut>("PATCH", `accounts/${accountId}`, body);
+}
+
+/** Fetches a prompt's eval suite and cases (null suite => none registered). */
+export function getPromptSuite(name: string): Promise<PromptSuiteResponse> {
+  return request<PromptSuiteResponse>(`prompts/${encodeURIComponent(name)}/suite`);
+}
+
+/** Fetches a prompt's unreviewed curated cases. */
+export function getPromptCuration(name: string): Promise<CurationResponse> {
+  return request<CurationResponse>(`prompts/${encodeURIComponent(name)}/curation`);
+}
+
+/** Fetches the audit feed, filterable by entity/action. */
+export function getAuditFeed(params?: {
+  entityType?: string;
+  entityRef?: string;
+  action?: string;
+  limit?: number;
+}): Promise<AuditFeedResponse> {
+  return request<AuditFeedResponse>("audit", {
+    entity_type: params?.entityType,
+    entity_ref: params?.entityRef,
+    action: params?.action,
+    limit: params?.limit,
+  });
+}
+
+/** Polls one background job's status. */
+export function getJob(jobId: string): Promise<JobStatusResponse> {
+  return request<JobStatusResponse>(`prompts/jobs/${encodeURIComponent(jobId)}`);
+}
+
+/** Creates a prompt (initial active version 1). */
+export function createPrompt(body: {
+  name: string;
+  template: string;
+  notes?: string;
+}): Promise<PromptMutationResponse> {
+  return mutate<PromptMutationResponse>("POST", "prompts", body);
+}
+
+/** Appends a new inactive version to a prompt. */
+export function addPromptVersion(
+  name: string,
+  body: { template: string; notes?: string },
+): Promise<PromptMutationResponse> {
+  return mutate<PromptMutationResponse>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/versions`,
+    body,
+  );
+}
+
+/** Kicks off an eval-gated promotion; returns a job id to poll. */
+export function promotePrompt(
+  name: string,
+  versionNum: number,
+): Promise<JobCreatedResponse> {
+  return mutate<JobCreatedResponse>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/promote`,
+    { version_num: versionNum },
+  );
+}
+
+/** Rolls a prompt back to its previously-active version. */
+export function rollbackPrompt(name: string): Promise<PromptMutationResponse> {
+  return mutate<PromptMutationResponse>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/rollback`,
+  );
+}
+
+/** Sets/adjusts a prompt's A/B candidate version + traffic split. */
+export function setCandidate(
+  name: string,
+  body: { version_num: number; traffic_pct: number },
+): Promise<CandidateResponse> {
+  return mutate<CandidateResponse>(
+    "PUT",
+    `prompts/${encodeURIComponent(name)}/candidate`,
+    body,
+  );
+}
+
+/** Clears a prompt's A/B candidate (100% back to active). */
+export function clearCandidate(name: string): Promise<CandidateResponse> {
+  return mutate<CandidateResponse>(
+    "DELETE",
+    `prompts/${encodeURIComponent(name)}/candidate`,
+  );
+}
+
+/** Fetches actual per-version request counts for a prompt (trailing 7 days
+ * when start/end are omitted), to compare against the configured candidate split. */
+export function getPromptTraffic(
+  name: string,
+  filters?: { start?: string; end?: string },
+): Promise<PromptTrafficResponse> {
+  return request<PromptTrafficResponse>(`prompts/${encodeURIComponent(name)}/traffic`, {
+    start: filters?.start,
+    end: filters?.end,
+  });
+}
+
+/** Creates an eval suite for a prompt (threshold defaults server-side). */
+export function createSuite(
+  name: string,
+  body: { threshold?: number },
+): Promise<SuiteOut> {
+  return mutate<SuiteOut>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/suite`,
+    body,
+  );
+}
+
+/** Adds a reviewed manual eval case to a prompt's suite. */
+export function addCase(
+  name: string,
+  body: {
+    input_messages: Array<Record<string, unknown>>;
+    check_type: string;
+    expected?: string;
+    judge_criteria?: string;
+  },
+): Promise<EvalCaseOut> {
+  return mutate<EvalCaseOut>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/suite/cases`,
+    body,
+  );
+}
+
+/** Kicks off an on-demand eval run; returns a job id to poll. */
+export function runEval(
+  name: string,
+  body: { version_num?: number; model?: string },
+): Promise<JobCreatedResponse> {
+  return mutate<JobCreatedResponse>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/eval-run`,
+    body,
+  );
+}
+
+/** Mines recent samples into unreviewed curated cases. */
+export function mineCuration(
+  name: string,
+  body: { limit?: number },
+): Promise<CurationResponse> {
+  return mutate<CurationResponse>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/curation/mine`,
+    body,
+  );
+}
+
+/** Approves or rejects one curated case. */
+export function reviewCase(
+  name: string,
+  caseId: number,
+  approved: boolean,
+): Promise<{ status: string }> {
+  return mutate<{ status: string }>(
+    "POST",
+    `prompts/${encodeURIComponent(name)}/curation/${caseId}/review`,
+    { approved },
+  );
 }

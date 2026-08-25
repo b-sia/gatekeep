@@ -143,7 +143,11 @@ async def promote_prompt(
     are deleted afterwards. Requests that never used `prompt_name` are
     untouched by this.
     """
-    prompt = await _get_prompt_row(name, session)
+    prompt = (
+        await session.execute(select(Prompt).where(Prompt.name == name).with_for_update())
+    ).scalar_one_or_none()
+    if prompt is None:
+        raise PromptNotFoundError(f"no prompt registered with name {name!r}")
     target = (
         await session.execute(
             select(PromptVersion).where(

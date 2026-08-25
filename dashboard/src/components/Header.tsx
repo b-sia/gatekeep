@@ -1,6 +1,6 @@
 import type { Identity } from "../api/identityStore";
 
-export type TabKey = "analytics" | "management";
+export type TabKey = "analytics" | "management" | "prompts";
 
 interface HeaderProps {
   activeTab: TabKey;
@@ -32,6 +32,9 @@ export default function Header({ activeTab, onTabChange, identity, onLogout }: H
           </button>
           <button className={tabClass("management")} onClick={() => onTabChange("management")}>
             Accounts &amp; Keys
+          </button>
+          <button className={tabClass("prompts")} onClick={() => onTabChange("prompts")}>
+            Prompts
           </button>
         </nav>
       </div>
