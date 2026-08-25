@@ -1,19 +1,13 @@
-import httpx
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 
-import gatekeep.app as app_module
-from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.api.openai_schemas import (
     ChatCompletionResponse,
     Choice,
     ResponseMessage,
     Usage,
 )
-from gatekeep.app import app
 from gatekeep.middleware.cache_exact import (
     clear_cached_response,
     get_cached_response,
@@ -21,9 +15,7 @@ from gatekeep.middleware.cache_exact import (
     set_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
-from gatekeep.storage.models import ApiKey, RequestLog
-from tests.helpers import create_account
+from gatekeep.storage.models import RequestLog
 
 
 @pytest.fixture(autouse=True)
@@ -155,52 +147,6 @@ async def test_clear_cached_response_removes_key():
 
 
 # -- wired into /v1/chat/completions --------------------------------------
-
-
-class CountingProvider:
-    """A fake provider that counts completion calls to verify caching behavior."""
-
-    def __init__(self):
-        """Initialize the call counter to zero."""
-        self.calls = 0
-
-    async def complete(self, payload):
-        """Record a call and return a fixed completion result."""
-        self.calls += 1
-        return CompletionResult(
-            text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn"
-        )
-
-    async def stream(self, payload):
-        """Record a call and yield a fixed stream of deltas."""
-        self.calls += 1
-        for t in ["po", "ng"]:
-            yield TextDelta(text=t)
-        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
-
-
-@pytest_asyncio.fixture
-async def raw_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
-    await session.commit()
-    return raw
-
-
-@pytest_asyncio.fixture
-async def counting_provider(monkeypatch):
-    fake = CountingProvider()
-    monkeypatch.setitem(app_module._providers, "anthropic", fake)
-    monkeypatch.setitem(app_module._providers, "ollama", fake)
-    return fake
-
-
-@pytest_asyncio.fixture
-async def client(counting_provider):
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 async def test_second_identical_request_is_served_from_cache(client, raw_key, counting_provider):

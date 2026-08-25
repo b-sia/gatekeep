@@ -36,12 +36,19 @@ def _point_settings_at_test_database() -> None:
 _point_settings_at_test_database()
 
 import asyncpg  # noqa: E402
+import httpx  # noqa: E402
 import pytest_asyncio  # noqa: E402
+from httpx import ASGITransport  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.engine.url import make_url  # noqa: E402
 
+import gatekeep.app as app_module  # noqa: E402
+from gatekeep.accounts.auth_keys import generate_key, hash_key  # noqa: E402
+from gatekeep.app import app  # noqa: E402
 from gatekeep.config import get_settings  # noqa: E402
 from gatekeep.storage.db import Base, SessionLocal, engine  # noqa: E402
+from gatekeep.storage.models import ApiKey  # noqa: E402
+from tests.helpers import CountingProvider, create_account  # noqa: E402
 
 _database_ready = False
 
@@ -143,3 +150,36 @@ async def db_ping():
     async with SessionLocal() as s:
         result = await s.execute(text("SELECT 1"))
         return result.scalar_one()
+
+
+@pytest_asyncio.fixture
+async def raw_key(session):
+    """Create and return a raw (unhashed) API key backed by a fresh ApiKey row.
+
+    Shared across test files that just need *some* authenticated key and
+    don't assert on its name; a file whose assertions depend on the key's
+    name (e.g. test_dashboard.py's key-label checks) defines its own
+    `raw_key` override instead of using this one.
+    """
+    raw = generate_key()
+    account = await create_account(session)
+    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
+    await session.commit()
+    return raw
+
+
+@pytest_asyncio.fixture
+async def counting_provider(monkeypatch):
+    """Install a CountingProvider as both providers so tests can assert call counts."""
+    fake = CountingProvider()
+    monkeypatch.setitem(app_module._providers, "anthropic", fake)
+    monkeypatch.setitem(app_module._providers, "ollama", fake)
+    return fake
+
+
+@pytest_asyncio.fixture
+async def client(counting_provider):
+    """An httpx client driving the real FastAPI app in-process via ASGI transport."""
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c

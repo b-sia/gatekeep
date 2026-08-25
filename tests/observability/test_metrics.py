@@ -1,20 +1,12 @@
-import httpx
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport
 from prometheus_client.parser import text_string_to_metric_families
 
-import gatekeep.app as app_module
-from gatekeep.accounts.auth_keys import generate_key, hash_key
-from gatekeep.app import app
 from gatekeep.middleware.cache_semantic import (
     find_semantic_match,
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import check_rate_limit, get_redis
 from gatekeep.observability.metrics import observe_request
-from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
-from gatekeep.storage.models import ApiKey
 from tests.helpers import create_account
 
 
@@ -115,52 +107,6 @@ async def test_find_semantic_match_returns_similarity_score(session):
 
 
 # -- /metrics endpoint, end-to-end via the real app ----------------------
-
-
-class CountingProvider:
-    """A fake provider that counts completion calls."""
-
-    def __init__(self):
-        """Initialize the call counter to zero."""
-        self.calls = 0
-
-    async def complete(self, payload):
-        """Record a call and return a fixed completion result."""
-        self.calls += 1
-        return CompletionResult(
-            text="pong", input_tokens=3, output_tokens=1, stop_reason="end_turn"
-        )
-
-    async def stream(self, payload):
-        """Record a call and yield a fixed stream of deltas."""
-        self.calls += 1
-        for t in ["po", "ng"]:
-            yield TextDelta(text=t)
-        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
-
-
-@pytest_asyncio.fixture
-async def raw_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="metrics-test", key_hash=hash_key(raw), account_id=account.id))
-    await session.commit()
-    return raw
-
-
-@pytest_asyncio.fixture
-async def counting_provider(monkeypatch):
-    fake = CountingProvider()
-    monkeypatch.setitem(app_module._providers, "anthropic", fake)
-    monkeypatch.setitem(app_module._providers, "ollama", fake)
-    return fake
-
-
-@pytest_asyncio.fixture
-async def client(counting_provider):
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 async def test_metrics_endpoint_is_unauthenticated_and_valid(client):
