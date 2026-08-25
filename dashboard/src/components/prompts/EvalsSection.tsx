@@ -94,7 +94,8 @@ export default function EvalsSection({
         {suite ? (
           <button
             onClick={run}
-            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+            disabled={!!jobId}
+            className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Run eval
           </button>
