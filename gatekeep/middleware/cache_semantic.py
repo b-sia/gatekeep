@@ -19,7 +19,7 @@ from gatekeep.api.openai_schemas import (
     Usage,
 )
 from gatekeep.api.translation import new_completion_id
-from gatekeep.models import CachedResponse
+from gatekeep.storage.models import CachedResponse
 
 logger = logging.getLogger(__name__)
 

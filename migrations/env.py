@@ -3,9 +3,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-import gatekeep.models  # noqa: F401  (register tables)
+import gatekeep.storage.models  # noqa: F401  (register tables)
 from gatekeep.config import get_settings
-from gatekeep.db import Base
+from gatekeep.storage.db import Base
 
 config = context.config
 

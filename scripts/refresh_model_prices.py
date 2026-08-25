@@ -2,7 +2,7 @@
 """Regenerate the vendored model pricing baseline from BerriAI/litellm.
 
 Downloads LiteLLM's community pricing dataset, transforms the chat models on
-providers we bill into our compact schema (see gatekeep.pricing.transform_litellm),
+providers we bill into our compact schema (see gatekeep.routing.pricing.transform_litellm),
 and rewrites gatekeep/data/model_prices.json - preserving every hand-maintained
 ``source == "local"`` entry (preview/self-hosted models no public dataset
 knows) and replacing the ``source == "litellm"`` entries with fresh values.
@@ -30,7 +30,7 @@ from pathlib import Path
 # Make the gatekeep package importable when run as a plain script from the repo.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gatekeep.pricing import compute_models_digest, transform_litellm  # noqa: E402
+from gatekeep.routing.pricing import compute_models_digest, transform_litellm  # noqa: E402
 
 LITELLM_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"

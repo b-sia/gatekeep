@@ -24,9 +24,9 @@ import asyncio
 
 from sqlalchemy import select
 
-from gatekeep import account_service
-from gatekeep.db import SessionLocal
-from gatekeep.models import Account
+from gatekeep.accounts import account_service
+from gatekeep.storage.db import SessionLocal
+from gatekeep.storage.models import Account
 
 
 async def main(account_name: str, key_name: str, *, operator: bool = False) -> None:

@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -e .
 # time, so a fresh container never needs to hit the HF Hub at runtime - that
 # network fetch (plus any read timeouts/retries) previously stalled the
 # first request to reach embed_text() by up to ~100s.
-RUN python -c "from gatekeep.embeddings import warm; warm()"
+RUN python -c "from gatekeep.caching.embeddings import warm; warm()"
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY --from=frontend-build /app/dashboard/dist ./dashboard/dist

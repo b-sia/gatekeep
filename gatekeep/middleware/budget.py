@@ -12,10 +12,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.config import get_settings
-from gatekeep.db import get_session
 from gatekeep.middleware.ratelimit import get_redis, require_rate_limit
-from gatekeep.models import Account, ApiKey, RequestLog
 from gatekeep.observability.metrics import budget_alerts_total
+from gatekeep.storage.db import get_session
+from gatekeep.storage.models import Account, ApiKey, RequestLog
 
 logger = logging.getLogger(__name__)
 

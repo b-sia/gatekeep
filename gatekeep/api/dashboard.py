@@ -12,26 +12,15 @@ from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep import account_service, promptjobs
-from gatekeep.audit import record_audit_event
+from gatekeep.accounts import account_service
+from gatekeep.audit.audit import record_audit_event
 from gatekeep.config import get_settings
-from gatekeep.curation import curate_cases, list_unreviewed, review_case
-from gatekeep.db import SessionLocal, get_session
-from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import (
-    Account,
-    ApiKey,
-    AuditEvent,
-    EvalCase,
-    EvalRun,
-    EvalSuite,
-    Prompt,
-    PromptVersion,
-    RequestLog,
-)
-from gatekeep.prompts import (
+from gatekeep.prompts import promptjobs
+from gatekeep.prompts.curation import curate_cases, list_unreviewed, review_case
+from gatekeep.prompts.evals import add_case, create_suite, get_suite_for_prompt
+from gatekeep.prompts.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
     _get_prompt_row,
@@ -42,6 +31,18 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.anthropic import AnthropicProvider
+from gatekeep.storage.db import SessionLocal, get_session
+from gatekeep.storage.models import (
+    Account,
+    ApiKey,
+    AuditEvent,
+    EvalCase,
+    EvalRun,
+    EvalSuite,
+    Prompt,
+    PromptVersion,
+    RequestLog,
+)
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard"])
 

@@ -15,11 +15,11 @@ class _TestDBConfig(BaseSettings):
 
 
 def _point_settings_at_test_database() -> None:
-    """Redirect DATABASE_URL to TEST_DATABASE_URL before gatekeep.db creates its engine.
+    """Redirect DATABASE_URL to TEST_DATABASE_URL before gatekeep.storage.db creates its engine.
 
     `_create_schema` below drops and recreates the whole schema on every test.
-    gatekeep/db.py builds its module-level engine from DATABASE_URL at import
-    time, so this must run before anything imports gatekeep.db - otherwise the
+    gatekeep/storage/db.py builds its module-level engine from DATABASE_URL at import
+    time, so this must run before anything imports gatekeep.storage.db - otherwise the
     test suite tears down whatever database DATABASE_URL happens to point at
     (this bit us: alembic_version showed head with every other table gone
     because a prior test run had wiped the dev database).
@@ -41,7 +41,7 @@ from sqlalchemy import text  # noqa: E402
 from sqlalchemy.engine.url import make_url  # noqa: E402
 
 from gatekeep.config import get_settings  # noqa: E402
-from gatekeep.db import Base, SessionLocal, engine  # noqa: E402
+from gatekeep.storage.db import Base, SessionLocal, engine  # noqa: E402
 
 _database_ready = False
 
@@ -88,7 +88,7 @@ async def _reset_settings_cache():
 @pytest_asyncio.fixture(autouse=True)
 async def _create_schema():
     # Import models so their tables register on Base.metadata.
-    import gatekeep.models  # noqa: F401
+    import gatekeep.storage.models  # noqa: F401
 
     await _ensure_database_exists(get_settings().database_url)
     async with engine.begin() as conn:
@@ -118,7 +118,7 @@ async def _reset_ratelimit_redis_client():
     ties this fixture to fixture/monkeypatch ordering across tests and caused
     a ConnectionError cascade in practice.
     """
-    import gatekeep.redis_token_bucket as redis_token_bucket
+    import gatekeep.caching.redis_token_bucket as redis_token_bucket
 
     redis_token_bucket._redis = None
     yield

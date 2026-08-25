@@ -23,7 +23,7 @@ from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from gatekeep.accounting import (
+from gatekeep.accounts.accounting import (
     calculate_cost,
     enforce_pricing_policy,
     estimate_tokens,
@@ -62,10 +62,9 @@ from gatekeep.api.translation import (
     role_chunk,
     text_chunk,
 )
+from gatekeep.caching.embeddings import embed_text_async
+from gatekeep.caching.embeddings import warm as warm_embedding_model
 from gatekeep.config import get_settings
-from gatekeep.db import SessionLocal, get_session
-from gatekeep.embeddings import embed_text_async
-from gatekeep.embeddings import warm as warm_embedding_model
 from gatekeep.middleware.budget import require_budget, run_budget_reconciliation_loop
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
@@ -80,7 +79,6 @@ from gatekeep.middleware.cache_semantic import (
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey
 from gatekeep.observability.latency import (
     LatencyMiddleware,
     StreamTimer,
@@ -97,15 +95,17 @@ from gatekeep.observability.metrics import (
     observe_request,
     requests_total,
 )
-from gatekeep.pricing import get_pricing_table
-from gatekeep.prompts import PromptNotFoundError, resolve_prompt_version_for_request
+from gatekeep.prompts.prompts import PromptNotFoundError, resolve_prompt_version_for_request
+from gatekeep.prompts.samples import record_request_sample
 from gatekeep.providers.anthropic import AnthropicProvider
 from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.google import GoogleProvider
 from gatekeep.providers.ollama import OllamaProvider
 from gatekeep.providers.openai import OpenAIProvider
-from gatekeep.routing import select_model
-from gatekeep.samples import record_request_sample
+from gatekeep.routing.pricing import get_pricing_table
+from gatekeep.routing.routing import select_model
+from gatekeep.storage.db import SessionLocal, get_session
+from gatekeep.storage.models import ApiKey
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     `get_pricing_table()` is also loaded eagerly for the same reason, but for
     correctness rather than latency: it verifies the vendored pricing file
-    against its committed hash pin (see gatekeep.pricing), and that file is
+    against its committed hash pin (see gatekeep.routing.pricing), and that file is
     the spend-enforcement table. A corrupted file or a stale pin must fail
     the container at startup - loud and before it takes traffic - rather than
     surface as a generic 500 on whichever request happens to be first to call

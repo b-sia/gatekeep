@@ -16,14 +16,14 @@ from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
 from gatekeep.middleware.cache_exact import get_cached_response
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, CachedResponse, RequestLog
-from gatekeep.prompts import create_prompt, promote_prompt
+from gatekeep.prompts.prompts import create_prompt, promote_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey, CachedResponse, RequestLog
 from tests.helpers import create_account
 
 
@@ -293,7 +293,7 @@ async def test_prompt_update_invalidates_cache(client, raw_key, session):
     assert provider.calls == 1  # served from cache, no new provider call
 
     # Promoting a new version invalidates every cache entry tagged "greeting".
-    from gatekeep.prompts import add_prompt_version
+    from gatekeep.prompts.prompts import add_prompt_version
 
     await add_prompt_version("greeting", "You are a casual assistant.", session)
     await promote_prompt("greeting", 2, session, redis=redis)
