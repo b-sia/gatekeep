@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gatekeep.config import get_settings
 from gatekeep.middleware.budget import record_spend
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import RequestLog
 from gatekeep.observability.metrics import unpriced_model_total
-from gatekeep.pricing import BILLED_PROVIDERS, get_pricing_table, is_unpriced
+from gatekeep.routing.pricing import BILLED_PROVIDERS, get_pricing_table, is_unpriced
+from gatekeep.storage.models import RequestLog
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ _MISS_OUTCOME = {"reject": "rejected", "ceiling": "ceiling", "alert_zero": "serv
 
 def estimate_tokens(text: str) -> int:
     """Estimate a token count for `text` using the ~4-characters-per-token
-    heuristic, matching the proxy limit `gatekeep.embeddings` already uses
+    heuristic, matching the proxy limit `gatekeep.caching.embeddings` already uses
     for the same reason: this codebase has no real tokenizer.
 
     Used only where an authoritative provider-reported token count is

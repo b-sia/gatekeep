@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from gatekeep import account_service
+from gatekeep.accounts import account_service
 from gatekeep.cli import (
     _account_create,
     _account_list,
@@ -21,9 +21,9 @@ from gatekeep.cli import (
     build_parser,
     main,
 )
-from gatekeep.evals import add_case, create_suite
-from gatekeep.models import Account, ApiKey
-from gatekeep.prompts import add_prompt_version, create_prompt
+from gatekeep.prompts.evals import add_case, create_suite
+from gatekeep.prompts.prompts import add_prompt_version, create_prompt
+from gatekeep.storage.models import Account, ApiKey
 from tests.helpers import FakeProvider as _FakeProvider
 from tests.helpers import create_account
 
@@ -135,7 +135,7 @@ async def test_set_candidate_configures_prompt(session):
 
     await _set_candidate("system-context", 2, 25.0)
 
-    from gatekeep.prompts import get_active_prompt_version
+    from gatekeep.prompts.prompts import get_active_prompt_version
 
     # active version is unaffected by setting a candidate
     active = await get_active_prompt_version("system-context", session)

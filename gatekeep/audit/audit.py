@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.models import AuditEvent
+from gatekeep.storage.models import AuditEvent
 
 
 async def record_audit_event(

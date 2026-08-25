@@ -4,15 +4,15 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from gatekeep.accounting import (
+from gatekeep.accounts.accounting import (
     calculate_cost,
     enforce_pricing_policy,
     estimate_tokens,
     log_request,
 )
-from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
-from gatekeep.models import ApiKey, RequestLog
+from gatekeep.storage.models import ApiKey, RequestLog
 from tests.helpers import create_account, create_key
 
 

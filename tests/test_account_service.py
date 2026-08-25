@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from gatekeep import account_service as svc
-from gatekeep.auth_keys import hash_key as _hash_key
+from gatekeep.accounts import account_service as svc
+from gatekeep.accounts.auth_keys import hash_key as _hash_key
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import Account, ApiKey, RequestLog
+from gatekeep.storage.models import Account, ApiKey, RequestLog
 from tests.helpers import create_account
 
 

@@ -7,12 +7,12 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.auth_keys import hash_key
+from gatekeep.accounts.auth_keys import hash_key
+from gatekeep.caching.redis_token_bucket import consume_token, get_redis
 from gatekeep.config import get_settings
-from gatekeep.db import get_session
-from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import auth_failures_total, pre_auth_rate_limit_rejections_total
-from gatekeep.redis_token_bucket import consume_token, get_redis
+from gatekeep.storage.db import get_session
+from gatekeep.storage.models import ApiKey
 
 
 def extract_bearer(authorization: str | None, x_api_key: str | None) -> str | None:

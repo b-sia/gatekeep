@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from gatekeep.pricing import (
+from gatekeep.routing.pricing import (
     ModelPrice,
     PricingIntegrityError,
     PricingTable,

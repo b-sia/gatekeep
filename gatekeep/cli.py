@@ -8,11 +8,11 @@ import sys
 from anthropic import AsyncAnthropic
 from sqlalchemy import select
 
-from gatekeep import account_service
+from gatekeep.accounts import account_service
 from gatekeep.config import get_settings
-from gatekeep.curation import curate_cases, list_unreviewed, review_case
-from gatekeep.db import SessionLocal
-from gatekeep.evals import (
+from gatekeep.middleware.ratelimit import get_redis
+from gatekeep.prompts.curation import curate_cases, list_unreviewed, review_case
+from gatekeep.prompts.evals import (
     EvalGateFailure,
     add_case,
     create_suite,
@@ -20,10 +20,8 @@ from gatekeep.evals import (
     make_eval_gate,
     run_suite_for_prompt,
 )
-from gatekeep.fixtures import load_fixtures_dir
-from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import Account, ApiKey, PromptVersion
-from gatekeep.prompts import (
+from gatekeep.prompts.fixtures import load_fixtures_dir
+from gatekeep.prompts.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
     add_prompt_version,
@@ -38,6 +36,8 @@ from gatekeep.prompts import (
     sync_prompt_from_text,
 )
 from gatekeep.providers.anthropic import AnthropicProvider
+from gatekeep.storage.db import SessionLocal
+from gatekeep.storage.models import Account, ApiKey, PromptVersion
 
 
 async def _create(name: str, template_file: str) -> None:

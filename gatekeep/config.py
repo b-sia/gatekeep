@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # {"models": {"<provider>/<model>": {...}}} shape as the vendored
     # gatekeep/data/model_prices.json). Entries here win over the vendored
     # baseline, letting an operator price preview/self-hosted models no public
-    # dataset covers. None (default) means baseline-only. See gatekeep/pricing.py.
+    # dataset covers. None (default) means baseline-only. See gatekeep/routing/pricing.py.
     pricing_overrides_path: str | None = None
     # What to do with a request whose resolved model has no configured price on
     # a billed provider (anthropic/openai/google). Ollama is self-hosted and
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     #       clamp down rather than open up, and emit an alert.
     #   "alert_zero": serve it at $0 (the old fail-open behavior) but emit an
     #       alert so the gap is at least visible.
-    # See gatekeep/accounting.enforce_pricing_policy.
+    # See gatekeep.accounts.accounting.enforce_pricing_policy.
     pricing_miss_policy: Literal["reject", "ceiling", "alert_zero"] = "reject"
     # Per-1M-token USD price charged to an unpriced billed-provider model when
     # `pricing_miss_policy` is "ceiling" (applied to both input and output).

@@ -2,9 +2,9 @@ import json
 
 from sqlalchemy import select
 
-from gatekeep.evals import create_suite
-from gatekeep.fixtures import load_fixture_file, load_fixtures_dir
-from gatekeep.models import EvalCase
+from gatekeep.prompts.evals import create_suite
+from gatekeep.prompts.fixtures import load_fixture_file, load_fixtures_dir
+from gatekeep.storage.models import EvalCase
 
 
 def _write_fixture(tmp_path, name, pass_threshold, cases):
@@ -84,7 +84,7 @@ async def test_load_fixture_file_updates_threshold_and_replaces_fixture_cases(tm
 
 
 async def test_load_fixture_file_never_touches_manual_or_curated_cases(tmp_path, session):
-    from gatekeep.evals import add_case
+    from gatekeep.prompts.evals import add_case
 
     suite = await create_suite("system-context", session, pass_threshold=0.9)
     await add_case(

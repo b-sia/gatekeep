@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import select
 
-from gatekeep.evals import (
+from gatekeep.prompts.evals import (
     EvalGateFailure,
     add_case,
     create_suite,
@@ -11,8 +11,8 @@ from gatekeep.evals import (
     run_eval_suite,
     run_suite_for_prompt,
 )
-from gatekeep.models import Prompt, PromptVersion
-from gatekeep.prompts import add_prompt_version, create_prompt
+from gatekeep.prompts.prompts import add_prompt_version, create_prompt
+from gatekeep.storage.models import Prompt, PromptVersion
 from tests.helpers import FakeProvider
 
 

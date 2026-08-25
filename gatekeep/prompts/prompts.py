@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.middleware.cache_exact import invalidate_prompt_cache
 from gatekeep.middleware.cache_semantic import delete_cached_responses_by_prompt
-from gatekeep.models import Prompt, PromptVersion
+from gatekeep.storage.models import Prompt, PromptVersion
 
 if TYPE_CHECKING:
-    from gatekeep.evals import Gate
+    from gatekeep.prompts.evals import Gate
 
 
 class PromptNotFoundError(ValueError):

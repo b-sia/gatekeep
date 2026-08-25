@@ -1,14 +1,14 @@
 import pytest
 from fastapi import HTTPException
 
-from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.middleware.ratelimit import (
     check_rate_limit,
     get_redis,
     require_rate_limit,
 )
-from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import rate_limit_rejections_total
+from gatekeep.storage.models import ApiKey
 from tests.helpers import create_account
 
 

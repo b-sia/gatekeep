@@ -9,16 +9,16 @@ import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy import select, update
 
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.evals import add_case, create_suite, run_eval_suite
-from gatekeep.models import ApiKey, RequestLog
-from gatekeep.prompts import (
+from gatekeep.prompts.evals import add_case, create_suite, run_eval_suite
+from gatekeep.prompts.prompts import (
     add_prompt_version,
     create_prompt,
     promote_prompt,
     set_candidate_version,
 )
+from gatekeep.storage.models import ApiKey, RequestLog
 from tests.helpers import create_account, create_key
 
 
@@ -610,7 +610,7 @@ async def test_evals_history_returns_runs_newest_first_and_filters_by_prompt(
 
             return R()
 
-    from gatekeep.prompts import get_active_prompt_version
+    from gatekeep.prompts.prompts import get_active_prompt_version
 
     version_a = await get_active_prompt_version("dash-prompt-a", session)
     version_b = await get_active_prompt_version("dash-prompt-b", session)
@@ -720,7 +720,7 @@ async def test_prompt_versions_timeline_404_for_unknown_prompt(client, operator_
 
 # -- prompt/eval routes are operator-only ------------------------------------
 # Prompt, PromptVersion, EvalSuite and EvalRun are fleet-wide rows with no
-# account_id (see gatekeep/models.py and issue #28): prompt names, authorship,
+# account_id (see gatekeep/storage/models.py and issue #28): prompt names, authorship,
 # and quality-eval trends are shared across the fleet by design. The dashboard
 # views over them are therefore gated to operators, matching the /accounts
 # management routes, so a non-operator tenant cannot browse another team's
@@ -1756,7 +1756,7 @@ async def test_prompt_curation_lists_unreviewed_only(client, operator_key, sessi
 
 
 async def test_audit_feed_filters_and_orders_newest_first(client, operator_key, session):
-    from gatekeep.audit import record_audit_event
+    from gatekeep.audit.audit import record_audit_event
 
     await record_audit_event(
         session,
@@ -1814,7 +1814,7 @@ async def test_create_prompt_persists_and_audits(client, operator_key, session):
 
     from sqlalchemy import select as _select
 
-    from gatekeep.models import AuditEvent
+    from gatekeep.storage.models import AuditEvent
 
     events = (
         (await session.execute(_select(AuditEvent).where(AuditEvent.entity_ref == "new-prompt")))
@@ -1833,7 +1833,7 @@ async def test_create_prompt_sets_created_by_to_operator(client, operator_key, s
         headers={"Authorization": f"Bearer {operator_key}"},
         json={"name": "attrib-prompt", "template": "hi"},
     )
-    from gatekeep.prompts import get_active_prompt_version
+    from gatekeep.prompts.prompts import get_active_prompt_version
 
     version = await get_active_prompt_version("attrib-prompt", session)
     assert version.created_by == "op-acct"
@@ -1956,12 +1956,12 @@ async def test_curation_review_approves_case(client, operator_key, session):
 async def test_curation_mine_uses_injected_provider(client, operator_key, session):
     from gatekeep.api.dashboard import _get_eval_provider
     from gatekeep.app import app
-    from gatekeep.samples import record_request_sample
+    from gatekeep.prompts.samples import record_request_sample
 
     await create_prompt("mine-prompt", "v1", session)
     await create_suite("mine-prompt", session, pass_threshold=0.5)
     # a key/account to attribute the sample to
-    from gatekeep.models import ApiKey as _ApiKey
+    from gatekeep.storage.models import ApiKey as _ApiKey
 
     acct = (await session.execute(select(_ApiKey))).scalars().first()
     await record_request_sample(
@@ -2004,10 +2004,10 @@ async def test_job_poll_404_for_unknown_job(client, operator_key):
 
 
 async def test_eval_run_endpoint_returns_job_id_and_completes(client, operator_key, session):
-    from gatekeep import promptjobs
     from gatekeep.api.dashboard import _get_eval_provider
     from gatekeep.app import app
     from gatekeep.middleware.ratelimit import get_redis
+    from gatekeep.prompts import promptjobs
 
     await create_prompt("ep-eval", "tmpl", session)
     suite = await create_suite("ep-eval", session, pass_threshold=0.5)
@@ -2051,10 +2051,10 @@ async def test_eval_run_endpoint_returns_job_id_and_completes(client, operator_k
 
 
 async def test_promote_endpoint_returns_job_id(client, operator_key, session):
-    from gatekeep import promptjobs
     from gatekeep.api.dashboard import _get_eval_provider
     from gatekeep.app import app
     from gatekeep.middleware.ratelimit import get_redis
+    from gatekeep.prompts import promptjobs
 
     await create_prompt("ep-promote", "v1", session)
     await add_prompt_version("ep-promote", "v2", session)

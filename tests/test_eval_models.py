@@ -1,6 +1,6 @@
 from sqlalchemy import select
 
-from gatekeep.models import (
+from gatekeep.storage.models import (
     ApiKey,
     EvalCase,
     EvalRun,
@@ -71,7 +71,7 @@ async def test_eval_suite_case_and_run_persist(session):
 
 
 async def test_request_log_has_prompt_name_and_routed_from(session):
-    from gatekeep.models import RequestLog
+    from gatekeep.storage.models import RequestLog
 
     account = await create_account(session)
     key = ApiKey(name="k", key_hash="h", account_id=account.id)

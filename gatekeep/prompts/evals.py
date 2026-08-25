@@ -5,12 +5,12 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.models import EvalCase, EvalRun, EvalSuite, PromptVersion
-from gatekeep.prompts import (
+from gatekeep.prompts.prompts import (
     PromptVersionNotFoundError,
     _get_prompt_row,
     get_active_prompt_version,
 )
+from gatekeep.storage.models import EvalCase, EvalRun, EvalSuite, PromptVersion
 
 _JUDGE_TEMPLATE = (
     "You are grading an AI system's output against a rubric. Everything "

@@ -9,9 +9,7 @@ from gatekeep.api.openai_schemas import (
     ResponseMessage,
     Usage,
 )
-from gatekeep.db import SessionLocal
-from gatekeep.embeddings import embed_text
-from gatekeep.evals import EvalGateFailure, add_case, create_suite
+from gatekeep.caching.embeddings import embed_text
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
     hash_request,
@@ -19,8 +17,8 @@ from gatekeep.middleware.cache_exact import (
 )
 from gatekeep.middleware.cache_semantic import store_cached_response
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import CachedResponse, Prompt, PromptVersion
-from gatekeep.prompts import (
+from gatekeep.prompts.evals import EvalGateFailure, add_case, create_suite
+from gatekeep.prompts.prompts import (
     PromptNotFoundError,
     PromptVersionNotFoundError,
     add_prompt_version,
@@ -35,6 +33,8 @@ from gatekeep.prompts import (
     set_candidate_version,
 )
 from gatekeep.providers.base import CompletionResult
+from gatekeep.storage.db import SessionLocal
+from gatekeep.storage.models import CachedResponse, Prompt, PromptVersion
 from tests.helpers import create_account
 
 
@@ -53,7 +53,7 @@ class _FakeProvider:
 
 def _gate_from(provider):
     """Build an eval gate using `provider` for both generation and judging."""
-    from gatekeep.evals import make_eval_gate
+    from gatekeep.prompts.evals import make_eval_gate
 
     return make_eval_gate(
         provider=provider,

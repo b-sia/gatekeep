@@ -5,16 +5,16 @@ from httpx import ASGITransport
 from prometheus_client.parser import text_string_to_metric_families
 
 import gatekeep.app as app_module
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.cache_semantic import (
     find_semantic_match,
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import check_rate_limit, get_redis
-from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import observe_request
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey
 from tests.helpers import create_account
 
 
@@ -85,7 +85,7 @@ async def test_check_rate_limit_returns_raw_token_math():
 
 
 async def test_find_semantic_match_returns_similarity_score(session):
-    from gatekeep.embeddings import embed_text
+    from gatekeep.caching.embeddings import embed_text
 
     account = await create_account(session)
     stored_text = "What is the capital of France?"

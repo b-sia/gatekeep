@@ -1,6 +1,6 @@
-from gatekeep.evals import create_suite
-from gatekeep.models import EvalRun, Prompt, PromptVersion
-from gatekeep.routing import select_model
+from gatekeep.prompts.evals import create_suite
+from gatekeep.routing.routing import select_model
+from gatekeep.storage.models import EvalRun, Prompt, PromptVersion
 
 
 async def _suite_with_version(session, prompt_name):

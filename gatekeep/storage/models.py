@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from gatekeep.db import Base
+from gatekeep.storage.db import Base
 
 EMBEDDING_DIM = 384
 

@@ -2,8 +2,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.models import Account, ApiKey
+from gatekeep.accounts.auth_keys import generate_key, hash_key
+from gatekeep.storage.models import Account, ApiKey
 from tests.helpers import create_account
 
 

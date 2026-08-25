@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import itertools
 
-from gatekeep.models import Account, ApiKey
 from gatekeep.providers.base import CompletionResult
+from gatekeep.storage.models import Account, ApiKey
 
 _account_name_counter = itertools.count(1)
 

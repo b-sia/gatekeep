@@ -168,7 +168,7 @@ Point your orchestrator's liveness probe at `GET /healthz` and your Prometheus a
 Schema changes are authored as Alembic revisions:
 
 ```bash
-alembic revision --autogenerate -m "add a column"   # after editing gatekeep/models.py
+alembic revision --autogenerate -m "add a column"   # after editing gatekeep/storage/models.py
 ```
 
 ## Project layout

@@ -3,12 +3,12 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from gatekeep import promptjobs
-from gatekeep.db import SessionLocal
-from gatekeep.evals import add_case, create_suite
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import AuditEvent, EvalRun
-from gatekeep.prompts import add_prompt_version, create_prompt, get_active_prompt_version
+from gatekeep.prompts import promptjobs
+from gatekeep.prompts.evals import add_case, create_suite
+from gatekeep.prompts.prompts import add_prompt_version, create_prompt, get_active_prompt_version
+from gatekeep.storage.db import SessionLocal
+from gatekeep.storage.models import AuditEvent, EvalRun
 
 
 @pytest.fixture
@@ -211,7 +211,7 @@ async def test_run_promote_job_audit_write_failure_does_not_misreport_success(
     """Fix verification for PR #35 finding #2.
 
     `promote_prompt` commits the version flip on its own session before
-    `record_audit_event` is ever called (see gatekeep/prompts.py:174). The
+    `record_audit_event` is ever called (see gatekeep/prompts/prompts.py:174). The
     success-path audit write now happens outside the failure-handling try
     block in `run_promote_job`, so a failure there is logged but does not
     flip the job to "failed" or produce a contradictory result="error" audit

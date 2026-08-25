@@ -1,4 +1,4 @@
-from gatekeep.embeddings import embed_text, is_too_long
+from gatekeep.caching.embeddings import embed_text, is_too_long
 
 
 def test_embed_text_returns_384_dim_vector():

@@ -6,9 +6,9 @@ from anthropic import APIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.evals import add_case, generate_judge_criteria, get_suite_for_prompt
-from gatekeep.models import EvalCase
-from gatekeep.samples import recent_samples
+from gatekeep.prompts.evals import add_case, generate_judge_criteria, get_suite_for_prompt
+from gatekeep.prompts.samples import recent_samples
+from gatekeep.storage.models import EvalCase
 
 logger = logging.getLogger(__name__)
 

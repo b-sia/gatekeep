@@ -3,15 +3,15 @@ import pytest
 from anthropic import APIError
 from sqlalchemy import select
 
-from gatekeep.curation import (
+from gatekeep.prompts.curation import (
     CURATED_JUDGE_CRITERIA,
     curate_cases,
     list_unreviewed,
     review_case,
 )
-from gatekeep.evals import create_suite
-from gatekeep.models import ApiKey, EvalCase
-from gatekeep.samples import record_request_sample
+from gatekeep.prompts.evals import create_suite
+from gatekeep.prompts.samples import record_request_sample
+from gatekeep.storage.models import ApiKey, EvalCase
 from tests.helpers import FakeProvider, create_account
 
 

@@ -49,7 +49,7 @@ _LITELLM_PROVIDER_MAP = {
     "gemini": "google",
 }
 
-_DEFAULT_BASELINE_PATH = Path(__file__).parent / "data" / "model_prices.json"
+_DEFAULT_BASELINE_PATH = Path(__file__).parent.parent / "data" / "model_prices.json"
 
 
 class PricingIntegrityError(RuntimeError):

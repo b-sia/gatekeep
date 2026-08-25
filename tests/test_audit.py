@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from gatekeep.audit import record_audit_event
-from gatekeep.models import AuditEvent
+from gatekeep.audit.audit import record_audit_event
+from gatekeep.storage.models import AuditEvent
 from tests.helpers import create_account
 
 

@@ -6,11 +6,11 @@ from fastapi import Depends, HTTPException
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from gatekeep.caching.redis_token_bucket import consume_token, get_redis
 from gatekeep.config import get_settings
 from gatekeep.middleware.auth import require_api_key
-from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import rate_limit_rejections_total
-from gatekeep.redis_token_bucket import consume_token, get_redis
+from gatekeep.storage.models import ApiKey
 
 __all__ = ["check_rate_limit", "get_redis", "require_rate_limit"]
 

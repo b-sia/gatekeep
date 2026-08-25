@@ -8,20 +8,20 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
-from gatekeep.accounting import calculate_cost
+from gatekeep.accounts.accounting import calculate_cost
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
-from gatekeep.evals import create_suite
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, EvalRun, Prompt, RequestLog
-from gatekeep.prompts import (
+from gatekeep.prompts.evals import create_suite
+from gatekeep.prompts.prompts import (
     add_prompt_version,
     create_prompt,
     get_active_prompt_version,
     set_candidate_version,
 )
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey, EvalRun, Prompt, RequestLog
 from tests.helpers import create_account
 
 
@@ -534,7 +534,7 @@ async def test_promote_prompt_unaffected_by_inflight_candidate_via_endpoint(
     with a candidate configured in-flight, proving this feature's "bigger
     blast radius" doesn't destabilize the existing binary promote/rollback
     model through the real request path."""
-    from gatekeep.prompts import promote_prompt
+    from gatekeep.prompts.prompts import promote_prompt
 
     await create_prompt("system-context", "You are a pirate.", session)
     await add_prompt_version("system-context", "You are a wizard.", session)

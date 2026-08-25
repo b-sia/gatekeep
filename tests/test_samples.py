@@ -1,5 +1,5 @@
-from gatekeep.models import ApiKey
-from gatekeep.samples import recent_samples, record_request_sample
+from gatekeep.prompts.samples import recent_samples, record_request_sample
+from gatekeep.storage.models import ApiKey
 from tests.helpers import create_account
 
 

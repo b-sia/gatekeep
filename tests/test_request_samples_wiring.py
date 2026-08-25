@@ -5,12 +5,12 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, RequestSample
-from gatekeep.prompts import create_prompt
+from gatekeep.prompts.prompts import create_prompt
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey, RequestSample
 from tests.helpers import create_account
 
 

@@ -8,9 +8,9 @@ from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
-from gatekeep.embeddings import embed_text
+from gatekeep.caching.embeddings import embed_text
 from gatekeep.middleware.cache_semantic import (
     build_response_from_cache,
     extract_embeddable_text,
@@ -20,9 +20,9 @@ from gatekeep.middleware.cache_semantic import (
     store_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, CachedResponse, RequestLog
-from gatekeep.prompts import add_prompt_version, set_candidate_version
+from gatekeep.prompts.prompts import add_prompt_version, set_candidate_version
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey, CachedResponse, RequestLog
 from tests.helpers import create_account
 
 
@@ -651,8 +651,8 @@ async def test_purge_expired_cached_responses_no_op_when_nothing_expired(session
 async def test_run_cache_purge_loop_runs_immediately(monkeypatch):
     """The loop must purge on start rather than waiting a full interval
     first, so rows accumulated before a deploy are cleaned up right away."""
-    from gatekeep.db import SessionLocal
     from gatekeep.middleware import cache_semantic as cache_semantic_module
+    from gatekeep.storage.db import SessionLocal
 
     calls = []
 
@@ -676,8 +676,8 @@ async def test_run_cache_purge_loop_runs_immediately(monkeypatch):
 async def test_run_cache_purge_loop_survives_a_failed_cycle(monkeypatch):
     """A single cycle's exception (e.g. a DB hiccup) must not kill the
     loop - the next cycle should still run."""
-    from gatekeep.db import SessionLocal
     from gatekeep.middleware import cache_semantic as cache_semantic_module
+    from gatekeep.storage.db import SessionLocal
 
     calls = []
 
@@ -911,7 +911,7 @@ async def test_candidate_and_active_semantic_cache_entries_do_not_cross_contamin
     near-identical user text would otherwise let one version's cached
     answer leak into the other version's response.
     """
-    from gatekeep.prompts import clear_candidate_version, create_prompt
+    from gatekeep.prompts.prompts import clear_candidate_version, create_prompt
 
     await create_prompt("system-context", "You are a pirate.", session)
     await add_prompt_version("system-context", "You are a wizard.", session)

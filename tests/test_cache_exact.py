@@ -6,6 +6,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 
 import gatekeep.app as app_module
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.api.openai_schemas import (
     ChatCompletionResponse,
     Choice,
@@ -13,7 +14,6 @@ from gatekeep.api.openai_schemas import (
     Usage,
 )
 from gatekeep.app import app
-from gatekeep.auth_keys import generate_key, hash_key
 from gatekeep.middleware.cache_exact import (
     clear_cached_response,
     get_cached_response,
@@ -21,8 +21,8 @@ from gatekeep.middleware.cache_exact import (
     set_cached_response,
 )
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import ApiKey, RequestLog
 from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
+from gatekeep.storage.models import ApiKey, RequestLog
 from tests.helpers import create_account
 
 

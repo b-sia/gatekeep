@@ -10,9 +10,9 @@ from uuid import uuid4
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from gatekeep.audit import record_audit_event
-from gatekeep.evals import EvalGateFailure, make_eval_gate, run_suite_for_prompt
-from gatekeep.prompts import promote_prompt
+from gatekeep.audit.audit import record_audit_event
+from gatekeep.prompts.evals import EvalGateFailure, make_eval_gate, run_suite_for_prompt
+from gatekeep.prompts.prompts import promote_prompt
 
 logger = logging.getLogger(__name__)
 

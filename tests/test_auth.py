@@ -4,13 +4,13 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.api.errors import map_provider_error
-from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.caching.redis_token_bucket import get_redis
 from gatekeep.config import get_settings
 from gatekeep.middleware.auth import _enforce_pre_auth_rate_limit, extract_bearer, require_api_key
-from gatekeep.models import ApiKey
 from gatekeep.observability.metrics import auth_failures_total, pre_auth_rate_limit_rejections_total
-from gatekeep.redis_token_bucket import get_redis
+from gatekeep.storage.models import ApiKey
 from tests.helpers import create_account
 
 

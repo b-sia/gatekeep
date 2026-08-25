@@ -6,8 +6,8 @@ import pathlib
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.evals import add_case, create_suite, get_suite_for_prompt
-from gatekeep.models import EvalCase, EvalSuite
+from gatekeep.prompts.evals import add_case, create_suite, get_suite_for_prompt
+from gatekeep.storage.models import EvalCase, EvalSuite
 
 
 async def load_fixture_file(path: pathlib.Path, session: AsyncSession) -> EvalSuite:

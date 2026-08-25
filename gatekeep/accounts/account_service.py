@@ -9,9 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.auth_keys import generate_key, hash_key
+from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.middleware.budget import get_period_spend, get_period_spend_batch
-from gatekeep.models import Account, ApiKey
+from gatekeep.storage.models import Account, ApiKey
 
 
 class AccountServiceError(Exception):

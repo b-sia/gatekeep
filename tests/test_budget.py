@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from gatekeep.accounting import log_request
+from gatekeep.accounts.accounting import log_request
 from gatekeep.middleware.budget import (
     check_budget,
     get_period_spend,
@@ -17,8 +17,8 @@ from gatekeep.middleware.budget import (
     run_budget_reconciliation_loop,
 )
 from gatekeep.middleware.ratelimit import get_redis
-from gatekeep.models import Account, ApiKey
 from gatekeep.observability.metrics import budget_alerts_total
+from gatekeep.storage.models import Account, ApiKey
 from tests.helpers import create_account, create_key
 
 
@@ -406,8 +406,8 @@ async def test_require_budget_rejects_with_429_once_cap_reached(session):
 async def test_run_budget_reconciliation_loop_runs_immediately(monkeypatch):
     """The loop must reconcile on start rather than waiting a full interval
     first, so drift accumulated before a deploy is healed right away."""
-    from gatekeep.db import SessionLocal
     from gatekeep.middleware import budget as budget_module
+    from gatekeep.storage.db import SessionLocal
 
     calls = []
 
@@ -432,8 +432,8 @@ async def test_run_budget_reconciliation_loop_runs_immediately(monkeypatch):
 async def test_run_budget_reconciliation_loop_survives_a_failed_cycle(monkeypatch):
     """A single cycle's exception (e.g. a DB hiccup) must not kill the
     loop - the next cycle should still run."""
-    from gatekeep.db import SessionLocal
     from gatekeep.middleware import budget as budget_module
+    from gatekeep.storage.db import SessionLocal
 
     calls = []
 
