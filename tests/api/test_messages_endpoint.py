@@ -44,15 +44,6 @@ class FakeProvider:
 
 
 @pytest_asyncio.fixture
-async def raw_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
-    await session.commit()
-    return raw
-
-
-@pytest_asyncio.fixture
 async def client(monkeypatch):
     fake = FakeProvider()
     monkeypatch.setitem(app_module._providers, "anthropic", fake)

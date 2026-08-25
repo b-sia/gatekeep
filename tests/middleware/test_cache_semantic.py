@@ -1,15 +1,11 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport
 from sqlalchemy import select
 
 import gatekeep.app as app_module
-from gatekeep.accounts.auth_keys import generate_key, hash_key
-from gatekeep.app import app
 from gatekeep.caching.embeddings import embed_text
 from gatekeep.middleware.cache_semantic import (
     build_response_from_cache,
@@ -21,9 +17,8 @@ from gatekeep.middleware.cache_semantic import (
 )
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts.prompts import add_prompt_version, set_candidate_version
-from gatekeep.providers.anthropic import CompletionResult, StreamEnd, TextDelta
-from gatekeep.storage.models import ApiKey, CachedResponse, RequestLog
-from tests.helpers import create_account
+from gatekeep.storage.models import CachedResponse, RequestLog
+from tests.helpers import CountingProvider, create_account
 
 
 @pytest.fixture(autouse=True)
@@ -721,53 +716,12 @@ def test_build_response_from_cache_shape():
 # -- wired into /v1/chat/completions ---------------------------------------
 
 
-class CountingProvider:
-    """A fake provider that counts completion calls to verify semantic caching."""
-
-    def __init__(self):
-        """Initialize the call counter to zero."""
-        self.calls = 0
-
-    async def complete(self, payload):
-        """Record a call and return a fixed completion result."""
-        self.calls += 1
-        return CompletionResult(
-            text="Paris is the capital of France.",
-            input_tokens=5,
-            output_tokens=6,
-            stop_reason="end_turn",
-        )
-
-    async def stream(self, payload):
-        """Record a call and yield a fixed stream of deltas."""
-        self.calls += 1
-        for t in ["po", "ng"]:
-            yield TextDelta(text=t)
-        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
-
-
-@pytest_asyncio.fixture
-async def raw_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
-    await session.commit()
-    return raw
-
-
 @pytest_asyncio.fixture
 async def counting_provider(monkeypatch):
-    fake = CountingProvider()
+    fake = CountingProvider(text="Paris is the capital of France.", input_tokens=5, output_tokens=6)
     monkeypatch.setitem(app_module._providers, "anthropic", fake)
     monkeypatch.setitem(app_module._providers, "ollama", fake)
     return fake
-
-
-@pytest_asyncio.fixture
-async def client(counting_provider):
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 async def test_semantically_similar_request_is_served_from_cache(

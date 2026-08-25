@@ -163,15 +163,6 @@ class StreamEndThenRaisesProvider:
 
 
 @pytest_asyncio.fixture
-async def raw_key(session):
-    raw = generate_key()
-    account = await create_account(session)
-    session.add(ApiKey(name="c", key_hash=hash_key(raw), account_id=account.id))
-    await session.commit()
-    return raw
-
-
-@pytest_asyncio.fixture
 async def client(monkeypatch):
     fake = FakeProvider()
     monkeypatch.setitem(app_module._providers, "anthropic", fake)
@@ -566,6 +557,66 @@ async def test_promote_prompt_unaffected_by_inflight_candidate_via_endpoint(
     assert prompt_row.active_version_id is not None
     active = await get_active_prompt_version("system-context", session)
     assert active.version_num == 2
+
+
+async def test_promote_prompt_invalidates_cached_response_via_endpoint(client, raw_key, session):
+    """Promoting a new prompt version must invalidate cache entries tagged
+    with that prompt: a request cached under the old system text must miss
+    and re-hit the provider with the new template instead of keep serving
+    the stale cached output. Mechanism-level cache-tag invalidation is
+    covered directly in tests/prompts/test_prompts.py; this proves it fires
+    through the real request path."""
+    from gatekeep.prompts.prompts import promote_prompt
+
+    await create_prompt("greeting", "You are a formal assistant.", session)
+
+    calls = []
+    original_complete = app_module._providers["anthropic"].complete
+
+    async def recording_complete(payload):
+        calls.append(payload.get("system"))
+        return await original_complete(payload)
+
+    app_module._providers["anthropic"].complete = recording_complete
+    try:
+        body = {
+            "model": "gpt-4o",
+            "prompt_name": "greeting",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        r1 = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        )
+        assert r1.status_code == 200
+        assert len(calls) == 1
+
+        # Repeating the same request is served from the exact cache.
+        r2 = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        )
+        assert r2.status_code == 200
+        assert len(calls) == 1  # no new provider call
+
+        await add_prompt_version("greeting", "You are a casual assistant.", session)
+        await promote_prompt("greeting", 2, session, redis=get_redis())
+
+        # Repeating the same request again is now a fresh miss with the new
+        # template, not the stale response served from the invalidated cache.
+        r3 = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json=body,
+        )
+        assert r3.status_code == 200
+        assert len(calls) == 2
+        assert calls[-1] == "You are a casual assistant."
+    finally:
+        app_module._providers["anthropic"].complete = original_complete
 
 
 async def test_rate_limit_exhaustion_returns_429_with_retry_after(client, raw_key, monkeypatch):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 
-from gatekeep.providers.base import CompletionResult
+from gatekeep.providers.base import CompletionResult, StreamEnd, TextDelta
 from gatekeep.storage.models import Account, ApiKey
 
 _account_name_counter = itertools.count(1)
@@ -84,3 +84,43 @@ class FakeProvider:
         if isinstance(text, Exception):
             raise text
         return CompletionResult(text=text, input_tokens=1, output_tokens=1, stop_reason="stop")
+
+
+class CountingProvider:
+    """A fake provider that counts completion calls and returns a fixed answer."""
+
+    def __init__(
+        self,
+        text: str = "pong",
+        *,
+        input_tokens: int = 3,
+        output_tokens: int = 1,
+    ):
+        """Initialize the call counter and the fixed completion this provider returns.
+
+        Args:
+            text: The completion text to return from every complete() call.
+            input_tokens: The input token count to report from complete().
+            output_tokens: The output token count to report from complete().
+        """
+        self.calls = 0
+        self._text = text
+        self._input_tokens = input_tokens
+        self._output_tokens = output_tokens
+
+    async def complete(self, payload):
+        """Record a call and return the fixed completion result."""
+        self.calls += 1
+        return CompletionResult(
+            text=self._text,
+            input_tokens=self._input_tokens,
+            output_tokens=self._output_tokens,
+            stop_reason="end_turn",
+        )
+
+    async def stream(self, payload):
+        """Record a call and yield a fixed stream of deltas."""
+        self.calls += 1
+        for t in ["po", "ng"]:
+            yield TextDelta(text=t)
+        yield StreamEnd(stop_reason="end_turn", input_tokens=3, output_tokens=2)
