@@ -32,49 +32,36 @@ def _req(**kw):
     return ChatCompletionRequest.model_validate(base)
 
 
-def test_resolve_route_alias_hit_routes_anthropic():
-    assert resolve_route("gpt-4o", aliases=ALIASES) == ("anthropic", "claude-sonnet-5")
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # alias hit routes to the mapped Anthropic model...
+        ("gpt-4o", ("anthropic", "claude-sonnet-5")),
+        # ...while a claude-prefixed model routes to Anthropic unchanged.
+        ("claude-opus-4-8", ("anthropic", "claude-opus-4-8")),
+        # unrecognized models fall through to Ollama unchanged
+        ("llama3.2", ("ollama", "llama3.2")),
+        ("mystery", ("ollama", "mystery")),
+        # a provider prefix strips the prefix AND bypasses the alias table:
+        # "gpt-4o" alone aliases to Claude, but "openai/gpt-4o" stays on OpenAI.
+        ("openai/gpt-4o", ("openai", "gpt-4o")),
+        ("google/gemini-flash-latest", ("google", "gemini-flash-latest")),
+    ],
+)
+def test_resolve_route(model, expected):
+    assert resolve_route(model, aliases=ALIASES) == expected
 
 
-def test_resolve_route_claude_prefix_routes_anthropic():
-    assert resolve_route("claude-opus-4-8", aliases=ALIASES) == (
-        "anthropic",
-        "claude-opus-4-8",
-    )
-
-
-def test_resolve_route_unrecognized_routes_ollama_unchanged():
-    assert resolve_route("llama3.2", aliases=ALIASES) == ("ollama", "llama3.2")
-    assert resolve_route("mystery", aliases=ALIASES) == ("ollama", "mystery")
-
-
-def test_resolve_route_openai_prefix_routes_openai_and_strips_prefix():
-    assert resolve_route("openai/gpt-4o", aliases=ALIASES) == ("openai", "gpt-4o")
-
-
-def test_resolve_route_google_prefix_routes_google_and_strips_prefix():
-    assert resolve_route("google/gemini-flash-latest", aliases=ALIASES) == (
-        "google",
-        "gemini-flash-latest",
-    )
-
-
-def test_resolve_route_prefix_bypasses_alias_table():
-    # "gpt-4o" alone is aliased to Claude; the openai/ prefix must skip that.
-    assert resolve_route("openai/gpt-4o", aliases=ALIASES) == ("openai", "gpt-4o")
-    assert resolve_route("gpt-4o", aliases=ALIASES) == ("anthropic", "claude-sonnet-5")
-
-
-def test_extract_text_flattens_multimodal_parts():
-    assert extract_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "ab"
-
-
-def test_extract_text_passes_through_string():
-    assert extract_text("hi") == "hi"
-
-
-def test_extract_text_none_is_empty_string():
-    assert extract_text(None) == ""
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "ab"),  # flattens parts
+        ("hi", "hi"),  # passes a plain string through
+        (None, ""),  # None is the empty string
+    ],
+)
+def test_extract_text(content, expected):
+    assert extract_text(content) == expected
 
 
 def test_system_message_lifted_and_sampling_dropped():

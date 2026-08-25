@@ -64,18 +64,18 @@ def test_is_billed_provider():
     assert not is_billed_provider("ollama")
 
 
-def test_is_unpriced_true_for_paid_provider_miss():
-    assert is_unpriced("anthropic", "not-a-real-model") is True
-
-
-def test_is_unpriced_false_for_priced_model():
-    assert is_unpriced("anthropic", "claude-sonnet-5") is False
-
-
-def test_is_unpriced_false_for_any_ollama_model():
-    """A self-hosted Ollama model is never billed, so an absent price is
-    expected, not a governance gap."""
-    assert is_unpriced("ollama", "llama3-totally-local") is False
+@pytest.mark.parametrize(
+    ("provider", "model", "expected"),
+    [
+        ("anthropic", "not-a-real-model", True),  # paid provider miss
+        ("anthropic", "claude-sonnet-5", False),  # priced model
+        # a self-hosted Ollama model is never billed, so an absent price is
+        # expected, not a governance gap.
+        ("ollama", "llama3-totally-local", False),
+    ],
+)
+def test_is_unpriced(provider, model, expected):
+    assert is_unpriced(provider, model) is expected
 
 
 # --- lookup semantics --------------------------------------------------------

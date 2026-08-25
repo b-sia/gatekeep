@@ -32,43 +32,39 @@ def miss_policy(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_calculate_cost_known_model():
+@pytest.mark.parametrize(
+    ("provider", "model", "prompt_tokens", "completion_tokens", "expected"),
+    [
+        # known model, priced exactly
+        ("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000, 12.0),
+        # cost scales linearly with token counts
+        ("anthropic", "claude-sonnet-5", 500_000, 0, 1.0),
+        # unknown Ollama model is free (never billed)
+        ("ollama", "llama3", 1_000_000, 1_000_000, 0.0),
+        # calculate_cost is numeric-only: under the default "reject" policy it
+        # still returns $0 for an unpriced paid model (the request never reaches
+        # here, since enforce_pricing_policy refuses it first).
+        ("anthropic", "not-a-real-model", 1_000_000, 1_000_000, 0.0),
+        ("google", "gemini-flash-latest", 1_000_000, 1_000_000, 10.5),
+    ],
+)
+def test_calculate_cost_exact(provider, model, prompt_tokens, completion_tokens, expected):
     cost = calculate_cost(
-        "anthropic", "claude-sonnet-5", prompt_tokens=1_000_000, completion_tokens=1_000_000
+        provider, model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
     )
-    assert cost == 12.0
+    assert cost == expected
 
 
-def test_calculate_cost_scales_linearly():
-    cost = calculate_cost(
-        "anthropic", "claude-sonnet-5", prompt_tokens=500_000, completion_tokens=0
-    )
-    assert cost == 1.0
-
-
-def test_calculate_cost_haiku_alias_is_priced():
-    cost = calculate_cost(
-        "anthropic",
-        "claude-haiku-4-5-20251001",
-        prompt_tokens=1_000_000,
-        completion_tokens=1_000_000,
-    )
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("anthropic", "claude-haiku-4-5-20251001"),  # haiku alias is priced
+        ("openai", "gpt-4o"),
+    ],
+)
+def test_calculate_cost_priced_model_is_positive(provider, model):
+    cost = calculate_cost(provider, model, prompt_tokens=1_000_000, completion_tokens=1_000_000)
     assert cost > 0.0
-
-
-def test_calculate_cost_unknown_model_is_free():
-    cost = calculate_cost("ollama", "llama3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
-    assert cost == 0.0
-
-
-def test_calculate_cost_unpriced_paid_model_is_zero_under_default_reject_policy():
-    """calculate_cost is numeric-only: under the default "reject" policy it still
-    returns $0 for an unpriced paid model (the request never reaches here, since
-    enforce_pricing_policy refuses it first)."""
-    cost = calculate_cost(
-        "anthropic", "not-a-real-model", prompt_tokens=1_000_000, completion_tokens=1_000_000
-    )
-    assert cost == 0.0
 
 
 def test_calculate_cost_unpriced_paid_model_uses_ceiling_under_ceiling_policy(miss_policy):
@@ -119,18 +115,6 @@ def test_enforce_pricing_policy_ceiling_and_alert_zero_do_not_reject(miss_policy
     assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
     miss_policy("alert_zero")
     assert enforce_pricing_policy("anthropic", "not-a-real-model") is None
-
-
-def test_calculate_cost_openai_gpt4o_is_priced():
-    cost = calculate_cost("openai", "gpt-4o", prompt_tokens=1_000_000, completion_tokens=1_000_000)
-    assert cost > 0.0
-
-
-def test_calculate_cost_google_gemini_flash_is_priced():
-    cost = calculate_cost(
-        "google", "gemini-flash-latest", prompt_tokens=1_000_000, completion_tokens=1_000_000
-    )
-    assert cost == 10.5
 
 
 def test_calculate_cost_is_provider_scoped():
@@ -336,20 +320,17 @@ async def test_log_request_path_defaults_to_none(session):
     assert log.path is None
 
 
-def test_estimate_tokens_empty_string_is_zero():
-    assert estimate_tokens("") == 0
-
-
-def test_estimate_tokens_rounds_up_to_at_least_one_token():
-    assert estimate_tokens("hi") == 1
-
-
-def test_estimate_tokens_matches_four_chars_per_token_on_exact_multiples():
-    assert estimate_tokens("a" * 8) == 2
-
-
-def test_estimate_tokens_rounds_up_on_a_partial_final_token():
-    assert estimate_tokens("a" * 9) == 3
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", 0),  # empty string is zero
+        ("hi", 1),  # rounds up to at least one token
+        ("a" * 8, 2),  # exact multiple of 4 chars/token
+        ("a" * 9, 3),  # rounds up on a partial final token
+    ],
+)
+def test_estimate_tokens(text, expected):
+    assert estimate_tokens(text) == expected
 
 
 @pytest_asyncio.fixture
