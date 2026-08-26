@@ -12,6 +12,7 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "passlib[bcrypt]>=1.7",
     "anthropic>=0.40",
     "ollama>=0.4",
     "openai>=1.50",
