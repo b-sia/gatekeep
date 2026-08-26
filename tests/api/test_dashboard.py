@@ -1256,6 +1256,7 @@ async def test_me_returns_caller_shape(client, raw_key):
         "is_operator",
         "monthly_budget_usd",
         "spend_mtd",
+        "status",
     }
     assert body["is_operator"] is False
 

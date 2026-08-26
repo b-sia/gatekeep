@@ -12,11 +12,13 @@ from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.accounts import account_service
+from gatekeep.accounts import account_service, auth_service
 from gatekeep.accounts.sessions import resolve_session_account
 from gatekeep.api.auth import SESSION_COOKIE, require_csrf
 from gatekeep.audit.audit import record_audit_event
 from gatekeep.config import get_settings
+from gatekeep.email import get_email_backend
+from gatekeep.email.messages import build_approval_email
 from gatekeep.middleware.auth import require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import promptjobs
@@ -1905,6 +1907,7 @@ class MeResponse(BaseModel):
     is_operator: bool
     monthly_budget_usd: float | None
     spend_mtd: float
+    status: str
 
 
 @router.get("/me", response_model=MeResponse)
@@ -1932,6 +1935,7 @@ async def get_me(
         is_operator=caller_account.is_operator,
         monthly_budget_usd=caller_account.monthly_budget_usd,
         spend_mtd=spend,
+        status=caller_account.status,
     )
 
 
@@ -2078,6 +2082,7 @@ class AccountOut(BaseModel):
     is_operator: bool
     monthly_budget_usd: float | None
     created_at: datetime
+    status: str
 
 
 class AccountCreateRequest(BaseModel):
@@ -2111,6 +2116,7 @@ def _account_out(account: Account) -> AccountOut:
         is_operator=account.is_operator,
         monthly_budget_usd=account.monthly_budget_usd,
         created_at=account.created_at,
+        status=account.status,
     )
 
 
@@ -2137,6 +2143,102 @@ async def list_accounts(
             for s in stats
         ]
     )
+
+
+class PendingAccountOut(BaseModel):
+    """One account awaiting operator approval, for the pending-signups list."""
+
+    account_id: int
+    name: str
+    email: str
+    created_at: datetime
+
+
+class PendingListResponse(BaseModel):
+    """All accounts awaiting operator approval."""
+
+    accounts: list[PendingAccountOut]
+
+
+class ApproveRequest(BaseModel):
+    """Request body for approving a pending account."""
+
+    monthly_budget_usd: float | None = None
+
+
+@router.get("/accounts/pending", response_model=PendingListResponse)
+async def list_pending(
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PendingListResponse:
+    """List accounts awaiting approval (operator only).
+
+    Returns:
+        A `PendingListResponse` with each pending account's id, name, email,
+        and signup timestamp.
+    """
+    from gatekeep.storage.models import AccountCredential
+
+    accounts = await auth_service.list_pending_accounts(session)
+    out = []
+    for a in accounts:
+        cred = (
+            await session.execute(
+                select(AccountCredential).where(AccountCredential.account_id == a.id)
+            )
+        ).scalar_one_or_none()
+        out.append(
+            PendingAccountOut(
+                account_id=a.id,
+                name=a.name,
+                email=cred.email if cred else "",
+                created_at=a.created_at,
+            )
+        )
+    return PendingListResponse(accounts=out)
+
+
+@router.post("/accounts/{account_id}/approve", response_model=AccountOut)
+async def approve(
+    account_id: int,
+    body: ApproveRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
+) -> AccountOut:
+    """Approve a pending account, set its budget, and email the user (operator only).
+
+    Raises:
+        HTTPException: 404 if the account does not exist.
+    """
+    try:
+        account, email = await auth_service.approve_account(
+            session, account_id=account_id, monthly_budget_usd=body.monthly_budget_usd
+        )
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    subject, text = build_approval_email(get_settings().public_base_url)
+    get_email_backend().send(email, subject, text)
+    return _account_out(account)
+
+
+@router.post("/accounts/{account_id}/reject", response_model=AccountOut)
+async def reject(
+    account_id: int,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
+) -> AccountOut:
+    """Reject a pending account (operator only).
+
+    Raises:
+        HTTPException: 404 if the account does not exist.
+    """
+    try:
+        account = await auth_service.reject_account(session, account_id=account_id)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return _account_out(account)
 
 
 @router.post("/accounts", response_model=AccountOut)
