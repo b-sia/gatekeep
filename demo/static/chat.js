@@ -55,12 +55,10 @@ async function sendMessage() {
   isLoading = true;
   sendBtn.disabled = true;
 
-  // Add user message
   addMessage(content, "user");
   messageInput.value = "";
   messageInput.style.height = "auto";
 
-  // Add loading indicator
   const loadingMsg = addMessage("", "assistant", true);
 
   try {
@@ -178,7 +176,6 @@ async function syncResponse(model, content, loadingMsg) {
   }
 }
 
-// Event listeners
 sendBtn.addEventListener("click", sendMessage);
 
 messageInput.addEventListener("keydown", (e) => {
@@ -192,10 +189,8 @@ messageInput.addEventListener("input", () => {
   messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + "px";
 });
 
-// Focus input on load
 messageInput.focus();
 
-// Add welcome message
 addMessage(
   "Hi! 👋 This is a demo of the Gatekeep gateway. Ask me anything and I'll respond using Claude via Gatekeep. Check the footer to learn how this works and how to integrate Gatekeep into your own app.",
   "assistant"

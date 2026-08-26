@@ -91,7 +91,6 @@ async def chat_stream(message: Message) -> StreamingResponse:
     """
 
     async def generate() -> AsyncGenerator[str, None]:
-        """Stream responses from Gatekeep."""
         try:
             async with httpx.AsyncClient() as client:
                 async with client.stream(
