@@ -98,6 +98,7 @@ async def create_account(
     name: str,
     monthly_budget_usd: float | None = None,
     is_operator: bool = False,
+    status: str = "approved",
 ) -> Account:
     """Create an account, commit, and return it.
 
@@ -106,6 +107,7 @@ async def create_account(
         name: Globally-unique account name.
         monthly_budget_usd: Positive spend cap, or None for unlimited.
         is_operator: Whether the account gets the fleet-wide operator view.
+        status: Account lifecycle status (defaults to "approved").
 
     Returns:
         The persisted Account with its id populated.
@@ -117,7 +119,9 @@ async def create_account(
     """
     _validate_name(name)
     _validate_budget(monthly_budget_usd)
-    account = Account(name=name, monthly_budget_usd=monthly_budget_usd, is_operator=is_operator)
+    account = Account(
+        name=name, monthly_budget_usd=monthly_budget_usd, is_operator=is_operator, status=status
+    )
     session.add(account)
     try:
         await session.commit()
