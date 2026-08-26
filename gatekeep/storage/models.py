@@ -52,6 +52,12 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Lifecycle for self-serve signup. Server-defaults to "approved" so every
+    # existing row and all CLI/script-created accounts stay fully usable; only
+    # self-serve signups start "pending". Values: pending|approved|rejected|disabled.
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="approved", default="approved"
+    )
 
 
 class ApiKey(Base):
@@ -423,3 +429,51 @@ class AuditEvent(Base):
         ),
         Index("ix_audit_events_action_created_at", "action", "created_at"),
     )
+
+
+class AccountCredential(Base):
+    """Email + password login for an Account (1:1). Absent for CLI/programmatic accounts."""
+
+    __tablename__ = "account_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class Session(Base):
+    """A server-side login session; the raw token lives only in the cookie."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class EmailToken(Base):
+    """A single-use email link token (verify_email or reset_password)."""
+
+    __tablename__ = "email_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
