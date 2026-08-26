@@ -1,6 +1,7 @@
 import pytest
 
-from gatekeep.accounts import auth_service
+from gatekeep.accounts import auth_service, sessions
+from gatekeep.accounts.sessions import resolve_session_account
 from gatekeep.storage.db import SessionLocal
 
 
@@ -38,3 +39,18 @@ async def test_reject_sets_status_rejected():
         a = await _pending(s, "rj@x.com")
         account = await auth_service.reject_account(s, account_id=a.id)
         assert account.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_reject_revokes_existing_sessions():
+    async with SessionLocal() as s:
+        a = await _pending(s, "rj2@x.com")
+        # A pending account can't normally log in, but a session could
+        # already exist (e.g. issued before an operator later rejects the
+        # account); rejection must invalidate it immediately.
+        raw = await sessions.create_session(s, a.id)
+        assert (await resolve_session_account(s, raw)) is not None
+
+        await auth_service.reject_account(s, account_id=a.id)
+
+        assert await resolve_session_account(s, raw) is None

@@ -36,3 +36,16 @@ it("shows pending page when account status is pending", async () => {
   render(<App />);
   await waitFor(() => expect(screen.getByText(/awaiting approval/i)).toBeTruthy());
 });
+
+it("shows sign-in view (not the dashboard) when account status is rejected", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse({ account_id: 1, status: "rejected", is_operator: false }),
+    ),
+  );
+  render(<App />);
+  await waitFor(() =>
+    expect(screen.getByRole("heading", { name: /sign in/i })).toBeTruthy(),
+  );
+});

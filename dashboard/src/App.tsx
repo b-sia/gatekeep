@@ -26,8 +26,10 @@ type AuthView = "login" | "signup";
  * either a route-specific page (verify email / forgot password / reset
  * password, chosen from `window.location.pathname`) or the login/signup
  * toggle. Once a session resolves, a `status === "pending"` account sees
- * `PendingApprovalPage`, and a `status === "approved"` account sees the
- * regular dashboard (`Header` plus the active tab's page).
+ * `PendingApprovalPage`, a `status === "approved"` account sees the regular
+ * dashboard (`Header` plus the active tab's page), and any other status
+ * (e.g. "rejected" or "disabled") is treated as logged-out, the same as a
+ * 401 from `getMe()`.
  */
 export default function App() {
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -78,7 +80,7 @@ export default function App() {
     return null;
   }
 
-  if (!me) {
+  if (!me || (me.status !== "pending" && me.status !== "approved")) {
     const path = window.location.pathname;
     if (path.endsWith("/verify-email")) {
       return <VerifyEmailPage onGoToLogin={() => (window.location.href = "/")} />;

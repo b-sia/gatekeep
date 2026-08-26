@@ -29,6 +29,13 @@ export default function PendingRequestsPanel() {
 
   const handleApprove = async (accountId: number) => {
     const raw = budgets[accountId];
+    if (raw !== undefined && raw !== "" && Number.isNaN(Number(raw))) {
+      // A non-numeric budget must never silently become "unlimited" (which
+      // is what `Number(raw)` -> `NaN` -> `JSON.stringify` -> `null` would
+      // do). Block the approval instead of guessing intent.
+      setError("Budget must be a number, or left blank for unlimited.");
+      return;
+    }
     const budget = raw === undefined || raw === "" ? null : Number(raw);
     try {
       await approveAccount(accountId, budget);

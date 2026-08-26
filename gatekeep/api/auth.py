@@ -17,6 +17,7 @@ from gatekeep.accounts.auth_service import (
 from gatekeep.config import get_settings
 from gatekeep.email import get_email_backend
 from gatekeep.email.messages import build_reset_email, build_verification_email
+from gatekeep.middleware.auth import _enforce_pre_auth_rate_limit
 from gatekeep.storage.db import get_session
 
 auth_router = APIRouter(prefix="/dashboard/api/auth", tags=["auth"])
@@ -105,7 +106,11 @@ class ResetIn(BaseModel):
 
 
 @auth_router.post("/signup", status_code=202)
-async def signup(body: SignupIn, session: AsyncSession = Depends(get_session)) -> dict:
+async def signup(
+    body: SignupIn,
+    session: AsyncSession = Depends(get_session),
+    _pre_auth: None = Depends(_enforce_pre_auth_rate_limit),
+) -> dict:
     """Register a pending account and email a verification link. Always 202 (no enumeration)."""
     try:
         _, raw = await auth_service.signup(session, email=body.email, password=body.password)
@@ -131,7 +136,10 @@ async def verify_email(body: TokenIn, session: AsyncSession = Depends(get_sessio
 
 @auth_router.post("/login")
 async def login(
-    body: LoginIn, response: Response, session: AsyncSession = Depends(get_session)
+    body: LoginIn,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    _pre_auth: None = Depends(_enforce_pre_auth_rate_limit),
 ) -> dict:
     """Authenticate and set session + CSRF cookies. Returns the account status."""
     try:
@@ -170,7 +178,11 @@ async def logout(
 
 
 @auth_router.post("/password/reset-request", status_code=202)
-async def reset_request(body: ResetRequestIn, session: AsyncSession = Depends(get_session)) -> dict:
+async def reset_request(
+    body: ResetRequestIn,
+    session: AsyncSession = Depends(get_session),
+    _pre_auth: None = Depends(_enforce_pre_auth_rate_limit),
+) -> dict:
     """Email a reset link if the address exists. Always 202 (no enumeration)."""
     raw = await auth_service.request_password_reset(session, email=body.email)
     if raw:

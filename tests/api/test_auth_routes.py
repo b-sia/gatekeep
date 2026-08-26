@@ -4,6 +4,7 @@ import pytest_asyncio
 from httpx import ASGITransport
 
 from gatekeep.app import app
+from gatekeep.config import get_settings
 
 BASE = "/dashboard/api/auth"
 
@@ -42,3 +43,25 @@ async def test_signup_duplicate_still_returns_202(client):
 async def test_login_bad_password_returns_401(client):
     r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_is_pre_auth_rate_limited_per_ip(client, monkeypatch):
+    """Repeated calls to /login from one client eventually hit the per-IP
+    pre-auth token bucket and get a 429 - proving `_enforce_pre_auth_rate_limit`
+    actually runs on the auth routes (it doesn't run via `require_api_key`,
+    since these routes don't use that dependency)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_tokens_per_min", 2)
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_refill_rate", 2 / 60)
+
+    statuses = []
+    for _ in range(5):
+        r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
+        statuses.append(r.status_code)
+        if r.status_code == 429:
+            break
+    assert 429 in statuses
+    # Earlier, within-capacity calls still behave exactly like before (401,
+    # not some altered success/error shape).
+    assert statuses[0] == 401

@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import select
 
-from gatekeep.accounts import auth_service
+from gatekeep.accounts import account_service, auth_service
 from gatekeep.accounts.auth_service import EmailConflictError, InvalidTokenError
 from gatekeep.storage.db import SessionLocal
 from gatekeep.storage.models import AccountCredential
@@ -27,6 +27,24 @@ async def test_signup_duplicate_email_raises():
         await auth_service.signup(s, email="dup@x.com", password="pw123456")
         with pytest.raises(EmailConflictError):
             await auth_service.signup(s, email="dup@x.com", password="pw123456")
+
+
+@pytest.mark.asyncio
+async def test_signup_translates_account_name_race_into_email_conflict(monkeypatch):
+    """`Account.name` is the normalized email and is UNIQUE, so a concurrent
+    duplicate signup that races past the pre-check `AccountCredential` lookup
+    can still collide on `create_account` and raise `AccountNameConflictError`.
+    `signup` must translate that into `EmailConflictError` (the route's only
+    handled exception), not let it escape as a 500."""
+
+    async def _boom(session, *, name, status):
+        raise account_service.AccountNameConflictError(f"account name {name!r} is already taken")
+
+    monkeypatch.setattr(account_service, "create_account", _boom)
+
+    async with SessionLocal() as s:
+        with pytest.raises(EmailConflictError):
+            await auth_service.signup(s, email="race@x.com", password="pw123456")
 
 
 @pytest.mark.asyncio

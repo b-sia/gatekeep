@@ -33,6 +33,14 @@ class AccountNotActiveError(AccountServiceError):
     """Raised when a rejected or disabled account attempts to log in."""
 
 
+# Precomputed once at import time so the "no such credential" branch of
+# `login` can run a real bcrypt comparison against a constant hash. Without
+# this, an unknown email would skip `verify_password` entirely while a known
+# email with a wrong password would run it, and the resulting timing gap lets
+# an attacker enumerate registered emails by measuring response latency.
+_DUMMY_PASSWORD_HASH = hash_password("dummy-password-for-timing")
+
+
 def _normalize_email(email: str) -> str:
     """Lowercase and strip an email for consistent storage and lookup."""
     return email.strip().lower()
@@ -86,7 +94,15 @@ async def signup(session: AsyncSession, *, email: str, password: str) -> tuple[A
     ).scalar_one_or_none()
     if existing is not None:
         raise EmailConflictError("email already registered")
-    account = await account_service.create_account(session, name=normalized, status="pending")
+    try:
+        account = await account_service.create_account(session, name=normalized, status="pending")
+    except account_service.AccountNameConflictError as exc:
+        # `Account.name` is the normalized email and is UNIQUE, so a
+        # concurrent duplicate signup that raced past the `existing` check
+        # above can still collide here. Surface it as the same
+        # `EmailConflictError` the route already handles (identical 202),
+        # rather than a raw `AccountNameConflictError` that would 500.
+        raise EmailConflictError("email already registered") from exc
     session.add(
         AccountCredential(
             account_id=account.id,
@@ -131,7 +147,13 @@ async def login(session: AsyncSession, *, email: str, password: str) -> tuple[Ac
             select(AccountCredential).where(AccountCredential.email == normalized)
         )
     ).scalar_one_or_none()
-    if cred is None or not verify_password(password, cred.password_hash):
+    if cred is None:
+        # Do the same bcrypt work as the "wrong password" path below so a
+        # timing measurement can't distinguish "no such account" from "wrong
+        # password" - see the `_DUMMY_PASSWORD_HASH` comment above.
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        raise InvalidCredentialsError("invalid email or password")
+    if not verify_password(password, cred.password_hash):
         raise InvalidCredentialsError("invalid email or password")
     if not cred.email_verified:
         raise EmailNotVerifiedError("email not verified")
@@ -214,7 +236,7 @@ async def approve_account(
 
 
 async def reject_account(session: AsyncSession, *, account_id: int) -> Account:
-    """Mark an account rejected.
+    """Mark an account rejected and revoke any sessions it already holds.
 
     Raises:
         AccountNotFoundError: if no account has that id.
@@ -222,4 +244,5 @@ async def reject_account(session: AsyncSession, *, account_id: int) -> Account:
     account = await account_service.get_account(session, account_id)
     account.status = "rejected"
     await session.commit()
+    await sessions.revoke_account_sessions(session, account_id)
     return account
