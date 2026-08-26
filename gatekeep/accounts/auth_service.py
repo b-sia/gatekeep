@@ -145,3 +145,38 @@ async def login(session: AsyncSession, *, email: str, password: str) -> tuple[Ac
 async def logout(session: AsyncSession, *, raw_session_token: str) -> None:
     """Revoke the given session token (idempotent)."""
     await sessions.revoke_session(session, raw_session_token)
+
+
+async def request_password_reset(session: AsyncSession, *, email: str) -> str | None:
+    """Issue a reset token for an email, or None if no credential exists.
+
+    Returns None (rather than raising) so the route can respond identically
+    whether or not the email is registered (no enumeration).
+    """
+    normalized = _normalize_email(email)
+    cred = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.email == normalized)
+        )
+    ).scalar_one_or_none()
+    if cred is None:
+        return None
+    return await _issue_email_token(session, cred.account_id, "reset_password")
+
+
+async def reset_password(session: AsyncSession, *, raw_token: str, new_password: str) -> Account:
+    """Consume a reset token, set the new password, and revoke all sessions.
+
+    Raises:
+        InvalidTokenError: if the token is invalid/expired/used.
+    """
+    token = await _consume_token(session, raw_token, "reset_password")
+    cred = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.account_id == token.account_id)
+        )
+    ).scalar_one()
+    cred.password_hash = hash_password(new_password)
+    await session.commit()
+    await sessions.revoke_account_sessions(session, token.account_id)
+    return await session.get(Account, token.account_id)
