@@ -188,6 +188,7 @@ export interface MeResponse {
   is_operator: boolean;
   monthly_budget_usd: number | null;
   spend_mtd: number;
+  status: string;
 }
 
 /** One API key as shown in the management UI (no secret material). */

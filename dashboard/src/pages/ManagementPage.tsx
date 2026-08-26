@@ -48,6 +48,7 @@ export default function ManagementPage({
       {me.is_operator && (
         <AccountsTable
           selfAccountId={me.account_id}
+          selfStatus={me.status}
           onMeChanged={onMeChanged}
           onUnauthorized={onUnauthorized}
         />

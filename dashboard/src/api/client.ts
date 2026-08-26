@@ -26,11 +26,8 @@ import type {
   UsageByModelTimeseriesResponse,
   UsageSummaryResponse,
 } from "./types";
-import { getActiveIdentity, getActiveKey, markInvalid } from "./identityStore";
-
-/** Thrown when a dashboard API request has no active identity, or the
- * gateway rejects the active key with a 401 (in which case that identity is
- * marked invalid in the roster as a side effect). */
+/** Thrown when a dashboard API request gets a 401 - the caller has no valid
+ * session cookie (never logged in, logged out, or the session expired). */
 export class UnauthorizedError extends Error {}
 
 /**
@@ -65,40 +62,14 @@ function readCsrfCookie(): string {
 }
 
 /**
- * Marks this tab's active identity invalid (if one is set) and throws.
- * Called from `request`/`mutate` when the gateway returns 401 so the roster
- * reflects the dead key and the tab drops back to the picker.
+ * Throws `UnauthorizedError`. Called from `request`/`mutate` when the
+ * gateway returns 401, meaning the caller's session cookie is missing or
+ * invalid.
  *
  * @throws {UnauthorizedError} Always.
  */
-function handleRejectedKey(): never {
-  const active = getActiveIdentity();
-  if (active) markInvalid(active.id);
-  throw new UnauthorizedError("API key was rejected");
-}
-
-/**
- * Validates a raw Gatekeep key by calling `GET /me` with it directly,
- * without touching the roster or the active pointer. Used by the identity
- * picker before a key is saved.
- *
- * @param key - The raw key to validate.
- * @returns The caller's account context if the key is accepted.
- * @throws {UnauthorizedError} If the gateway rejects the key with a 401.
- * @throws {Error} For any other non-OK response.
- */
-export async function validateKey(key: string): Promise<MeResponse> {
-  const url = new URL("/dashboard/api/me", window.location.origin);
-  const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${key}` },
-  });
-  if (response.status === 401) {
-    throw new UnauthorizedError("API key was rejected");
-  }
-  if (!response.ok) {
-    throw new Error(await errorMessage(response, "me"));
-  }
-  return response.json() as Promise<MeResponse>;
+function handleRejectedSession(): never {
+  throw new UnauthorizedError("Not authenticated");
 }
 
 /**
@@ -108,8 +79,7 @@ export async function validateKey(key: string): Promise<MeResponse> {
  * @param params - Query params to attach; entries with an `undefined` value
  *   are omitted.
  * @returns The parsed JSON response body.
- * @throws {UnauthorizedError} If no active identity is set, or the gateway
- *   responds 401 (that identity is marked invalid).
+ * @throws {UnauthorizedError} If the gateway responds 401 (no valid session).
  * @throws {Error} For any other non-OK response; the thrown message includes
  *   the server's error message when the body is OpenAI-shaped.
  */
@@ -117,10 +87,6 @@ async function request<T>(
   path: string,
   params?: Record<string, string | number | undefined>,
 ): Promise<T> {
-  const apiKey = getActiveKey();
-  if (!apiKey) {
-    throw new UnauthorizedError("No active identity");
-  }
   const url = new URL(`/dashboard/api/${path}`, window.location.origin);
   if (params) {
     for (const [key, value] of Object.entries(params)) {
@@ -131,7 +97,7 @@ async function request<T>(
     credentials: "include",
   });
   if (response.status === 401) {
-    handleRejectedKey();
+    handleRejectedSession();
   }
   if (!response.ok) {
     throw new Error(await errorMessage(response, path));
@@ -147,8 +113,7 @@ async function request<T>(
  * @param path - API path under `/dashboard/api/`, without a leading slash.
  * @param body - JSON-serializable request body, or undefined for none.
  * @returns The parsed JSON response body.
- * @throws {UnauthorizedError} If no active identity is set, or the gateway
- *   responds 401 (that identity is marked invalid).
+ * @throws {UnauthorizedError} If the gateway responds 401 (no valid session).
  * @throws {Error} For any other non-OK response; the thrown message includes
  *   the server's error message when the body is OpenAI-shaped.
  */
@@ -157,10 +122,6 @@ async function mutate<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const apiKey = getActiveKey();
-  if (!apiKey) {
-    throw new UnauthorizedError("No active identity");
-  }
   const url = new URL(`/dashboard/api/${path}`, window.location.origin);
   const response = await fetch(url.toString(), {
     method,
@@ -172,7 +133,7 @@ async function mutate<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (response.status === 401) {
-    handleRejectedKey();
+    handleRejectedSession();
   }
   if (!response.ok) {
     throw new Error(await errorMessage(response, path));

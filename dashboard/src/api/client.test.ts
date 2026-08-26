@@ -1,25 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   UnauthorizedError,
   getMe,
-  validateKey,
   createPrompt,
   promotePrompt,
   setCandidate,
   clearCandidate,
   getJob,
 } from "./client";
-import { addIdentity, getActiveIdentity, listIdentities, setActiveIdentity } from "./identityStore";
 import type { MeResponse } from "./types";
 
-/** Fresh storage before every test so cases do not leak roster/pointer state
- * into one another, and a clean global-stub slate after every test so a
- * mocked `fetch` from one test never leaks into the next. */
-beforeEach(() => {
-  localStorage.clear();
-  sessionStorage.clear();
-});
-
+/** A clean global-stub slate after every test so a mocked `fetch` from one
+ * test never leaks into the next. */
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -47,80 +39,30 @@ const ME: MeResponse = {
   is_operator: false,
   monthly_budget_usd: null,
   spend_mtd: 0,
+  status: "approved",
 };
 
-describe("request <-> identityStore contract", () => {
-  it("throws UnauthorizedError without calling fetch when no active identity is set", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(getMe()).rejects.toThrow(UnauthorizedError);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("marks the active identity invalid in the roster on a 401", async () => {
-    const created = addIdentity({
-      key: "sk-a",
-      accountId: 1,
-      accountName: "Alice",
-      isOperator: false,
-    });
-    setActiveIdentity(created.id);
-    const fetchMock = vi.fn().mockResolvedValue(fakeResponse(401, {}));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(getMe()).rejects.toThrow(UnauthorizedError);
-
-    const roster = listIdentities();
-    expect(roster.find((entry) => entry.id === created.id)?.status).toBe("invalid");
-  });
-});
-
-describe("validateKey", () => {
-  it("sends the given raw key as the bearer token and leaves storage untouched on success", async () => {
+describe("getMe", () => {
+  it("returns the account context on success", async () => {
     const fetchMock = vi.fn().mockResolvedValue(fakeResponse(200, ME));
     vi.stubGlobal("fetch", fetchMock);
 
-    const rosterBefore = listIdentities();
-    const activeBefore = getActiveIdentity();
-
-    const result = await validateKey("sk-standalone");
+    const result = await getMe();
 
     expect(result).toEqual(ME);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, options] = fetchMock.mock.calls[0];
-    expect((options?.headers as Record<string, string>).Authorization).toBe(
-      "Bearer sk-standalone",
-    );
-    expect(listIdentities()).toEqual(rosterBefore);
-    expect(getActiveIdentity()).toEqual(activeBefore);
+    expect((options as RequestInit).credentials).toBe("include");
   });
 
-  it("throws UnauthorizedError on a 401 and still does not touch the roster or active pointer", async () => {
+  it("throws UnauthorizedError on a 401", async () => {
     const fetchMock = vi.fn().mockResolvedValue(fakeResponse(401, {}));
     vi.stubGlobal("fetch", fetchMock);
 
-    const rosterBefore = listIdentities();
-    const activeBefore = getActiveIdentity();
-
-    await expect(validateKey("sk-bad")).rejects.toThrow(UnauthorizedError);
-
-    expect(listIdentities()).toEqual(rosterBefore);
-    expect(getActiveIdentity()).toEqual(activeBefore);
+    await expect(getMe()).rejects.toThrow(UnauthorizedError);
   });
 });
 
 describe("prompt-ops client fns", () => {
-  beforeEach(() => {
-    const created = addIdentity({
-      key: "sk-op",
-      accountId: 1,
-      accountName: "Op",
-      isOperator: true,
-    });
-    setActiveIdentity(created.id);
-  });
-
   it("POSTs a prompt create body", async () => {
     const fetchMock = vi
       .fn()
