@@ -33,10 +33,11 @@ async def test_signup_then_login_flow_sets_session_cookie(client, caplog):
 
 
 @pytest.mark.asyncio
-async def test_signup_duplicate_still_returns_202(client):
+async def test_signup_duplicate_returns_409_with_message(client):
     await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})
     r = await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})
-    assert r.status_code == 202  # no enumeration
+    assert r.status_code == 409
+    assert "already exists" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

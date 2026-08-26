@@ -162,7 +162,7 @@ New `auth` router (unauthenticated except where noted):
 
 | method + path | purpose |
 |---|---|
-| `POST /auth/signup` | `{email, password}` -> create `Account(pending)` + credential(unverified), issue `verify_email` token, send email. `202`, no enumeration. |
+| `POST /auth/signup` | `{email, password}` -> create `Account(pending)` + credential(unverified), issue `verify_email` token, send email. `202` on success; `409` with an "already exists" message on a duplicate email (deliberately enumerable - see below). |
 | `POST /auth/verify-email` | `{token}` -> set `email_verified=true`; account enters the pending queue. |
 | `POST /auth/login` | `{email, password}` -> verify, create `Session`, set cookies. Body returns account `status`. Refuses `rejected`/`disabled`. |
 | `POST /auth/logout` | revoke the session row, clear cookies. |
@@ -229,7 +229,7 @@ pre-auth per-IP rate limiter.
   stored).
 - `HttpOnly` + `Secure` + `SameSite=Lax` session cookie; double-submit CSRF on
   cookie-authed mutations.
-- No user enumeration on signup / login / reset-request.
+- No user enumeration on login / reset-request. **Signup is an intentional exception** (post-launch change, 2026-08-26): a duplicate email returns `409` with an "already exists" message, so a user gets clear feedback when they mistakenly re-register. This means an attacker can enumerate registered emails via signup; accepted as a usability tradeoff for this instance. Login and password-reset-request remain non-enumerable.
 - Per-IP rate limiting on unauthenticated auth endpoints.
 - Session expiry + full session revocation on password reset.
 - `require_approved` blocks pending/rejected/disabled accounts from key and API

@@ -111,11 +111,26 @@ async def signup(
     session: AsyncSession = Depends(get_session),
     _pre_auth: None = Depends(_enforce_pre_auth_rate_limit),
 ) -> dict:
-    """Register a pending account and email a verification link. Always 202 (no enumeration)."""
+    """Register a pending account and email a verification link.
+
+    Raises:
+        HTTPException: 409 if the email is already registered. This
+            deliberately allows email enumeration via signup - see the
+            design doc's "Loudness scope" tradeoff.
+    """
     try:
         _, raw = await auth_service.signup(session, email=body.email, password=body.password)
-    except EmailConflictError:
-        return {"status": "ok"}
+    except EmailConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "message": "An account with this email already exists.",
+                    "type": "invalid_request_error",
+                    "code": None,
+                }
+            },
+        ) from exc
     subject, text = build_verification_email(get_settings().public_base_url, raw)
     get_email_backend().send(str(body.email), subject, text)
     return {"status": "ok"}
