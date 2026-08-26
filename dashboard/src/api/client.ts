@@ -54,6 +54,17 @@ async function errorMessage(response: Response, path: string): Promise<string> {
 }
 
 /**
+ * Reads the `gk_csrf` cookie set by the server after login, for attaching to
+ * non-GET requests as `X-CSRF-Token`.
+ *
+ * @returns The cookie's value, or an empty string if it is not set.
+ */
+function readCsrfCookie(): string {
+  const match = document.cookie.match(/(?:^|;\s*)gk_csrf=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/**
  * Marks this tab's active identity invalid (if one is set) and throws.
  * Called from `request`/`mutate` when the gateway returns 401 so the roster
  * reflects the dead key and the tab drops back to the picker.
@@ -117,7 +128,7 @@ async function request<T>(
     }
   }
   const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${apiKey}` },
+    credentials: "include",
   });
   if (response.status === 401) {
     handleRejectedKey();
@@ -130,7 +141,7 @@ async function request<T>(
 
 /**
  * Issues an authenticated POST/PATCH against `/dashboard/api/<path>` with a
- * JSON body, mirroring `request`'s bearer-auth and 401 handling.
+ * JSON body, mirroring `request`'s cookie-auth and 401 handling.
  *
  * @param method - "POST", "PATCH", "PUT", or "DELETE".
  * @param path - API path under `/dashboard/api/`, without a leading slash.
@@ -153,9 +164,10 @@ async function mutate<T>(
   const url = new URL(`/dashboard/api/${path}`, window.location.origin);
   const response = await fetch(url.toString(), {
     method,
+    credentials: "include",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
+      "X-CSRF-Token": readCsrfCookie(),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
