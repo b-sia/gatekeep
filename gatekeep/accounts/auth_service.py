@@ -180,3 +180,46 @@ async def reset_password(session: AsyncSession, *, raw_token: str, new_password:
     await session.commit()
     await sessions.revoke_account_sessions(session, token.account_id)
     return await session.get(Account, token.account_id)
+
+
+async def list_pending_accounts(session: AsyncSession) -> list[Account]:
+    """Return all accounts awaiting operator approval, oldest first."""
+    return list(
+        (
+            await session.execute(
+                select(Account).where(Account.status == "pending").order_by(Account.created_at)
+            )
+        ).scalars()
+    )
+
+
+async def approve_account(
+    session: AsyncSession, *, account_id: int, monthly_budget_usd: float | None
+) -> tuple[Account, str]:
+    """Approve a pending account, set its budget, and return (account, email).
+
+    Raises:
+        AccountNotFoundError: if no account has that id.
+    """
+    account = await account_service.get_account(session, account_id)
+    account.status = "approved"
+    account.monthly_budget_usd = monthly_budget_usd
+    await session.commit()
+    cred = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.account_id == account_id)
+        )
+    ).scalar_one()
+    return account, cred.email
+
+
+async def reject_account(session: AsyncSession, *, account_id: int) -> Account:
+    """Mark an account rejected.
+
+    Raises:
+        AccountNotFoundError: if no account has that id.
+    """
+    account = await account_service.get_account(session, account_id)
+    account.status = "rejected"
+    await session.commit()
+    return account
