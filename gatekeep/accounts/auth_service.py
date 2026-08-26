@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.accounts import account_service
+from gatekeep.accounts import account_service, sessions
 from gatekeep.accounts.account_service import AccountServiceError
-from gatekeep.accounts.passwords import hash_password
+from gatekeep.accounts.passwords import hash_password, verify_password
 from gatekeep.accounts.tokens import hash_token, new_token
 from gatekeep.config import get_settings
 from gatekeep.storage.models import Account, AccountCredential, EmailToken
@@ -19,6 +19,18 @@ class EmailConflictError(AccountServiceError):
 
 class InvalidTokenError(AccountServiceError):
     """Raised when an email token is unknown, expired, or already used."""
+
+
+class InvalidCredentialsError(AccountServiceError):
+    """Raised when email/password authentication fails."""
+
+
+class EmailNotVerifiedError(AccountServiceError):
+    """Raised when a user logs in before verifying their email."""
+
+
+class AccountNotActiveError(AccountServiceError):
+    """Raised when a rejected or disabled account attempts to log in."""
 
 
 def _normalize_email(email: str) -> str:
@@ -103,3 +115,33 @@ async def verify_email(session: AsyncSession, *, raw_token: str) -> Account:
     cred.email_verified = True
     await session.commit()
     return await session.get(Account, token.account_id)
+
+
+async def login(session: AsyncSession, *, email: str, password: str) -> tuple[Account, str]:
+    """Authenticate email/password and return (account, raw_session_token).
+
+    Raises:
+        InvalidCredentialsError: unknown email or wrong password.
+        EmailNotVerifiedError: credential exists but email is unverified.
+        AccountNotActiveError: account status is rejected or disabled.
+    """
+    normalized = _normalize_email(email)
+    cred = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.email == normalized)
+        )
+    ).scalar_one_or_none()
+    if cred is None or not verify_password(password, cred.password_hash):
+        raise InvalidCredentialsError("invalid email or password")
+    if not cred.email_verified:
+        raise EmailNotVerifiedError("email not verified")
+    account = await session.get(Account, cred.account_id)
+    if account.status in ("rejected", "disabled"):
+        raise AccountNotActiveError("account is not active")
+    raw = await sessions.create_session(session, account.id)
+    return account, raw
+
+
+async def logout(session: AsyncSession, *, raw_session_token: str) -> None:
+    """Revoke the given session token (idempotent)."""
+    await sessions.revoke_session(session, raw_session_token)
