@@ -367,3 +367,16 @@ export interface JobStatusResponse {
 export interface JobCreatedResponse {
   job_id: string;
 }
+
+/** One self-serve signup request awaiting operator approval. */
+export interface PendingAccountOut {
+  account_id: number;
+  name: string;
+  email: string;
+  created_at: string;
+}
+
+/** All pending signup requests, for the operator approval panel. */
+export interface PendingAccountsResponse {
+  accounts: PendingAccountOut[];
+}

@@ -16,6 +16,7 @@ import type {
   LatencySummaryResponse,
   LatencyTimeseriesResponse,
   MeResponse,
+  PendingAccountsResponse,
   PromptListResponse,
   PromptMutationResponse,
   PromptSuiteResponse,
@@ -272,6 +273,32 @@ export function patchAccount(
   body: AccountPatchRequest,
 ): Promise<AccountOut> {
   return mutate<AccountOut>("PATCH", `accounts/${accountId}`, body);
+}
+
+/** Lists self-serve signup requests awaiting approval (operator only). */
+export function getPending(): Promise<PendingAccountsResponse> {
+  return request<PendingAccountsResponse>("accounts/pending");
+}
+
+/**
+ * Approves a pending signup request, creating its account (operator only).
+ *
+ * @param accountId - The pending account's id.
+ * @param monthlyBudgetUsd - Monthly budget cap to assign, or null for
+ *   unlimited.
+ */
+export function approveAccount(
+  accountId: number,
+  monthlyBudgetUsd: number | null,
+): Promise<AccountOut> {
+  return mutate<AccountOut>("POST", `accounts/${accountId}/approve`, {
+    monthly_budget_usd: monthlyBudgetUsd,
+  });
+}
+
+/** Rejects a pending signup request (operator only). */
+export function rejectAccount(accountId: number): Promise<{ status: string }> {
+  return mutate<{ status: string }>("POST", `accounts/${accountId}/reject`);
 }
 
 /** Fetches a prompt's eval suite and cases (null suite => none registered). */
