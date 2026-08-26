@@ -5,7 +5,7 @@ from functools import lru_cache
 from typing import Literal
 
 from anthropic import AsyncAnthropic
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import Integer, case, func, or_, select, true
@@ -13,6 +13,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.accounts import account_service
+from gatekeep.accounts.sessions import resolve_session_account
+from gatekeep.api.auth import SESSION_COOKIE, require_csrf
 from gatekeep.audit.audit import record_audit_event
 from gatekeep.config import get_settings
 from gatekeep.middleware.auth import require_api_key
@@ -65,35 +67,45 @@ _FAILED_OUTCOMES = ("provider_error", "client_disconnect")
 
 
 async def _require_caller_account(
-    caller: ApiKey = Depends(require_api_key),
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Account:
-    """Resolve the authenticated key's Account, for account-scoped dashboards.
+    """Resolve the caller's Account from a session cookie, else an API key.
 
-    `account_id` is always derived server-side from the authenticated key,
-    never accepted as a client-supplied parameter.
-
-    Raises:
-        HTTPException: 401 if the key's `account_id` no longer resolves to an
-            Account (e.g. a future account-delete path leaves an orphaned
-            key). Without this, callers below (`require_operator`,
-            `_account_scope`, `require_account_access`) would immediately hit
-            `caller_account.is_operator`/`.id` on `None` and raise an
-            unhandled `AttributeError` -> 500.
+    Session cookie (human dashboard login) is tried first; if absent or
+    invalid, falls back to API-key auth (operators, CLI, programmatic
+    callers). Raises 401 if neither credential resolves.
     """
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        account = await resolve_session_account(session, token)
+        if account is not None:
+            return account
+    caller = await require_api_key(
+        authorization=request.headers.get("authorization"),
+        x_api_key=request.headers.get("x-api-key"),
+        session=session,
+    )
     account = await session.get(Account, caller.account_id)
     if account is None:
         raise HTTPException(
             status_code=401,
-            detail={
-                "error": {
-                    "message": "API key's account no longer exists.",
-                    "type": "authentication_error",
-                    "code": None,
-                }
-            },
+            detail=_error_body("API key's account no longer exists.", "authentication_error"),
         )
     return account
+
+
+async def require_approved(
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """Require the caller's account to be approved (blocks pending/rejected/disabled).
+
+    Raises:
+        HTTPException: 403 if the account status is not "approved".
+    """
+    if caller_account.status != "approved":
+        raise _forbidden("Your account is not approved yet.")
+    return caller_account
 
 
 def _account_scope(caller_account: Account) -> list:
@@ -1979,13 +1991,15 @@ async def mint_account_key(
     account_id: int,
     body: KeyCreateRequest,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_approved),
+    _csrf: None = Depends(require_csrf),
 ) -> KeyCreatedResponse:
     """Mint a key for an account, returning the raw key exactly once.
 
-    Records a `key.mint` audit event. Raises 403 (wrong account), 404
-    (unknown account), 409 (duplicate name).
+    Records a `key.mint` audit event. Raises 403 (wrong account, unapproved
+    caller, or failed CSRF check), 404 (unknown account), 409 (duplicate name).
     """
+    _authorize_account_access(caller_account, account_id)
     try:
         key, raw = await account_service.create_key(session, account_id, body.name)
     except account_service.AccountNotFoundError as exc:
@@ -2012,11 +2026,14 @@ async def revoke_account_key(
     account_id: int,
     key_id: int,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_approved),
+    _csrf: None = Depends(require_csrf),
 ) -> KeyOut:
     """Soft-revoke a key on an account. Records a `key.revoke` audit event.
-    Raises 403 (wrong account) or 404 (no such key on the account).
+    Raises 403 (wrong account, unapproved caller, or failed CSRF check) or
+    404 (no such key on the account).
     """
+    _authorize_account_access(caller_account, account_id)
     try:
         key = await account_service.revoke_key(session, account_id, key_id)
     except account_service.KeyNotFoundError as exc:
