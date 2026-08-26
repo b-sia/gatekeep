@@ -82,7 +82,10 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_use_tls: bool = True
     # Base URL the SPA is served from, used to build verification/reset links.
-    public_base_url: str = "http://localhost:5173"
+    # The dashboard is always rooted at "/dashboard" (vite.config.ts base),
+    # in both `vite dev` and the production build served by gatekeep/app.py -
+    # this must include that path segment or generated links 404.
+    public_base_url: str = "http://localhost:5173/dashboard"
     # Login session lifetime (14 days) and one-time email link lifetime (1 day).
     session_ttl_seconds: int = 1_209_600
     email_token_ttl_seconds: int = 86_400
