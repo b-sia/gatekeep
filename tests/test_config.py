@@ -65,3 +65,12 @@ def test_google_api_key_reads_from_env(monkeypatch):
     get_settings.cache_clear()
     s = get_settings()
     assert s.google_api_key == "gk-google-test"
+
+
+def test_signup_settings_defaults(monkeypatch):
+    from gatekeep.config import Settings
+
+    s = Settings(database_url="x", redis_url="y", anthropic_api_key="z")
+    assert s.email_backend == "console"
+    assert s.session_ttl_seconds == 1209600
+    assert s.public_base_url.startswith("http")

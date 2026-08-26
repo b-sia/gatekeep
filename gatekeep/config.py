@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     # any drift from a lost record_spend increment or INCRBYFLOAT rounding.
     # See gatekeep.middleware.budget.run_budget_reconciliation_loop.
     budget_reconcile_interval_seconds: int = 3600
+    # --- Self-serve signup / auth ---
+    email_backend: Literal["console", "smtp"] = "console"
+    email_from: str = "gatekeep@localhost"
+    smtp_host: str = "localhost"
+    smtp_port: int = 25
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    # Base URL the SPA is served from, used to build verification/reset links.
+    public_base_url: str = "http://localhost:5173"
+    # Login session lifetime (14 days) and one-time email link lifetime (1 day).
+    session_ttl_seconds: int = 1_209_600
+    email_token_ttl_seconds: int = 86_400
 
 
 @lru_cache
