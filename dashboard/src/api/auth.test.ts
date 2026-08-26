@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { login } from "./auth";
+import { login, resendVerification } from "./auth";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -18,5 +18,15 @@ describe("auth api", () => {
     const opts = fetchMock.mock.calls[0][1] as RequestInit;
     expect(opts.credentials).toBe("include");
     expect(opts.method).toBe("POST");
+  });
+
+  it("resendVerification posts the email to /resend-verification", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) => jsonResponse({ status: "ok" }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await resendVerification("lost@x.com");
+    expect(res.status).toBe("ok");
+    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/resend-verification");
+    expect(JSON.parse(opts.body as string)).toEqual({ email: "lost@x.com" });
   });
 });

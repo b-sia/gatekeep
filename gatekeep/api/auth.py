@@ -92,6 +92,12 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ResendVerificationIn(BaseModel):
+    """Request body for resending a verification email."""
+
+    email: EmailStr
+
+
 class ResetRequestIn(BaseModel):
     """Request body for initiating a password reset."""
 
@@ -189,6 +195,24 @@ async def logout(
         await auth_service.logout(session, raw_session_token=token)
     response.delete_cookie(SESSION_COOKIE)
     response.delete_cookie(CSRF_COOKIE)
+    return {"status": "ok"}
+
+
+@auth_router.post("/resend-verification", status_code=202)
+async def resend_verification(
+    body: ResendVerificationIn,
+    session: AsyncSession = Depends(get_session),
+    _pre_auth: None = Depends(_enforce_pre_auth_rate_limit),
+) -> dict:
+    """Email a fresh verification link if the address has an unverified account.
+
+    Always 202 (no enumeration) - identical whether the email is unknown,
+    already verified, or genuinely pending.
+    """
+    raw = await auth_service.resend_verification_email(session, email=body.email)
+    if raw:
+        subject, text = build_verification_email(get_settings().public_base_url, raw)
+        get_email_backend().send(str(body.email), subject, text)
     return {"status": "ok"}
 
 

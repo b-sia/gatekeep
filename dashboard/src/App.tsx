@@ -7,6 +7,7 @@ import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import VerifyEmailPage from "./pages/VerifyEmailPage";
 import ForgotPasswordPage from "./pages/ForgotPasswordPage";
+import ResendVerificationPage from "./pages/ResendVerificationPage";
 import ResetPasswordPage from "./pages/ResetPasswordPage";
 import PendingApprovalPage from "./pages/PendingApprovalPage";
 import { getMe, UnauthorizedError } from "./api/client";
@@ -24,8 +25,8 @@ type AuthView = "login" | "signup";
  * On mount, loads the caller's account via `getMe()` (cookie-based). A 401
  * means there is no valid session, so an unauthenticated view is shown -
  * either a route-specific page (verify email / forgot password / reset
- * password, chosen from `window.location.pathname`) or the login/signup
- * toggle. Once a session resolves, a `status === "pending"` account sees
+ * password / resend verification, chosen from `window.location.pathname`)
+ * or the login/signup toggle. Once a session resolves, a `status === "pending"` account sees
  * `PendingApprovalPage`, a `status === "approved"` account sees the regular
  * dashboard (`Header` plus the active tab's page), and any other status
  * (e.g. "rejected" or "disabled") is treated as logged-out, the same as a
@@ -88,6 +89,9 @@ export default function App() {
     if (path.endsWith("/forgot-password")) {
       return <ForgotPasswordPage onBackToLogin={() => (window.location.href = "/")} />;
     }
+    if (path.endsWith("/resend-verification")) {
+      return <ResendVerificationPage onBackToLogin={() => (window.location.href = "/")} />;
+    }
     if (path.endsWith("/reset-password")) {
       return <ResetPasswordPage onGoToLogin={() => (window.location.href = "/")} />;
     }
@@ -100,6 +104,7 @@ export default function App() {
         onLoggedIn={() => loadMe()}
         onGoToSignup={() => setAuthView("signup")}
         onGoToForgotPassword={() => (window.location.href = "/forgot-password")}
+        onGoToResendVerification={() => (window.location.href = "/resend-verification")}
       />
     );
   }

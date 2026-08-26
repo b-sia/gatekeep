@@ -41,6 +41,25 @@ async def test_signup_duplicate_returns_409_with_message(client):
 
 
 @pytest.mark.asyncio
+async def test_resend_verification_reissues_a_usable_token(client, caplog):
+    import logging
+
+    await client.post(f"{BASE}/signup", json={"email": "lost@x.com", "password": "pw123456"})
+    with caplog.at_level(logging.INFO):
+        r = await client.post(f"{BASE}/resend-verification", json={"email": "lost@x.com"})
+    assert r.status_code == 202
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    r = await client.post(f"{BASE}/verify-email", json={"token": token})
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_unknown_email_returns_202(client):
+    r = await client.post(f"{BASE}/resend-verification", json={"email": "nobody@x.com"})
+    assert r.status_code == 202  # no enumeration
+
+
+@pytest.mark.asyncio
 async def test_login_bad_password_returns_401(client):
     r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
     assert r.status_code == 401

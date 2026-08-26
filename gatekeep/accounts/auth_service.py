@@ -169,6 +169,24 @@ async def logout(session: AsyncSession, *, raw_session_token: str) -> None:
     await sessions.revoke_session(session, raw_session_token)
 
 
+async def resend_verification_email(session: AsyncSession, *, email: str) -> str | None:
+    """Issue a fresh verify_email token, or None if there is nothing to send.
+
+    Returns None (rather than raising) for an unknown email, and also for an
+    account that is already verified, so the route can respond identically
+    in all three cases (unknown, already verified, resent) - no enumeration.
+    """
+    normalized = _normalize_email(email)
+    cred = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.email == normalized)
+        )
+    ).scalar_one_or_none()
+    if cred is None or cred.email_verified:
+        return None
+    return await _issue_email_token(session, cred.account_id, "verify_email")
+
+
 async def request_password_reset(session: AsyncSession, *, email: str) -> str | None:
     """Issue a reset token for an email, or None if no credential exists.
 

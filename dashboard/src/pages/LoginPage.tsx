@@ -9,6 +9,8 @@ interface LoginPageProps {
   onGoToSignup?: () => void;
   /** Called when the user wants to go to the forgot-password page. */
   onGoToForgotPassword?: () => void;
+  /** Called when the user wants to go to the resend-verification page. */
+  onGoToResendVerification?: () => void;
 }
 
 /**
@@ -17,7 +19,12 @@ interface LoginPageProps {
  *
  * @param props - See {@link LoginPageProps}.
  */
-export default function LoginPage({ onLoggedIn, onGoToSignup, onGoToForgotPassword }: LoginPageProps) {
+export default function LoginPage({
+  onLoggedIn,
+  onGoToSignup,
+  onGoToForgotPassword,
+  onGoToResendVerification,
+}: LoginPageProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +90,11 @@ export default function LoginPage({ onLoggedIn, onGoToSignup, onGoToForgotPasswo
         </button>
         <button type="button" onClick={onGoToForgotPassword} className="hover:text-slate-200">
           Forgot password?
+        </button>
+      </div>
+      <div className="mt-2 text-center text-sm text-slate-400">
+        <button type="button" onClick={onGoToResendVerification} className="hover:text-slate-200">
+          Resend verification email?
         </button>
       </div>
     </div>

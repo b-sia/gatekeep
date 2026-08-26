@@ -72,6 +72,16 @@ export const login = (email: string, password: string) =>
 export const logout = () => post<{ status: string }>("/logout", {});
 
 /**
+ * Requests a fresh verification email for an account that hasn't verified
+ * yet (e.g. the original email was lost).
+ *
+ * @param email - The account's email address.
+ * @returns The request status.
+ */
+export const resendVerification = (email: string) =>
+  post<{ status: string }>("/resend-verification", { email });
+
+/**
  * Requests a password reset email for the given address.
  *
  * @param email - The account's email address.
