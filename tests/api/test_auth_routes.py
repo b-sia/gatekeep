@@ -72,6 +72,48 @@ async def test_resend_verification_unknown_email_returns_202(client):
 
 
 @pytest.mark.asyncio
+async def test_session_cookie_omits_secure_flag_on_http_public_base_url(
+    client, caplog, monkeypatch
+):
+    """Issue #39 review finding 5: `secure=True` was hardcoded, so browsers
+    silently dropped the session/CSRF cookies on the documented plain-HTTP
+    docker-compose deployment (PUBLIC_BASE_URL defaults to
+    http://localhost:5173/dashboard). The Secure flag must track the
+    configured scheme instead.
+    """
+    import logging
+
+    monkeypatch.setattr(get_settings(), "public_base_url", "http://localhost:5173/dashboard")
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "http@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "http@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+    set_cookie_headers = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert len(set_cookie_headers) == 2
+    assert all("secure" not in h.lower() for h in set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_sets_secure_flag_on_https_public_base_url(
+    client, caplog, monkeypatch
+):
+    import logging
+
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://app.example.com/dashboard")
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "https@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "https@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+    set_cookie_headers = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert len(set_cookie_headers) == 2
+    assert all("secure" in h.lower() for h in set_cookie_headers)
+
+
+@pytest.mark.asyncio
 async def test_login_bad_password_returns_401(client):
     r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
     assert r.status_code == 401

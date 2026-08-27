@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, field_validator
@@ -52,23 +53,31 @@ def require_csrf(request: Request) -> None:
 
 
 def _set_session_cookies(response: Response, session_token: str) -> str:
-    """Set the session + CSRF cookies on a response and return the CSRF token."""
+    """Set the session + CSRF cookies on a response and return the CSRF token.
+
+    The `Secure` flag is derived from `PUBLIC_BASE_URL`'s scheme rather than
+    hardcoded: browsers silently drop `Secure` cookies on plain-HTTP origins
+    (e.g. the documented docker-compose deployment), so hardcoding it to
+    `True` would make login look like it succeeds while no cookie is stored.
+    """
+    settings = get_settings()
+    secure = urlparse(settings.public_base_url).scheme == "https"
     csrf = secrets.token_urlsafe(32)
     response.set_cookie(
         SESSION_COOKIE,
         session_token,
         httponly=True,
-        secure=True,
+        secure=secure,
         samesite="lax",
-        max_age=get_settings().session_ttl_seconds,
+        max_age=settings.session_ttl_seconds,
     )
     response.set_cookie(
         CSRF_COOKIE,
         csrf,
         httponly=False,
-        secure=True,
+        secure=secure,
         samesite="lax",
-        max_age=get_settings().session_ttl_seconds,
+        max_age=settings.session_ttl_seconds,
     )
     return csrf
 
