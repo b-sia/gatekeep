@@ -2240,7 +2240,7 @@ async def approve(
         raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
     if newly_approved:
         subject, text = build_approval_email(get_settings().public_base_url)
-        get_email_backend().send(email, subject, text)
+        await get_email_backend().send(email, subject, text)
     return _account_out(account)
 
 

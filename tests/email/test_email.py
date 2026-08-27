@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 from gatekeep.email.backends import ConsoleEmailBackend
 from gatekeep.email.messages import (
     build_approval_email,
@@ -8,9 +10,10 @@ from gatekeep.email.messages import (
 )
 
 
-def test_console_backend_logs_message(caplog):
+@pytest.mark.asyncio
+async def test_console_backend_logs_message(caplog):
     with caplog.at_level(logging.INFO):
-        ConsoleEmailBackend().send("u@x.com", "Subj", "Body here")
+        await ConsoleEmailBackend().send("u@x.com", "Subj", "Body here")
     assert "u@x.com" in caplog.text and "Body here" in caplog.text
 
 

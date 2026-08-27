@@ -22,6 +22,7 @@ dependencies = [
     "pgvector>=0.3",
     "sentence-transformers>=3.0",
     "prometheus-client>=0.20",
+    "aiosmtplib>=3.0",
 ]
 
 [project.scripts]

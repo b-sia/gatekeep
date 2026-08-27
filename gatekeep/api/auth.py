@@ -152,7 +152,7 @@ async def signup(
             },
         ) from exc
     subject, text = build_verification_email(get_settings().public_base_url, raw)
-    get_email_backend().send(str(body.email), subject, text)
+    await get_email_backend().send(str(body.email), subject, text)
     return {"status": "ok"}
 
 
@@ -229,7 +229,7 @@ async def resend_verification(
     raw = await auth_service.resend_verification_email(session, email=body.email)
     if raw:
         subject, text = build_verification_email(get_settings().public_base_url, raw)
-        get_email_backend().send(str(body.email), subject, text)
+        await get_email_backend().send(str(body.email), subject, text)
     return {"status": "ok"}
 
 
@@ -243,7 +243,7 @@ async def reset_request(
     raw = await auth_service.request_password_reset(session, email=body.email)
     if raw:
         subject, text = build_reset_email(get_settings().public_base_url, raw)
-        get_email_backend().send(str(body.email), subject, text)
+        await get_email_backend().send(str(body.email), subject, text)
     return {"status": "ok"}
 
 
