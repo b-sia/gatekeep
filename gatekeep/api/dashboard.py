@@ -1433,6 +1433,7 @@ async def create_prompt_route(
     body: PromptCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Create a prompt with an initial active version 1. Operator only.
 
@@ -1469,6 +1470,7 @@ async def add_prompt_version_route(
     body: PromptVersionCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Append a new inactive version to an existing prompt. Operator only.
 
@@ -1501,6 +1503,7 @@ async def rollback_prompt_route(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(_get_redis),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Revert a prompt to its previously-active version. Operator only.
 
@@ -1565,6 +1568,7 @@ async def set_candidate_route(
     body: CandidateSetRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CandidateResponse:
     """Configure or adjust a prompt's A/B candidate version + traffic split.
 
@@ -1597,6 +1601,7 @@ async def clear_candidate_route(
     name: str,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CandidateResponse:
     """Clear a prompt's A/B candidate (100% traffic back to active). Operator only.
 
@@ -1731,6 +1736,7 @@ async def create_suite_route(
     body: SuiteCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> SuiteOut:
     """Create an eval suite for a prompt (one per prompt). Operator only.
 
@@ -1773,6 +1779,7 @@ async def add_case_route(
     body: CaseCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> EvalCaseOut:
     """Add a reviewed manual eval case to a prompt's suite. Operator only.
 
@@ -1816,6 +1823,7 @@ async def curation_mine_route(
     session: AsyncSession = Depends(get_session),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CurationResponse:
     """Mine recent request samples for a prompt into unreviewed curated cases.
 
@@ -1862,6 +1870,7 @@ async def curation_review_route(
     body: CurationReviewRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CurationReviewResponse:
     """Approve (keep, mark reviewed) or reject (delete) one curated case.
 
@@ -2250,6 +2259,7 @@ async def create_account_route(
     body: AccountCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> AccountOut:
     """Create an account. Operator only. Records an `account.create` audit
     event. 409 on name collision, 422 on bad name/budget.
@@ -2290,6 +2300,7 @@ async def patch_account_route(
     body: AccountPatchRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> AccountOut:
     """Rename, set/clear budget, and/or toggle operator on an account.
 
@@ -2413,6 +2424,7 @@ async def eval_run_route(
     redis: Redis = Depends(_get_redis),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> JobCreatedResponse:
     """Kick off an on-demand eval run as a background job. Operator only.
 
@@ -2455,6 +2467,7 @@ async def promote_route(
     redis: Redis = Depends(_get_redis),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> JobCreatedResponse:
     """Kick off an eval-gated promotion as a background job. Operator only.
 
