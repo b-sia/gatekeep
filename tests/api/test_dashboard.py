@@ -159,6 +159,28 @@ async def test_require_caller_account_raises_401_when_account_missing(session, m
     assert ei.value.detail["error"]["type"] == "authentication_error"
 
 
+async def test_api_key_fallback_is_metered_by_pre_auth_rate_limit(client, monkeypatch):
+    """`_require_caller_account` calls `require_api_key` directly (not via
+    `Depends`) when there's no session cookie, so `require_api_key`'s own
+    `Depends(_enforce_pre_auth_rate_limit)` is never resolved by FastAPI's DI
+    solver - only `Depends` defaults trigger that. A flood of invalid
+    `Authorization` headers must still be throttled by the pre-auth limiter
+    (issue #29 review finding 4), not reach the DB lookup unmetered.
+    """
+    from gatekeep.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_tokens_per_min", 1)
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_refill_rate", 1 / 60)
+
+    headers = {"Authorization": "Bearer nope"}
+    first = await client.get("/dashboard/api/usage/summary", headers=headers)
+    assert first.status_code == 401
+
+    second = await client.get("/dashboard/api/usage/summary", headers=headers)
+    assert second.status_code == 429
+
+
 # -- account scoping ---------------------------------------------------------
 
 

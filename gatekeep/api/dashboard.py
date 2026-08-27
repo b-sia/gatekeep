@@ -19,7 +19,7 @@ from gatekeep.audit.audit import record_audit_event
 from gatekeep.config import get_settings
 from gatekeep.email import get_email_backend
 from gatekeep.email.messages import build_approval_email
-from gatekeep.middleware.auth import require_api_key
+from gatekeep.middleware.auth import _enforce_pre_auth_rate_limit, require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import promptjobs
 from gatekeep.prompts.curation import curate_cases, list_unreviewed, review_case
@@ -83,6 +83,11 @@ async def _require_caller_account(
         account = await resolve_session_account(session, token)
         if account is not None:
             return account
+    # `require_api_key` is called directly (not via `Depends`) below, so its
+    # own `Depends(_enforce_pre_auth_rate_limit)` is never resolved by
+    # FastAPI's DI solver - only `Depends` defaults trigger that. Invoke the
+    # pre-auth limiter explicitly to keep this fallback path metered.
+    await _enforce_pre_auth_rate_limit(request)
     caller = await require_api_key(
         authorization=request.headers.get("authorization"),
         x_api_key=request.headers.get("x-api-key"),
