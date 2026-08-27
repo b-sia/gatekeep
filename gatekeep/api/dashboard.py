@@ -2194,21 +2194,24 @@ async def list_pending(
     from gatekeep.storage.models import AccountCredential
 
     accounts = await auth_service.list_pending_accounts(session)
-    out = []
-    for a in accounts:
-        cred = (
+    account_ids = [a.id for a in accounts]
+    emails_by_account_id: dict[int, str] = {}
+    if account_ids:
+        creds = (
             await session.execute(
-                select(AccountCredential).where(AccountCredential.account_id == a.id)
+                select(AccountCredential).where(AccountCredential.account_id.in_(account_ids))
             )
-        ).scalar_one_or_none()
-        out.append(
-            PendingAccountOut(
-                account_id=a.id,
-                name=a.name,
-                email=cred.email if cred else "",
-                created_at=a.created_at,
-            )
+        ).scalars()
+        emails_by_account_id = {c.account_id: c.email for c in creds}
+    out = [
+        PendingAccountOut(
+            account_id=a.id,
+            name=a.name,
+            email=emails_by_account_id.get(a.id, ""),
+            created_at=a.created_at,
         )
+        for a in accounts
+    ]
     return PendingListResponse(accounts=out)
 
 
