@@ -33,6 +33,18 @@ async def test_signup_then_login_flow_sets_session_cookie(client, caplog):
 
 
 @pytest.mark.asyncio
+async def test_signup_rejects_password_below_minimum_length(client):
+    r = await client.post(f"{BASE}/signup", json={"email": "weak@x.com", "password": "short1"})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_signup_rejects_empty_password(client):
+    r = await client.post(f"{BASE}/signup", json={"email": "empty@x.com", "password": ""})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_signup_duplicate_returns_409_with_message(client):
     await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})
     r = await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})

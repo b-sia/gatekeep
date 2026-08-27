@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.accounts import auth_service
@@ -14,6 +14,7 @@ from gatekeep.accounts.auth_service import (
     InvalidCredentialsError,
     InvalidTokenError,
 )
+from gatekeep.accounts.passwords import validate_password_strength
 from gatekeep.config import get_settings
 from gatekeep.email import get_email_backend
 from gatekeep.email.messages import build_reset_email, build_verification_email
@@ -78,6 +79,8 @@ class SignupIn(BaseModel):
     email: EmailStr
     password: str
 
+    _validate_password = field_validator("password")(validate_password_strength)
+
 
 class TokenIn(BaseModel):
     """Request body for endpoints that consume a single-use email token."""
@@ -109,6 +112,8 @@ class ResetIn(BaseModel):
 
     token: str
     new_password: str
+
+    _validate_new_password = field_validator("new_password")(validate_password_strength)
 
 
 @auth_router.post("/signup", status_code=202)
