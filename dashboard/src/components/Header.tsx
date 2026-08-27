@@ -13,8 +13,9 @@ interface HeaderProps {
 
 /**
  * Dashboard top bar: app title, an Analytics / Accounts & Keys / Prompts tab
- * control, the logged-in account indicator, and a Log out button that ends
- * the session and returns to the login page.
+ * control (Prompts hidden for non-operators), the logged-in account
+ * indicator, and a Log out button that ends the session and returns to the
+ * login page.
  *
  * @param props - See {@link HeaderProps}.
  */
@@ -43,9 +44,11 @@ export default function Header({
           <button className={tabClass("management")} onClick={() => onTabChange("management")}>
             Accounts &amp; Keys
           </button>
-          <button className={tabClass("prompts")} onClick={() => onTabChange("prompts")}>
-            Prompts
-          </button>
+          {isOperator && (
+            <button className={tabClass("prompts")} onClick={() => onTabChange("prompts")}>
+              Prompts
+            </button>
+          )}
         </nav>
       </div>
       <div className="flex items-center gap-3">
