@@ -12,6 +12,7 @@ export default function PendingRequestsPanel() {
   const [accounts, setAccounts] = useState<PendingAccountOut[]>([]);
   const [budgets, setBudgets] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<Set<number>>(new Set());
 
   const load = useCallback(async () => {
     setError(null);
@@ -28,6 +29,7 @@ export default function PendingRequestsPanel() {
   }, [load]);
 
   const handleApprove = async (accountId: number) => {
+    if (submitting.has(accountId)) return;
     const raw = budgets[accountId];
     if (raw !== undefined && raw !== "" && Number.isNaN(Number(raw))) {
       // A non-numeric budget must never silently become "unlimited" (which
@@ -37,20 +39,33 @@ export default function PendingRequestsPanel() {
       return;
     }
     const budget = raw === undefined || raw === "" ? null : Number(raw);
+    setSubmitting((cur) => new Set(cur).add(accountId));
     try {
       await approveAccount(accountId, budget);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to approve request");
+      setSubmitting((cur) => {
+        const next = new Set(cur);
+        next.delete(accountId);
+        return next;
+      });
     }
   };
 
   const handleReject = async (accountId: number) => {
+    if (submitting.has(accountId)) return;
+    setSubmitting((cur) => new Set(cur).add(accountId));
     try {
       await rejectAccount(accountId);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reject request");
+      setSubmitting((cur) => {
+        const next = new Set(cur);
+        next.delete(accountId);
+        return next;
+      });
     }
   };
 
@@ -92,13 +107,15 @@ export default function PendingRequestsPanel() {
               <td className="py-1 text-right">
                 <button
                   onClick={() => handleApprove(a.account_id)}
-                  className="mr-2 rounded bg-indigo-600 px-2 py-0.5 text-xs text-white hover:bg-indigo-500"
+                  disabled={submitting.has(a.account_id)}
+                  className="mr-2 rounded bg-indigo-600 px-2 py-0.5 text-xs text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Approve
+                  {submitting.has(a.account_id) ? "Approving..." : "Approve"}
                 </button>
                 <button
                   onClick={() => handleReject(a.account_id)}
-                  className="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-300 hover:bg-slate-800"
+                  disabled={submitting.has(a.account_id)}
+                  className="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Reject
                 </button>

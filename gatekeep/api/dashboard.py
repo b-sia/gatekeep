@@ -2208,17 +2208,21 @@ async def approve(
 ) -> AccountOut:
     """Approve a pending account, set its budget, and email the user (operator only).
 
+    Idempotent: approving an already-approved account (e.g. a duplicate
+    request from a double-click) succeeds without sending a second email.
+
     Raises:
         HTTPException: 404 if the account does not exist.
     """
     try:
-        account, email = await auth_service.approve_account(
+        account, email, newly_approved = await auth_service.approve_account(
             session, account_id=account_id, monthly_budget_usd=body.monthly_budget_usd
         )
     except account_service.AccountNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
-    subject, text = build_approval_email(get_settings().public_base_url)
-    get_email_backend().send(email, subject, text)
+    if newly_approved:
+        subject, text = build_approval_email(get_settings().public_base_url)
+        get_email_backend().send(email, subject, text)
     return _account_out(account)
 
 

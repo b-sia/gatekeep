@@ -279,22 +279,34 @@ async def list_pending_accounts(session: AsyncSession) -> list[Account]:
 
 async def approve_account(
     session: AsyncSession, *, account_id: int, monthly_budget_usd: float | None
-) -> tuple[Account, str]:
-    """Approve a pending account, set its budget, and return (account, email).
+) -> tuple[Account, str, bool]:
+    """Approve a pending account and set its budget.
+
+    Idempotent: an account that is already approved is left untouched (its
+    budget is not overwritten by a second call) so that a duplicate request
+    - e.g. a caller double-submitting the approval - does not trigger a
+    second approval email.
+
+    Returns:
+        A tuple of (account, credential email, whether this call newly
+        approved the account). The caller should only send the approval
+        email when the third element is `True`.
 
     Raises:
         AccountNotFoundError: if no account has that id.
     """
     account = await account_service.get_account(session, account_id)
-    account.status = "approved"
-    account.monthly_budget_usd = monthly_budget_usd
-    await session.commit()
     cred = (
         await session.execute(
             select(AccountCredential).where(AccountCredential.account_id == account_id)
         )
     ).scalar_one()
-    return account, cred.email
+    if account.status == "approved":
+        return account, cred.email, False
+    account.status = "approved"
+    account.monthly_budget_usd = monthly_budget_usd
+    await session.commit()
+    return account, cred.email, True
 
 
 async def reject_account(session: AsyncSession, *, account_id: int) -> Account:

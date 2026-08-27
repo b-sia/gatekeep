@@ -72,3 +72,39 @@ it("blocks approval with a validation message when the budget is non-numeric jun
   // Must never silently fall through to an "unlimited" approve.
   expect(calls.some((c) => c.includes("/approve"))).toBe(false);
 });
+
+it("does not fire a second /approve request when the button is clicked again before the first request resolves", async () => {
+  const approveCalls: string[] = [];
+  let resolveApprove: (() => void) | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, opts?: RequestInit) => {
+    if (url.endsWith("/accounts/pending")) {
+      return { ok: true, status: 200, json: async () => ({
+        accounts: [{ account_id: 10, name: "slow@x.com", email: "slow@x.com",
+                     created_at: "2026-08-26T00:00:00Z" }] }) } as Response;
+    }
+    if (url.includes("/approve")) {
+      approveCalls.push(`${opts?.method ?? "GET"} ${url}`);
+      // Simulate real network latency: the request does not resolve
+      // immediately, mirroring the window during which an end user
+      // might spam-click "Approve" thinking nothing happened.
+      await new Promise<void>((resolve) => { resolveApprove = resolve; });
+      return { ok: true, status: 200, json: async () => ({
+        id: 10, name: "slow@x.com", status: "approved" }) } as Response;
+    }
+    return { ok: true, status: 200, json: async () => ({
+      id: 10, name: "slow@x.com", status: "approved" }) } as Response;
+  }));
+  render(<PendingRequestsPanel />);
+  await waitFor(() => expect(screen.getByText("slow@x.com")).toBeTruthy());
+  const button = screen.getByRole("button", { name: /approve/i });
+  fireEvent.click(button);
+  await waitFor(() => expect(approveCalls.length).toBe(1));
+  // Spam-click while the first request is still in flight, as an
+  // impatient end user (seeing no visible feedback) would.
+  fireEvent.click(button);
+  fireEvent.click(button);
+  fireEvent.click(button);
+  resolveApprove?.();
+  await waitFor(() => expect(approveCalls.length).toBeGreaterThanOrEqual(1));
+  expect(approveCalls.length).toBe(1);
+});
