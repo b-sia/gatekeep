@@ -2226,7 +2226,9 @@ async def approve(
     request from a double-click) succeeds without sending a second email.
 
     Raises:
-        HTTPException: 404 if the account does not exist.
+        HTTPException: 404 if the account does not exist, 409 if the
+            account's signup transaction hasn't committed its credential row
+            yet (retry shortly).
     """
     try:
         account, email, newly_approved = await auth_service.approve_account(
@@ -2234,6 +2236,8 @@ async def approve(
         )
     except account_service.AccountNotFoundError as exc:
         raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except auth_service.CredentialsNotReadyError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
     if newly_approved:
         subject, text = build_approval_email(get_settings().public_base_url)
         get_email_backend().send(email, subject, text)

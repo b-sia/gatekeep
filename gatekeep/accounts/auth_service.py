@@ -37,6 +37,15 @@ class CredentialsAlreadySetError(AccountServiceError):
     """Raised when an account already has login credentials."""
 
 
+class CredentialsNotReadyError(AccountServiceError):
+    """Raised when acting on an account whose credential row hasn't landed yet.
+
+    `signup` commits the `Account` and `AccountCredential` rows in separate
+    transactions, so there is a narrow window where a pending account exists
+    without its credential row.
+    """
+
+
 # Precomputed once at import time so the "no such credential" branch of
 # `login` can run a real bcrypt comparison against a constant hash. Without
 # this, an unknown email would skip `verify_password` entirely while a known
@@ -294,13 +303,17 @@ async def approve_account(
 
     Raises:
         AccountNotFoundError: if no account has that id.
+        CredentialsNotReadyError: if the account's signup transaction hasn't
+            committed its credential row yet (a narrow race window).
     """
     account = await account_service.get_account(session, account_id)
     cred = (
         await session.execute(
             select(AccountCredential).where(AccountCredential.account_id == account_id)
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if cred is None:
+        raise CredentialsNotReadyError(f"account {account_id} has no credentials yet")
     if account.status == "approved":
         return account, cred.email, False
     account.status = "approved"

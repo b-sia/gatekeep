@@ -1,6 +1,6 @@
 import pytest
 
-from gatekeep.accounts import auth_service, sessions
+from gatekeep.accounts import account_service, auth_service, sessions
 from gatekeep.accounts.sessions import resolve_session_account
 from gatekeep.storage.db import SessionLocal
 
@@ -50,6 +50,18 @@ async def test_approve_is_idempotent_for_an_already_approved_account():
         assert account.monthly_budget_usd == 25.0
         assert email == "dup@x.com"
         assert newly_approved is False
+
+
+@pytest.mark.asyncio
+async def test_approve_raises_when_credential_row_not_yet_committed():
+    # Reproduces the window between signup()'s two commits: the Account
+    # exists but its AccountCredential hasn't landed yet. Approving in that
+    # window must raise a handleable error, not crash with an uncaught
+    # NoResultFound.
+    async with SessionLocal() as s:
+        account = await account_service.create_account(s, name="racer@x.com", status="pending")
+        with pytest.raises(auth_service.CredentialsNotReadyError):
+            await auth_service.approve_account(s, account_id=account.id, monthly_budget_usd=10.0)
 
 
 @pytest.mark.asyncio
