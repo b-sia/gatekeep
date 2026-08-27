@@ -12,7 +12,7 @@ BASE = "/dashboard/api/auth"
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as c:
         yield c
 
 
@@ -63,6 +63,36 @@ async def test_resend_verification_unknown_email_returns_202(client):
 async def test_login_bad_password_returns_401(client):
     r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_without_csrf_token_returns_403(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "lo@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "lo@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+
+    r = await client.post(f"{BASE}/logout")
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logout_with_csrf_token_succeeds(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "lo2@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "lo2@x.com", "password": "pw123456"})
+    csrf = r.json()["csrf_token"]
+
+    r = await client.post(f"{BASE}/logout", headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 200
 
 
 @pytest.mark.asyncio

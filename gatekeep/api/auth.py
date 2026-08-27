@@ -187,7 +187,10 @@ async def login(
 
 @auth_router.post("/logout")
 async def logout(
-    request: Request, response: Response, session: AsyncSession = Depends(get_session)
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    _csrf: None = Depends(require_csrf),
 ) -> dict:
     """Revoke the current session and clear cookies."""
     token = request.cookies.get(SESSION_COOKIE)
