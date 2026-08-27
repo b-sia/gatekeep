@@ -19,6 +19,11 @@ import type { MeResponse } from "./api/types";
  * the current URL doesn't match a dedicated auth route. */
 type AuthView = "login" | "signup";
 
+/** SPA base path (e.g. "/dashboard/"), from vite.config.ts `base` - redirects
+ * must be built from this rather than hardcoded absolute paths, since the
+ * dashboard isn't served from the domain root. */
+const BASE_URL = import.meta.env.BASE_URL;
+
 /**
  * Root component: gates the whole app on the caller's login session.
  *
@@ -84,16 +89,16 @@ export default function App() {
   if (!me || (me.status !== "pending" && me.status !== "approved")) {
     const path = window.location.pathname;
     if (path.endsWith("/verify-email")) {
-      return <VerifyEmailPage onGoToLogin={() => (window.location.href = "/")} />;
+      return <VerifyEmailPage onGoToLogin={() => (window.location.href = BASE_URL)} />;
     }
     if (path.endsWith("/forgot-password")) {
-      return <ForgotPasswordPage onBackToLogin={() => (window.location.href = "/")} />;
+      return <ForgotPasswordPage onBackToLogin={() => (window.location.href = BASE_URL)} />;
     }
     if (path.endsWith("/resend-verification")) {
-      return <ResendVerificationPage onBackToLogin={() => (window.location.href = "/")} />;
+      return <ResendVerificationPage onBackToLogin={() => (window.location.href = BASE_URL)} />;
     }
     if (path.endsWith("/reset-password")) {
-      return <ResetPasswordPage onGoToLogin={() => (window.location.href = "/")} />;
+      return <ResetPasswordPage onGoToLogin={() => (window.location.href = BASE_URL)} />;
     }
 
     if (authView === "signup") {
@@ -103,8 +108,8 @@ export default function App() {
       <LoginPage
         onLoggedIn={() => loadMe()}
         onGoToSignup={() => setAuthView("signup")}
-        onGoToForgotPassword={() => (window.location.href = "/forgot-password")}
-        onGoToResendVerification={() => (window.location.href = "/resend-verification")}
+        onGoToForgotPassword={() => (window.location.href = `${BASE_URL}forgot-password`)}
+        onGoToResendVerification={() => (window.location.href = `${BASE_URL}resend-verification`)}
       />
     );
   }
