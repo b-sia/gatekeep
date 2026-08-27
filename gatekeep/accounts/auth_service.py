@@ -33,6 +33,10 @@ class AccountNotActiveError(AccountServiceError):
     """Raised when a rejected or disabled account attempts to log in."""
 
 
+class CredentialsAlreadySetError(AccountServiceError):
+    """Raised when an account already has login credentials."""
+
+
 # Precomputed once at import time so the "no such credential" branch of
 # `login` can run a real bcrypt comparison against a constant hash. Without
 # this, an unknown email would skip `verify_password` entirely while a known
@@ -131,6 +135,46 @@ async def verify_email(session: AsyncSession, *, raw_token: str) -> Account:
     cred.email_verified = True
     await session.commit()
     return await session.get(Account, token.account_id)
+
+
+async def set_initial_credentials(
+    session: AsyncSession, *, account_id: int, email: str, password: str
+) -> AccountCredential:
+    """Create login credentials for an account that has none yet.
+
+    Bootstrap path for accounts created outside self-serve signup (CLI/script
+    operators): the credential is marked verified immediately, since there is
+    no signup flow here for a verification link to belong to.
+
+    Raises:
+        CredentialsAlreadySetError: if the account already has credentials.
+        EmailConflictError: if the email is already registered to another
+            account.
+    """
+    existing_for_account = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+    if existing_for_account is not None:
+        raise CredentialsAlreadySetError(f"account {account_id} already has login credentials")
+    normalized = _normalize_email(email)
+    existing_for_email = (
+        await session.execute(
+            select(AccountCredential).where(AccountCredential.email == normalized)
+        )
+    ).scalar_one_or_none()
+    if existing_for_email is not None:
+        raise EmailConflictError("email already registered")
+    cred = AccountCredential(
+        account_id=account_id,
+        email=normalized,
+        password_hash=hash_password(password),
+        email_verified=True,
+    )
+    session.add(cred)
+    await session.commit()
+    return cred
 
 
 async def login(session: AsyncSession, *, email: str, password: str) -> tuple[Account, str]:
