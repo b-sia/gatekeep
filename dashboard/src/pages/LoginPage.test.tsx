@@ -12,7 +12,7 @@ it("submits credentials and calls onLoggedIn with the result", async () => {
   const onLoggedIn = vi.fn();
   render(<LoginPage onLoggedIn={onLoggedIn} />);
   fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "e@x.com" } });
-  fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "pw123456" } });
+  fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "pw123456" } });
   fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
   await waitFor(() => expect(onLoggedIn).toHaveBeenCalledWith(
     expect.objectContaining({ status: "approved" })));

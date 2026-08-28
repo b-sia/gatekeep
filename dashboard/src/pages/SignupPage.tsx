@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { signup } from "../api/auth";
+import PasswordInput from "../components/PasswordInput";
 
 interface SignupPageProps {
   /** Called when the user wants to go back to the login page. */
@@ -15,9 +16,12 @@ interface SignupPageProps {
 export default function SignupPage({ onBackToLogin }: SignupPageProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+
+  const passwordsMismatch = confirmPassword.length > 0 && password !== confirmPassword;
 
   /**
    * Submits the signup form: calls `signup()` with the current email and
@@ -28,6 +32,7 @@ export default function SignupPage({ onBackToLogin }: SignupPageProps) {
    */
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (passwordsMismatch) return;
     setError(null);
     setBusy(true);
     try {
@@ -71,20 +76,20 @@ export default function SignupPage({ onBackToLogin }: SignupPageProps) {
           onChange={(e) => setEmail(e.target.value)}
           className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none"
         />
-        <label htmlFor="signup-password" className="mb-1 block text-sm text-slate-300">
-          Password
-        </label>
-        <input
-          id="signup-password"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none"
+        <PasswordInput id="signup-password" label="Password" value={password} onChange={setPassword} />
+        <PasswordInput
+          id="signup-confirm-password"
+          label="Confirm password"
+          value={confirmPassword}
+          onChange={setConfirmPassword}
         />
+        {passwordsMismatch && (
+          <p className="mb-3 text-sm text-red-400">Passwords do not match</p>
+        )}
         {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
         <button
           type="submit"
-          disabled={busy}
+          disabled={busy || passwordsMismatch}
           className="w-full rounded bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           Sign up

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { login } from "../api/auth";
 import type { LoginResult } from "../api/auth";
+import PasswordInput from "../components/PasswordInput";
 
 interface LoginPageProps {
   /** Called with the login result once the credentials are accepted. */
@@ -65,16 +66,7 @@ export default function LoginPage({
           onChange={(e) => setEmail(e.target.value)}
           className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none"
         />
-        <label htmlFor="login-password" className="mb-1 block text-sm text-slate-300">
-          Password
-        </label>
-        <input
-          id="login-password"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="mb-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-indigo-500 focus:outline-none"
-        />
+        <PasswordInput id="login-password" label="Password" value={password} onChange={setPassword} />
         {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
         <button
           type="submit"
