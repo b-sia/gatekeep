@@ -69,7 +69,7 @@ from gatekeep.prompts.evals import add_case, create_suite, get_suite_for_prompt
 from gatekeep.prompts.fixtures import load_fixtures_dir
 from gatekeep.prompts.samples import record_request_sample
 from gatekeep.routing.pricing import get_pricing_table
-from gatekeep.storage.db import SessionLocal
+from gatekeep.storage.db import Base, SessionLocal
 from gatekeep.storage.models import (
     Account,
     ApiKey,
@@ -105,6 +105,11 @@ _SEED_TABLES = (
     "api_keys",
     "accounts",
 )
+
+# Model tables deliberately left out of `_SEED_TABLES` because the seeder
+# doesn't own them - add an entry here (with why) rather than to
+# `_SEED_TABLES` for any table that should stay untouched by `--reset`.
+_NON_SEED_TABLES: frozenset[str] = frozenset()
 
 # Hostnames `--reset` is allowed to TRUNCATE against: the host-mapped port
 # this script normally runs through, and the docker-compose service name
@@ -232,12 +237,41 @@ class SeededAccount:
     budget_ratio: float | None = None
 
 
+def _check_seed_tables_current() -> None:
+    """Fail fast if a model table is missing from `_SEED_TABLES`/`_NON_SEED_TABLES`.
+
+    `_SEED_TABLES` is a hand-maintained list, so a migration that adds a new
+    model table without also updating it would silently survive `--reset` -
+    the new table's rows would linger across what's supposed to be a clean
+    rebuild. Comparing it against `Base.metadata` (populated by importing
+    `gatekeep.storage.models`) catches that drift at reset time instead.
+
+    Raises:
+        RuntimeError: If a model table isn't listed in either set.
+    """
+    known = set(_SEED_TABLES) | _NON_SEED_TABLES
+    actual = set(Base.metadata.tables.keys())
+    missing = actual - known
+    if missing:
+        raise RuntimeError(
+            f"Table(s) {sorted(missing)} exist in gatekeep.storage.models but "
+            "aren't listed in _SEED_TABLES or _NON_SEED_TABLES in "
+            "scripts/seed_dev.py. Add them to one of those (with a reason "
+            "comment for _NON_SEED_TABLES) before running --reset."
+        )
+
+
 async def reset_seed_tables(session: AsyncSession) -> None:
     """TRUNCATE every seed-owned table, resetting identities.
 
     One statement so the truncation is atomic and CASCADE handles foreign
     keys regardless of table order. Only ever run under `--reset`.
+
+    Raises:
+        RuntimeError: If `_check_seed_tables_current` finds a model table
+            missing from `_SEED_TABLES`/`_NON_SEED_TABLES`.
     """
+    _check_seed_tables_current()
     joined = ", ".join(_SEED_TABLES)
     await session.execute(text(f"TRUNCATE {joined} RESTART IDENTITY CASCADE"))
     await session.commit()
