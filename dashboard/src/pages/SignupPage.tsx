@@ -22,6 +22,7 @@ export default function SignupPage({ onBackToLogin }: SignupPageProps) {
   const [submitted, setSubmitted] = useState(false);
 
   const passwordsMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+  const canSubmit = password.length > 0 && confirmPassword.length > 0 && password === confirmPassword;
 
   /**
    * Submits the signup form: calls `signup()` with the current email and
@@ -32,7 +33,7 @@ export default function SignupPage({ onBackToLogin }: SignupPageProps) {
    */
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (passwordsMismatch) return;
+    if (!canSubmit) return;
     setError(null);
     setBusy(true);
     try {
@@ -89,7 +90,7 @@ export default function SignupPage({ onBackToLogin }: SignupPageProps) {
         {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
         <button
           type="submit"
-          disabled={busy || passwordsMismatch}
+          disabled={busy || !canSubmit}
           className="w-full rounded bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           Sign up

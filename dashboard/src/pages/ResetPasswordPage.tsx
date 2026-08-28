@@ -22,6 +22,7 @@ export default function ResetPasswordPage({ onGoToLogin }: ResetPasswordPageProp
   const [submitted, setSubmitted] = useState(false);
 
   const passwordsMismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  const canSubmit = newPassword.length > 0 && confirmPassword.length > 0 && newPassword === confirmPassword;
 
   /**
    * Submits the reset-password form: reads the `token` from the URL and
@@ -32,7 +33,7 @@ export default function ResetPasswordPage({ onGoToLogin }: ResetPasswordPageProp
    */
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (passwordsMismatch) return;
+    if (!canSubmit) return;
     setError(null);
     const token = new URLSearchParams(window.location.search).get("token");
     if (!token) {
@@ -89,7 +90,7 @@ export default function ResetPasswordPage({ onGoToLogin }: ResetPasswordPageProp
         {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
         <button
           type="submit"
-          disabled={busy || passwordsMismatch}
+          disabled={busy || !canSubmit}
           className="w-full rounded bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-50"
         >
           Reset password
