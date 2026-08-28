@@ -124,23 +124,61 @@ async def test_prompts_requires_auth(client):
     assert r.status_code == 401
 
 
-async def test_require_caller_account_raises_401_when_account_missing(session):
+async def test_require_caller_account_raises_401_when_account_missing(session, monkeypatch):
     """If an ApiKey's account_id points at a since-deleted Account,
     `_require_caller_account` must raise a clean 401 rather than let `None`
     flow into `require_operator`/`_account_scope`/`require_account_access`,
     which would immediately hit `AttributeError` on `None.is_operator`/`.id`
     (issue #29, sub-finding 3). There is no account-delete path today, so the
     orphaned key is simulated directly rather than through a real delete
-    (which the FK constraint would reject anyway)."""
-    from fastapi import HTTPException
+    (which the FK constraint would reject anyway).
 
+    `_require_caller_account` resolves identity from a session cookie first,
+    falling back to `require_api_key`; the request here carries no session
+    cookie, and `require_api_key` is monkeypatched to return the orphaned
+    key directly, so the account-lookup path under test is exercised without
+    needing a real, hashable API key.
+    """
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from gatekeep.api import dashboard
     from gatekeep.api.dashboard import _require_caller_account
 
     fake_key = ApiKey(name="orphan-key", key_hash="irrelevant", account_id=999_999)
+
+    async def fake_require_api_key(*, authorization, x_api_key, session):
+        return fake_key
+
+    monkeypatch.setattr(dashboard, "require_api_key", fake_require_api_key)
+    request = Request({"type": "http", "headers": [], "method": "GET"})
+
     with pytest.raises(HTTPException) as ei:
-        await _require_caller_account(caller=fake_key, session=session)
+        await _require_caller_account(request=request, session=session)
     assert ei.value.status_code == 401
     assert ei.value.detail["error"]["type"] == "authentication_error"
+
+
+async def test_api_key_fallback_is_metered_by_pre_auth_rate_limit(client, monkeypatch):
+    """`_require_caller_account` calls `require_api_key` directly (not via
+    `Depends`) when there's no session cookie, so `require_api_key`'s own
+    `Depends(_enforce_pre_auth_rate_limit)` is never resolved by FastAPI's DI
+    solver - only `Depends` defaults trigger that. A flood of invalid
+    `Authorization` headers must still be throttled by the pre-auth limiter
+    (issue #29 review finding 4), not reach the DB lookup unmetered.
+    """
+    from gatekeep.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_tokens_per_min", 1)
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_refill_rate", 1 / 60)
+
+    headers = {"Authorization": "Bearer nope"}
+    first = await client.get("/dashboard/api/usage/summary", headers=headers)
+    assert first.status_code == 401
+
+    second = await client.get("/dashboard/api/usage/summary", headers=headers)
+    assert second.status_code == 429
 
 
 # -- account scoping ---------------------------------------------------------
@@ -1240,6 +1278,7 @@ async def test_me_returns_caller_shape(client, raw_key):
         "is_operator",
         "monthly_budget_usd",
         "spend_mtd",
+        "status",
     }
     assert body["is_operator"] is False
 

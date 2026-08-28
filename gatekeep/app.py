@@ -43,6 +43,7 @@ from gatekeep.api.anthropic_translation import (
     result_to_messages,
     reverse_finish_reason,
 )
+from gatekeep.api.auth import auth_router
 from gatekeep.api.dashboard import router as dashboard_router
 from gatekeep.api.errors import (
     anthropic_error,
@@ -217,6 +218,7 @@ app = FastAPI(title="gatekeep", lifespan=_lifespan)
 # FastAPI dependency (auth, rate limit, budget) runs.
 app.add_middleware(LatencyMiddleware)
 app.include_router(dashboard_router)
+app.include_router(auth_router)
 
 _DASHBOARD_DIST = pathlib.Path(__file__).resolve().parent.parent / "dashboard" / "dist"
 

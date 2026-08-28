@@ -1,20 +1,31 @@
-import type { Identity } from "../api/identityStore";
-
 export type TabKey = "analytics" | "management" | "prompts";
 
 interface HeaderProps {
   activeTab: TabKey;
   onTabChange: (tab: TabKey) => void;
-  /** The identity this tab is running as, shown in the indicator. */
-  identity: Identity;
-  /** Logs this tab out, returning it to the identity picker. */
+  /** The logged-in account's display name, shown in the indicator. */
+  accountName: string;
+  /** Whether the logged-in account is an operator, shown as a badge. */
+  isOperator: boolean;
+  /** Logs the session out, returning to the login page. */
   onLogout: () => void;
 }
 
-/** Dashboard top bar: app title, an Analytics / Accounts & Keys tab control,
- * the active identity indicator, and a Log out button that returns this tab
- * to the identity picker. */
-export default function Header({ activeTab, onTabChange, identity, onLogout }: HeaderProps) {
+/**
+ * Dashboard top bar: app title, an Analytics / Accounts & Keys / Prompts tab
+ * control (Prompts hidden for non-operators), the logged-in account
+ * indicator, and a Log out button that ends the session and returns to the
+ * login page.
+ *
+ * @param props - See {@link HeaderProps}.
+ */
+export default function Header({
+  activeTab,
+  onTabChange,
+  accountName,
+  isOperator,
+  onLogout,
+}: HeaderProps) {
   const tabClass = (tab: TabKey) =>
     `rounded px-3 py-1.5 text-sm ${
       activeTab === tab
@@ -33,15 +44,17 @@ export default function Header({ activeTab, onTabChange, identity, onLogout }: H
           <button className={tabClass("management")} onClick={() => onTabChange("management")}>
             Accounts &amp; Keys
           </button>
-          <button className={tabClass("prompts")} onClick={() => onTabChange("prompts")}>
-            Prompts
-          </button>
+          {isOperator && (
+            <button className={tabClass("prompts")} onClick={() => onTabChange("prompts")}>
+              Prompts
+            </button>
+          )}
         </nav>
       </div>
       <div className="flex items-center gap-3">
         <span className="flex items-center gap-2 text-sm text-slate-300">
-          {identity.accountName}
-          {identity.isOperator && (
+          {accountName}
+          {isOperator && (
             <span className="rounded bg-indigo-600 px-1.5 py-0.5 text-xs text-white">
               operator
             </span>
@@ -49,7 +62,7 @@ export default function Header({ activeTab, onTabChange, identity, onLogout }: H
         </span>
         <button
           onClick={onLogout}
-          title="Log out of this tab"
+          title="Log out"
           className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
         >
           Log out

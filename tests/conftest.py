@@ -33,7 +33,21 @@ def _point_settings_at_test_database() -> None:
     os.environ["DATABASE_URL"] = config.test_database_url
 
 
+def _force_console_email_backend() -> None:
+    """Force EMAIL_BACKEND=console regardless of .env's real SMTP settings.
+
+    A developer's .env may point EMAIL_BACKEND at "smtp" with real
+    credentials for local manual testing. Without this override, the test
+    suite would inherit that and attempt to send live email (to fake
+    addresses like "e@x.com") through the developer's real mail provider on
+    every run. Tests that read a verification/reset link also rely on the
+    console backend logging it, not sending it.
+    """
+    os.environ["EMAIL_BACKEND"] = "console"
+
+
 _point_settings_at_test_database()
+_force_console_email_backend()
 
 import asyncpg  # noqa: E402
 import httpx  # noqa: E402

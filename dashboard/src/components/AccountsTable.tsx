@@ -8,6 +8,10 @@ import CreateAccountModal from "./CreateAccountModal";
 
 interface AccountsTableProps {
   selfAccountId: number;
+  /** The caller's own account status, carried through to the `MeResponse`
+   * pushed by `onMeChanged` (this table's data has no status field of its
+   * own to refresh it from). */
+  selfStatus: string;
   onMeChanged: (me: MeResponse) => void;
   onUnauthorized: () => void;
 }
@@ -16,6 +20,7 @@ interface AccountsTableProps {
  * operator flag) with a Create button and a per-row Manage action. */
 export default function AccountsTable({
   selfAccountId,
+  selfStatus,
   onMeChanged,
   onUnauthorized,
 }: AccountsTableProps) {
@@ -42,12 +47,13 @@ export default function AccountsTable({
           is_operator: self.is_operator,
           monthly_budget_usd: self.monthly_budget_usd,
           spend_mtd: self.spend_mtd,
+          status: selfStatus,
         });
       }
     } catch (err) {
       handleError(err, "Failed to load accounts");
     }
-  }, [setError, handleError, onMeChanged, selfAccountId]);
+  }, [setError, handleError, onMeChanged, selfAccountId, selfStatus]);
 
   useEffect(() => {
     load();

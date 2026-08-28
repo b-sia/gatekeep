@@ -14,6 +14,7 @@ async def create_account(
     name: str | None = None,
     monthly_budget_usd: float | None = None,
     is_operator: bool = False,
+    status: str = "approved",
 ) -> Account:
     """Create and flush an Account for tests, returning it with its id populated.
 
@@ -27,13 +28,19 @@ async def create_account(
         name: Display name for the account, or None to auto-generate a unique one.
         monthly_budget_usd: Shared monthly spend cap, or None for unlimited.
         is_operator: Whether the account gets the fleet-wide dashboard view.
+        status: The account lifecycle status (defaults to "approved").
 
     Returns:
         The persisted Account with its `id` populated.
     """
     if name is None:
         name = f"acct-{next(_account_name_counter)}"
-    account = Account(name=name, monthly_budget_usd=monthly_budget_usd, is_operator=is_operator)
+    account = Account(
+        name=name,
+        monthly_budget_usd=monthly_budget_usd,
+        is_operator=is_operator,
+        status=status,
+    )
     session.add(account)
     await session.flush()
     return account

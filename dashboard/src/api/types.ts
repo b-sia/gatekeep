@@ -188,6 +188,7 @@ export interface MeResponse {
   is_operator: boolean;
   monthly_budget_usd: number | null;
   spend_mtd: number;
+  status: string;
 }
 
 /** One API key as shown in the management UI (no secret material). */
@@ -365,4 +366,17 @@ export interface JobStatusResponse {
 /** The id of a background job the caller should poll. */
 export interface JobCreatedResponse {
   job_id: string;
+}
+
+/** One self-serve signup request awaiting operator approval. */
+export interface PendingAccountOut {
+  account_id: number;
+  name: string;
+  email: string;
+  created_at: string;
+}
+
+/** All pending signup requests, for the operator approval panel. */
+export interface PendingAccountsResponse {
+  accounts: PendingAccountOut[];
 }

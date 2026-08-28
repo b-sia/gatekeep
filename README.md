@@ -40,6 +40,40 @@ Your App -> Gatekeep (auth + routing) -> Provider (Claude, OpenAI, Google, Ollam
 The gateway now listens on `http://localhost:8100`, with the dashboard at
 `http://localhost:8100/dashboard`.
 
+## Getting started (self-serve signup)
+
+The gateway supports user self-service signup for end users:
+
+1. **Sign up**: Visit the app at `http://localhost:5173` and click Sign up. Enter
+   an email and password.
+
+2. **Verify email**: An email is sent to confirm the address. In development with
+   the default `EMAIL_BACKEND=console`, the verification link is logged to the
+   server console - copy and visit that link in your browser to confirm.
+
+3. **Await operator approval**: The account is created with status `PENDING`. An
+   operator must approve it before the user can log in. For development, create
+   the first operator account by bootstrapping an operator key, passing `--email`
+   so the operator also gets a dashboard login (prompted for a password
+   interactively):
+   ```bash
+   bash scripts/init-test-key.sh --operator --email you@example.com
+   ```
+   Without `--email`, the operator account only gets an API key - it can
+   administer the fleet via the API, but there is no way to open the dashboard
+   UI at all (the paste-a-key login was retired in favor of email/password
+   sessions). With `--email`, log in to the dashboard
+   (`http://localhost:8100/dashboard`) with that address and the password you
+   set, and navigate to the "Pending Requests" panel to approve or reject
+   pending signup requests.
+
+4. **Log in and create an API key**: Once approved, the user can log in with their
+   email and password. Navigate to the Keys tab and create an API key to call the
+   gateway's endpoints.
+
+Email configuration (SMTP, sender address, link expiry) is controlled by
+environment variables - see `.env.example` for the full list.
+
 ## Usage
 
 Send an OpenAI-shaped chat completion request:

@@ -5,17 +5,21 @@ from functools import lru_cache
 from typing import Literal
 
 from anthropic import AsyncAnthropic
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import Integer, case, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gatekeep.accounts import account_service
+from gatekeep.accounts import account_service, auth_service
+from gatekeep.accounts.sessions import resolve_session_account
+from gatekeep.api.auth import SESSION_COOKIE, require_csrf
 from gatekeep.audit.audit import record_audit_event
 from gatekeep.config import get_settings
-from gatekeep.middleware.auth import require_api_key
+from gatekeep.email import get_email_backend
+from gatekeep.email.messages import build_approval_email
+from gatekeep.middleware.auth import _enforce_pre_auth_rate_limit, require_api_key
 from gatekeep.middleware.ratelimit import get_redis
 from gatekeep.prompts import promptjobs
 from gatekeep.prompts.curation import curate_cases, list_unreviewed, review_case
@@ -65,35 +69,50 @@ _FAILED_OUTCOMES = ("provider_error", "client_disconnect")
 
 
 async def _require_caller_account(
-    caller: ApiKey = Depends(require_api_key),
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> Account:
-    """Resolve the authenticated key's Account, for account-scoped dashboards.
+    """Resolve the caller's Account from a session cookie, else an API key.
 
-    `account_id` is always derived server-side from the authenticated key,
-    never accepted as a client-supplied parameter.
-
-    Raises:
-        HTTPException: 401 if the key's `account_id` no longer resolves to an
-            Account (e.g. a future account-delete path leaves an orphaned
-            key). Without this, callers below (`require_operator`,
-            `_account_scope`, `require_account_access`) would immediately hit
-            `caller_account.is_operator`/`.id` on `None` and raise an
-            unhandled `AttributeError` -> 500.
+    Session cookie (human dashboard login) is tried first; if absent or
+    invalid, falls back to API-key auth (operators, CLI, programmatic
+    callers). Raises 401 if neither credential resolves.
     """
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        account = await resolve_session_account(session, token)
+        if account is not None:
+            return account
+    # `require_api_key` is called directly (not via `Depends`) below, so its
+    # own `Depends(_enforce_pre_auth_rate_limit)` is never resolved by
+    # FastAPI's DI solver - only `Depends` defaults trigger that. Invoke the
+    # pre-auth limiter explicitly to keep this fallback path metered.
+    await _enforce_pre_auth_rate_limit(request)
+    caller = await require_api_key(
+        authorization=request.headers.get("authorization"),
+        x_api_key=request.headers.get("x-api-key"),
+        session=session,
+    )
     account = await session.get(Account, caller.account_id)
     if account is None:
         raise HTTPException(
             status_code=401,
-            detail={
-                "error": {
-                    "message": "API key's account no longer exists.",
-                    "type": "authentication_error",
-                    "code": None,
-                }
-            },
+            detail=_error_body("API key's account no longer exists.", "authentication_error"),
         )
     return account
+
+
+async def require_approved(
+    caller_account: Account = Depends(_require_caller_account),
+) -> Account:
+    """Require the caller's account to be approved (blocks pending/rejected/disabled).
+
+    Raises:
+        HTTPException: 403 if the account status is not "approved".
+    """
+    if caller_account.status != "approved":
+        raise _forbidden("Your account is not approved yet.")
+    return caller_account
 
 
 def _account_scope(caller_account: Account) -> list:
@@ -1419,6 +1438,7 @@ async def create_prompt_route(
     body: PromptCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Create a prompt with an initial active version 1. Operator only.
 
@@ -1455,6 +1475,7 @@ async def add_prompt_version_route(
     body: PromptVersionCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Append a new inactive version to an existing prompt. Operator only.
 
@@ -1487,6 +1508,7 @@ async def rollback_prompt_route(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(_get_redis),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> PromptMutationResponse:
     """Revert a prompt to its previously-active version. Operator only.
 
@@ -1551,6 +1573,7 @@ async def set_candidate_route(
     body: CandidateSetRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CandidateResponse:
     """Configure or adjust a prompt's A/B candidate version + traffic split.
 
@@ -1583,6 +1606,7 @@ async def clear_candidate_route(
     name: str,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CandidateResponse:
     """Clear a prompt's A/B candidate (100% traffic back to active). Operator only.
 
@@ -1717,6 +1741,7 @@ async def create_suite_route(
     body: SuiteCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> SuiteOut:
     """Create an eval suite for a prompt (one per prompt). Operator only.
 
@@ -1759,6 +1784,7 @@ async def add_case_route(
     body: CaseCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> EvalCaseOut:
     """Add a reviewed manual eval case to a prompt's suite. Operator only.
 
@@ -1802,6 +1828,7 @@ async def curation_mine_route(
     session: AsyncSession = Depends(get_session),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CurationResponse:
     """Mine recent request samples for a prompt into unreviewed curated cases.
 
@@ -1848,6 +1875,7 @@ async def curation_review_route(
     body: CurationReviewRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> CurationReviewResponse:
     """Approve (keep, mark reviewed) or reject (delete) one curated case.
 
@@ -1893,6 +1921,7 @@ class MeResponse(BaseModel):
     is_operator: bool
     monthly_budget_usd: float | None
     spend_mtd: float
+    status: str
 
 
 @router.get("/me", response_model=MeResponse)
@@ -1920,6 +1949,7 @@ async def get_me(
         is_operator=caller_account.is_operator,
         monthly_budget_usd=caller_account.monthly_budget_usd,
         spend_mtd=spend,
+        status=caller_account.status,
     )
 
 
@@ -1979,13 +2009,15 @@ async def mint_account_key(
     account_id: int,
     body: KeyCreateRequest,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_approved),
+    _csrf: None = Depends(require_csrf),
 ) -> KeyCreatedResponse:
     """Mint a key for an account, returning the raw key exactly once.
 
-    Records a `key.mint` audit event. Raises 403 (wrong account), 404
-    (unknown account), 409 (duplicate name).
+    Records a `key.mint` audit event. Raises 403 (wrong account, unapproved
+    caller, or failed CSRF check), 404 (unknown account), 409 (duplicate name).
     """
+    _authorize_account_access(caller_account, account_id)
     try:
         key, raw = await account_service.create_key(session, account_id, body.name)
     except account_service.AccountNotFoundError as exc:
@@ -2012,11 +2044,14 @@ async def revoke_account_key(
     account_id: int,
     key_id: int,
     session: AsyncSession = Depends(get_session),
-    caller_account: Account = Depends(require_account_access),
+    caller_account: Account = Depends(require_approved),
+    _csrf: None = Depends(require_csrf),
 ) -> KeyOut:
     """Soft-revoke a key on an account. Records a `key.revoke` audit event.
-    Raises 403 (wrong account) or 404 (no such key on the account).
+    Raises 403 (wrong account, unapproved caller, or failed CSRF check) or
+    404 (no such key on the account).
     """
+    _authorize_account_access(caller_account, account_id)
     try:
         key = await account_service.revoke_key(session, account_id, key_id)
     except account_service.KeyNotFoundError as exc:
@@ -2061,6 +2096,7 @@ class AccountOut(BaseModel):
     is_operator: bool
     monthly_budget_usd: float | None
     created_at: datetime
+    status: str
 
 
 class AccountCreateRequest(BaseModel):
@@ -2094,6 +2130,7 @@ def _account_out(account: Account) -> AccountOut:
         is_operator=account.is_operator,
         monthly_budget_usd=account.monthly_budget_usd,
         created_at=account.created_at,
+        status=account.status,
     )
 
 
@@ -2122,11 +2159,119 @@ async def list_accounts(
     )
 
 
+class PendingAccountOut(BaseModel):
+    """One account awaiting operator approval, for the pending-signups list."""
+
+    account_id: int
+    name: str
+    email: str
+    created_at: datetime
+
+
+class PendingListResponse(BaseModel):
+    """All accounts awaiting operator approval."""
+
+    accounts: list[PendingAccountOut]
+
+
+class ApproveRequest(BaseModel):
+    """Request body for approving a pending account."""
+
+    monthly_budget_usd: float | None = None
+
+
+@router.get("/accounts/pending", response_model=PendingListResponse)
+async def list_pending(
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+) -> PendingListResponse:
+    """List accounts awaiting approval (operator only).
+
+    Returns:
+        A `PendingListResponse` with each pending account's id, name, email,
+        and signup timestamp.
+    """
+    from gatekeep.storage.models import AccountCredential
+
+    accounts = await auth_service.list_pending_accounts(session)
+    account_ids = [a.id for a in accounts]
+    emails_by_account_id: dict[int, str] = {}
+    if account_ids:
+        creds = (
+            await session.execute(
+                select(AccountCredential).where(AccountCredential.account_id.in_(account_ids))
+            )
+        ).scalars()
+        emails_by_account_id = {c.account_id: c.email for c in creds}
+    out = [
+        PendingAccountOut(
+            account_id=a.id,
+            name=a.name,
+            email=emails_by_account_id.get(a.id, ""),
+            created_at=a.created_at,
+        )
+        for a in accounts
+    ]
+    return PendingListResponse(accounts=out)
+
+
+@router.post("/accounts/{account_id}/approve", response_model=AccountOut)
+async def approve(
+    account_id: int,
+    body: ApproveRequest,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
+) -> AccountOut:
+    """Approve a pending account, set its budget, and email the user (operator only).
+
+    Idempotent: approving an already-approved account (e.g. a duplicate
+    request from a double-click) succeeds without sending a second email.
+
+    Raises:
+        HTTPException: 404 if the account does not exist, 409 if the
+            account's signup transaction hasn't committed its credential row
+            yet (retry shortly).
+    """
+    try:
+        account, email, newly_approved = await auth_service.approve_account(
+            session, account_id=account_id, monthly_budget_usd=body.monthly_budget_usd
+        )
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    except auth_service.CredentialsNotReadyError as exc:
+        raise HTTPException(status_code=409, detail=_error_body(str(exc))) from exc
+    if newly_approved:
+        subject, text = build_approval_email(get_settings().public_base_url)
+        await get_email_backend().send(email, subject, text)
+    return _account_out(account)
+
+
+@router.post("/accounts/{account_id}/reject", response_model=AccountOut)
+async def reject(
+    account_id: int,
+    session: AsyncSession = Depends(get_session),
+    _operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
+) -> AccountOut:
+    """Reject a pending account (operator only).
+
+    Raises:
+        HTTPException: 404 if the account does not exist.
+    """
+    try:
+        account = await auth_service.reject_account(session, account_id=account_id)
+    except account_service.AccountNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_error_body(str(exc))) from exc
+    return _account_out(account)
+
+
 @router.post("/accounts", response_model=AccountOut)
 async def create_account_route(
     body: AccountCreateRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> AccountOut:
     """Create an account. Operator only. Records an `account.create` audit
     event. 409 on name collision, 422 on bad name/budget.
@@ -2167,6 +2312,7 @@ async def patch_account_route(
     body: AccountPatchRequest,
     session: AsyncSession = Depends(get_session),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> AccountOut:
     """Rename, set/clear budget, and/or toggle operator on an account.
 
@@ -2290,6 +2436,7 @@ async def eval_run_route(
     redis: Redis = Depends(_get_redis),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> JobCreatedResponse:
     """Kick off an on-demand eval run as a background job. Operator only.
 
@@ -2332,6 +2479,7 @@ async def promote_route(
     redis: Redis = Depends(_get_redis),
     provider: AnthropicProvider = Depends(_get_eval_provider),
     operator: Account = Depends(require_operator),
+    _csrf: None = Depends(require_csrf),
 ) -> JobCreatedResponse:
     """Kick off an eval-gated promotion as a background job. Operator only.
 

@@ -1,63 +1,59 @@
 import { useCallback, useEffect, useState } from "react";
-import IdentityPicker from "./components/IdentityPicker";
 import Header, { type TabKey } from "./components/Header";
 import DashboardPage from "./pages/DashboardPage";
 import ManagementPage from "./pages/ManagementPage";
 import PromptsPage from "./pages/PromptsPage";
-import { getMe } from "./api/client";
-import {
-  clearActiveIdentity,
-  getActiveIdentity,
-  subscribeToRosterChanges,
-  type Identity,
-} from "./api/identityStore";
+import LoginPage from "./pages/LoginPage";
+import SignupPage from "./pages/SignupPage";
+import VerifyEmailPage from "./pages/VerifyEmailPage";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
+import ResendVerificationPage from "./pages/ResendVerificationPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
+import PendingApprovalPage from "./pages/PendingApprovalPage";
+import { getMe, UnauthorizedError } from "./api/client";
+import { logout } from "./api/auth";
 import { useApiErrorHandler } from "./hooks/useApiErrorHandler";
 import type { MeResponse } from "./api/types";
 
+/** Which unauthenticated screen to show when there is no valid session and
+ * the current URL doesn't match a dedicated auth route. */
+type AuthView = "login" | "signup";
+
+/** SPA base path (e.g. "/dashboard/"), from vite.config.ts `base` - redirects
+ * must be built from this rather than hardcoded absolute paths, since the
+ * dashboard isn't served from the domain root. */
+const BASE_URL = import.meta.env.BASE_URL;
+
 /**
- * Root component: gates the dashboard behind this tab's active identity, owns
- * the active tab and the caller's own account context (GET /me), and renders
- * the shared header plus the active tab's page.
+ * Root component: gates the whole app on the caller's login session.
+ *
+ * On mount, loads the caller's account via `getMe()` (cookie-based). A 401
+ * means there is no valid session, so an unauthenticated view is shown -
+ * either a route-specific page (verify email / forgot password / reset
+ * password / resend verification, chosen from `window.location.pathname`)
+ * or the login/signup toggle. Once a session resolves, a `status === "pending"` account sees
+ * `PendingApprovalPage`, a `status === "approved"` account sees the regular
+ * dashboard (`Header` plus the active tab's page), and any other status
+ * (e.g. "rejected" or "disabled") is treated as logged-out, the same as a
+ * 401 from `getMe()`.
  */
 export default function App() {
-  const [activeIdentity, setActiveIdentity] = useState<Identity | null>(() =>
-    getActiveIdentity(),
-  );
-  const [tab, setTab] = useState<TabKey>("analytics");
   const [me, setMe] = useState<MeResponse | null>(null);
+  const [authView, setAuthView] = useState<AuthView>("login");
+  const [tab, setTab] = useState<TabKey>("analytics");
+  const [loading, setLoading] = useState(true);
 
-  /** Drops this tab back to the picker. `client.ts` has already marked the
-   * rejected identity invalid on a 401; here we just clear this tab's
-   * pointer and forget the loaded account. */
+  /** Drops the app back to the login page. Called on a 401 from any
+   * dashboard API call, and after an explicit log out. */
   const handleUnauthorized = useCallback(() => {
-    clearActiveIdentity();
     setMe(null);
-    setActiveIdentity(null);
-  }, []);
-
-  /** Re-reads the active identity after the picker sets one for this tab. */
-  const handleIdentityActivated = useCallback(() => {
-    setActiveIdentity(getActiveIdentity());
-  }, []);
-
-  // Reconcile this tab's active identity whenever another tab writes to the
-  // shared roster (forgets it, invalidates it, or refreshes its account
-  // label via re-auth), so the header and dashboard don't keep showing a
-  // stale snapshot. If the active identity no longer resolves, this drops
-  // the tab back to the picker the same way a 401 does.
-  useEffect(() => {
-    return subscribeToRosterChanges(() => {
-      const current = getActiveIdentity();
-      if (!current) {
-        clearActiveIdentity();
-        setMe(null);
-      }
-      setActiveIdentity(current);
-    });
+    setAuthView("login");
   }, []);
 
   const { error: meError, setError: setMeError, handleError } = useApiErrorHandler(handleUnauthorized);
 
+  /** Loads (or reloads) the caller's account context via `getMe()`. On a
+   * 401, drops the app back to the login page instead of setting an error. */
   const loadMe = useCallback(() => {
     setMeError(null);
     getMe()
@@ -66,12 +62,60 @@ export default function App() {
   }, [setMeError, handleError]);
 
   useEffect(() => {
-    if (!activeIdentity) return;
-    loadMe();
-  }, [activeIdentity, loadMe]);
+    getMe()
+      .then(setMe)
+      .catch((err) => {
+        if (!(err instanceof UnauthorizedError)) {
+          handleError(err, "Failed to load account");
+        }
+      })
+      .finally(() => setLoading(false));
+    // Intentionally run once on mount only; `loadMe` is used for later
+    // reloads (e.g. after a page changes `me`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  if (!activeIdentity) {
-    return <IdentityPicker onIdentityActivated={handleIdentityActivated} />;
+  /**
+   * Logs the current session out and returns to the login page.
+   */
+  const handleLogout = useCallback(() => {
+    logout().finally(handleUnauthorized);
+  }, [handleUnauthorized]);
+
+  if (loading) {
+    return null;
+  }
+
+  if (!me || (me.status !== "pending" && me.status !== "approved")) {
+    const path = window.location.pathname;
+    if (path.endsWith("/verify-email")) {
+      return <VerifyEmailPage onGoToLogin={() => (window.location.href = BASE_URL)} />;
+    }
+    if (path.endsWith("/forgot-password")) {
+      return <ForgotPasswordPage onBackToLogin={() => (window.location.href = BASE_URL)} />;
+    }
+    if (path.endsWith("/resend-verification")) {
+      return <ResendVerificationPage onBackToLogin={() => (window.location.href = BASE_URL)} />;
+    }
+    if (path.endsWith("/reset-password")) {
+      return <ResetPasswordPage onGoToLogin={() => (window.location.href = BASE_URL)} />;
+    }
+
+    if (authView === "signup") {
+      return <SignupPage onBackToLogin={() => setAuthView("login")} />;
+    }
+    return (
+      <LoginPage
+        onLoggedIn={() => loadMe()}
+        onGoToSignup={() => setAuthView("signup")}
+        onGoToForgotPassword={() => (window.location.href = `${BASE_URL}forgot-password`)}
+        onGoToResendVerification={() => (window.location.href = `${BASE_URL}resend-verification`)}
+      />
+    );
+  }
+
+  if (me.status === "pending") {
+    return <PendingApprovalPage />;
   }
 
   return (
@@ -79,8 +123,9 @@ export default function App() {
       <Header
         activeTab={tab}
         onTabChange={setTab}
-        identity={activeIdentity}
-        onLogout={handleUnauthorized}
+        accountName={me.name}
+        isOperator={me.is_operator}
+        onLogout={handleLogout}
       />
       {tab === "analytics" ? (
         <DashboardPage

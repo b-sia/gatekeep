@@ -35,6 +35,14 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       OLLAMA_HOST: http://ollama:11434
       DEFAULT_MODEL: ${DEFAULT_MODEL:-llama3.2}
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-console}
+      SMTP_HOST: ${SMTP_HOST:-localhost}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      EMAIL_FROM: ${EMAIL_FROM:-gatekeep@localhost}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5173}
     ports:
       - "8100:8000"
     depends_on:

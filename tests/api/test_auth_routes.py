@@ -1,0 +1,171 @@
+import httpx
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport
+
+from gatekeep.app import app
+from gatekeep.config import get_settings
+
+BASE = "/dashboard/api/auth"
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_signup_then_login_flow_sets_session_cookie(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        r = await client.post(f"{BASE}/signup", json={"email": "e@x.com", "password": "pw123456"})
+    assert r.status_code == 202
+    # console email backend logged the verification link; extract the token
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    r = await client.post(f"{BASE}/verify-email", json={"token": token})
+    assert r.status_code == 200
+    r = await client.post(f"{BASE}/login", json={"email": "e@x.com", "password": "pw123456"})
+    assert r.status_code == 200 and r.json()["status"] == "pending"
+    assert "gk_session" in r.cookies
+
+
+@pytest.mark.asyncio
+async def test_signup_rejects_password_below_minimum_length(client):
+    r = await client.post(f"{BASE}/signup", json={"email": "weak@x.com", "password": "short1"})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_signup_rejects_empty_password(client):
+    r = await client.post(f"{BASE}/signup", json={"email": "empty@x.com", "password": ""})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_signup_duplicate_returns_409_with_message(client):
+    await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})
+    r = await client.post(f"{BASE}/signup", json={"email": "d@x.com", "password": "pw123456"})
+    assert r.status_code == 409
+    assert "already exists" in r.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_reissues_a_usable_token(client, caplog):
+    import logging
+
+    await client.post(f"{BASE}/signup", json={"email": "lost@x.com", "password": "pw123456"})
+    with caplog.at_level(logging.INFO):
+        r = await client.post(f"{BASE}/resend-verification", json={"email": "lost@x.com"})
+    assert r.status_code == 202
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    r = await client.post(f"{BASE}/verify-email", json={"token": token})
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_unknown_email_returns_202(client):
+    r = await client.post(f"{BASE}/resend-verification", json={"email": "nobody@x.com"})
+    assert r.status_code == 202  # no enumeration
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_omits_secure_flag_on_http_public_base_url(
+    client, caplog, monkeypatch
+):
+    """Issue #39 review finding 5: `secure=True` was hardcoded, so browsers
+    silently dropped the session/CSRF cookies on the documented plain-HTTP
+    docker-compose deployment (PUBLIC_BASE_URL defaults to
+    http://localhost:5173/dashboard). The Secure flag must track the
+    configured scheme instead.
+    """
+    import logging
+
+    monkeypatch.setattr(get_settings(), "public_base_url", "http://localhost:5173/dashboard")
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "http@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "http@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+    set_cookie_headers = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert len(set_cookie_headers) == 2
+    assert all("secure" not in h.lower() for h in set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_sets_secure_flag_on_https_public_base_url(
+    client, caplog, monkeypatch
+):
+    import logging
+
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://app.example.com/dashboard")
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "https@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "https@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+    set_cookie_headers = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert len(set_cookie_headers) == 2
+    assert all("secure" in h.lower() for h in set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_login_bad_password_returns_401(client):
+    r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_without_csrf_token_returns_403(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "lo@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "lo@x.com", "password": "pw123456"})
+    assert r.status_code == 200
+
+    r = await client.post(f"{BASE}/logout")
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logout_with_csrf_token_succeeds(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        await client.post(f"{BASE}/signup", json={"email": "lo2@x.com", "password": "pw123456"})
+    token = caplog.text.split("token=")[1].split()[0].strip()
+    await client.post(f"{BASE}/verify-email", json={"token": token})
+    r = await client.post(f"{BASE}/login", json={"email": "lo2@x.com", "password": "pw123456"})
+    csrf = r.json()["csrf_token"]
+
+    r = await client.post(f"{BASE}/logout", headers={"X-CSRF-Token": csrf})
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_login_is_pre_auth_rate_limited_per_ip(client, monkeypatch):
+    """Repeated calls to /login from one client eventually hit the per-IP
+    pre-auth token bucket and get a 429 - proving `_enforce_pre_auth_rate_limit`
+    actually runs on the auth routes (it doesn't run via `require_api_key`,
+    since these routes don't use that dependency)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_tokens_per_min", 2)
+    monkeypatch.setattr(settings, "pre_auth_rate_limit_refill_rate", 2 / 60)
+
+    statuses = []
+    for _ in range(5):
+        r = await client.post(f"{BASE}/login", json={"email": "no@x.com", "password": "bad"})
+        statuses.append(r.status_code)
+        if r.status_code == 429:
+            break
+    assert 429 in statuses
+    # Earlier, within-capacity calls still behave exactly like before (401,
+    # not some altered success/error shape).
+    assert statuses[0] == 401

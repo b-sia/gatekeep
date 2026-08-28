@@ -3,26 +3,43 @@ set -e
 
 # Helper script to mint a test API key through the service layer and print a
 # ready-to-use curl example.
-# Usage: bash scripts/init-test-key.sh [--operator] [account-name] [key-name]
+# Usage: bash scripts/init-test-key.sh [--operator] [--email <address>] [account-name] [key-name]
 #
 # Pass --operator to grant the account fleet-wide operator access. This is the
 # bootstrap path for the first operator on a fresh database - the dashboard's
 # prompt/eval/account routes require operator access and nothing in-product can
 # promote the very first account.
 #
+# Pass --email <address> to also set a dashboard login password (prompted
+# interactively). Without it the account has an API key but no dashboard
+# login - for --operator specifically, that means the operator can
+# administer the fleet via the API but can't open the dashboard UI at all,
+# since paste-a-key login was retired in favor of email/password sessions.
+#
 # Examples:
-#   bash scripts/init-test-key.sh                 # account 'test-account', key 'test-key'
+#   bash scripts/init-test-key.sh                                  # account 'test-account', key 'test-key'
 #   bash scripts/init-test-key.sh my-acct my-key
-#   bash scripts/init-test-key.sh --operator      # first operator, default names
+#   bash scripts/init-test-key.sh --operator                       # first operator, API-only
+#   bash scripts/init-test-key.sh --operator --email you@x.com     # first operator, with dashboard login
 
 OPERATOR_FLAG=""
+EMAIL_FLAG=""
 POSITIONAL=()
-for arg in "$@"; do
-    if [ "$arg" = "--operator" ]; then
-        OPERATOR_FLAG="--operator"
-    else
-        POSITIONAL+=("$arg")
-    fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --operator)
+            OPERATOR_FLAG="--operator"
+            shift
+            ;;
+        --email)
+            EMAIL_FLAG="--email $2"
+            shift 2
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
 done
 
 ACCOUNT_NAME="${POSITIONAL[0]:-test-account}"
@@ -53,7 +70,7 @@ echo "🔍 Applying migrations (if any)..."
 alembic upgrade head
 
 echo "🔑 Minting API key for account '$ACCOUNT_NAME'..."
-RAW_KEY=$(python3 scripts/create_key.py $OPERATOR_FLAG "$ACCOUNT_NAME" "$KEY_NAME")
+RAW_KEY=$(python3 scripts/create_key.py $OPERATOR_FLAG $EMAIL_FLAG "$ACCOUNT_NAME" "$KEY_NAME")
 
 # Get default model from environment, .env file, or fallback
 if [ -z "$DEFAULT_MODEL" ] && [ -f .env ]; then

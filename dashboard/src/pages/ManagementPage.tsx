@@ -1,6 +1,7 @@
 import AccountsTable from "../components/AccountsTable";
 import BudgetCard from "../components/BudgetCard";
 import KeyTable from "../components/KeyTable";
+import PendingRequestsPanel from "../components/PendingRequestsPanel";
 import type { MeResponse } from "../api/types";
 
 interface ManagementPageProps {
@@ -45,9 +46,11 @@ export default function ManagementPage({
     <div className="pb-8">
       <BudgetCard me={me} />
       <KeyTable accountId={me.account_id} onUnauthorized={onUnauthorized} />
+      {me.is_operator && <PendingRequestsPanel />}
       {me.is_operator && (
         <AccountsTable
           selfAccountId={me.account_id}
+          selfStatus={me.status}
           onMeChanged={onMeChanged}
           onUnauthorized={onUnauthorized}
         />
