@@ -52,11 +52,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gatekeep.accounts import account_service, auth_service
 from gatekeep.audit.audit import record_audit_event
 from gatekeep.caching.redis_token_bucket import get_redis
+from gatekeep.config import get_settings
 from gatekeep.prompts import prompts as prompt_service
 from gatekeep.prompts.curation import CURATED_JUDGE_CRITERIA
 from gatekeep.prompts.evals import add_case, create_suite, get_suite_for_prompt
@@ -99,6 +101,61 @@ _SEED_TABLES = (
     "api_keys",
     "accounts",
 )
+
+# Hostnames `--reset` is allowed to TRUNCATE against: the host-mapped port
+# this script normally runs through, and the docker-compose service name
+# (docker-compose.yml), for completeness if this is ever run from inside the
+# network. Deliberately not configurable from the CLI - a real need to reset
+# a differently-hosted *disposable* database is rare enough to just edit this
+# set, and that friction is the point.
+_SAFE_RESET_HOSTS = {"localhost", "127.0.0.1", "postgres"}
+
+
+def _assert_reset_target_is_safe(database_url: str) -> None:
+    """Refuse to proceed if `database_url` doesn't look like a local dev database.
+
+    `--reset` issues a `TRUNCATE ... CASCADE` across every seed-owned table,
+    including `audit_events` - irreversible, and with no confirmation from
+    the database's own history once it's done. The only realistic way this
+    runs against the wrong database is a misconfigured `DATABASE_URL` (a
+    stale `.env`, a copy-pasted export, the wrong shell profile), so this
+    checks the hostname before touching anything.
+
+    Raises:
+        SystemExit: if the URL's host isn't in `_SAFE_RESET_HOSTS`.
+    """
+    host = (make_url(database_url).host or "").lower()
+    if host not in _SAFE_RESET_HOSTS:
+        raise SystemExit(
+            f"Refusing --reset: DATABASE_URL host {host!r} is not a recognized local "
+            f"dev host ({', '.join(sorted(_SAFE_RESET_HOSTS))}).\n"
+            "This flag TRUNCATEs every seed-owned table, including the audit log. "
+            "If this really is a disposable local database, add its host to "
+            "_SAFE_RESET_HOSTS in scripts/seed_dev.py and re-run."
+        )
+
+
+def _confirm_reset(database_url: str) -> None:
+    """Prompt for the target database's name before truncating it.
+
+    A second, cheap guard on top of `_assert_reset_target_is_safe`: even a
+    `localhost` database can be someone's real work (a demo they're mid-way
+    through building, a bug they're reproducing). Typing the exact database
+    name back is enough friction to stop a reflexive `--reset` on the wrong
+    terminal tab without being annoying for the common case.
+
+    Raises:
+        SystemExit: if the typed input doesn't match the database name.
+    """
+    url = make_url(database_url)
+    target = f"{url.host}:{url.port}/{url.database}"
+    reply = input(
+        f"About to TRUNCATE seed-owned tables on '{target}'.\n"
+        f"Type the database name ({url.database!r}) to continue: "
+    )
+    if reply != url.database:
+        raise SystemExit("Aborted: confirmation did not match. No changes made.")
+
 
 # Concrete (provider, model) pairs that exist in the vendored pricing table,
 # so cost is computed from real per-token rates rather than guessed. Ollama is
@@ -960,13 +1017,21 @@ def _print_summary(seeded: list[SeededAccount], password: str, history_rows: int
     print("Signup UI:  http://localhost:5173\n")
 
 
-async def main(*, reset: bool, password: str) -> None:
+async def main(*, reset: bool, password: str, yes: bool) -> None:
     """Seed the database, optionally wiping seed-owned tables first.
 
     Args:
         reset: When True, TRUNCATE the seed-owned tables before populating.
         password: Shared dashboard-login password for seeded accounts.
+        yes: When True, skip the interactive reset confirmation (still
+            subject to the `_SAFE_RESET_HOSTS` hostname check).
     """
+    if reset:
+        database_url = get_settings().database_url
+        _assert_reset_target_is_safe(database_url)
+        if not yes:
+            _confirm_reset(database_url)
+
     async with SessionLocal() as session:
         if reset:
             print("🧨 Resetting seed-owned tables...")
@@ -1005,6 +1070,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="TRUNCATE seed-owned tables before populating (fresh rebuild)",
     )
     parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="skip the interactive --reset confirmation prompt (e.g. for scripted use)",
+    )
+    parser.add_argument(
         "--password",
         default=DEFAULT_PASSWORD,
         help=f"shared dashboard-login password (default: {DEFAULT_PASSWORD})",
@@ -1014,4 +1085,4 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
-    asyncio.run(main(reset=args.reset, password=args.password))
+    asyncio.run(main(reset=args.reset, password=args.password, yes=args.yes))

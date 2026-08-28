@@ -206,8 +206,9 @@ just seed-reset     # wipe seeded data and repopulate from scratch (e.g. after `
 development - demo accounts with dashboard logins (password `password123`) and API keys, a few
 prompts with version/eval history, and ~30 days of request traffic - so you don't have to hand-create
 it after every database reset. It's idempotent (safe to re-run); pass `--reset` (or use
-`just seed-reset`) to wipe and rebuild from scratch. Run `python scripts/seed_dev.py --help` for
-options.
+`just seed-reset`) to wipe and rebuild from scratch. `--reset` refuses to run against anything but a
+recognized local `DATABASE_URL` host and asks you to type the database name to confirm; pass `--yes`
+to skip the confirmation for scripted use. Run `python scripts/seed_dev.py --help` for options.
 
 ## Deployment
 
