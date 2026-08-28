@@ -198,7 +198,16 @@ just fmt            # ruff check --fix + format
 just init-key       # mint a test API key
 just init-operator you@example.com  # bootstrap an operator account with a dashboard login
 just migrate        # apply pending Alembic migrations
+just seed           # populate a fresh dev DB with demo accounts, prompts, and usage history
+just seed-reset     # wipe seeded data and repopulate from scratch (e.g. after `just down-clean`)
 ```
+
+`just seed` fills in everything the dashboard, account-management, and prompts tabs need for local
+development - demo accounts with dashboard logins (password `password123`) and API keys, a few
+prompts with version/eval history, and ~30 days of request traffic - so you don't have to hand-create
+it after every database reset. It's idempotent (safe to re-run); pass `--reset` (or use
+`just seed-reset`) to wipe and rebuild from scratch. Run `python scripts/seed_dev.py --help` for
+options.
 
 ## Deployment
 
@@ -238,7 +247,7 @@ migrations/         Alembic database migrations
 prompts/            versioned prompt templates and their eval fixtures
 dashboard/          React dashboard SPA, served at /dashboard
 demo/               example chat app showing gateway integration
-scripts/            setup helpers (init-test-key.sh, run-demo.sh)
+scripts/            setup helpers (init-test-key.sh, seed_dev.py, run-demo.sh)
 tests/              pytest suite, one file per module
 .github/workflows/  CI, including the prompt eval gate
 ```

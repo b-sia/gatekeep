@@ -70,6 +70,16 @@ init-key-email email:
 init-operator email:
     bash scripts/init-test-key.sh --operator --email {{email}}
 
+# --- Dev database seeding ---
+
+# Populate the dev DB with demo accounts, logins, keys, prompts, and history (idempotent; safe to re-run)
+seed:
+    python scripts/seed_dev.py
+
+# Wipe the seed-owned tables and repopulate from scratch (use after nuking the DB)
+seed-reset:
+    python scripts/seed_dev.py --reset
+
 # --- Testing & linting ---
 
 # Run the Python test suite (needs TEST_DATABASE_URL + up-deps running)
