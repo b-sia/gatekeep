@@ -58,6 +58,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import gatekeep.caching.redis_token_bucket as redis_token_bucket
 from gatekeep.accounts import account_service, auth_service
 from gatekeep.audit.audit import record_audit_event
 from gatekeep.caching.redis_token_bucket import get_redis
@@ -931,6 +932,12 @@ async def clear_budget_counters() -> int:
     seeded traffic. Deletes every `budget:spend:*` and `budget:alerted:*` key
     (dev Redis only); each re-seeds itself from the DB on the next read.
 
+    Resets the `redis_token_bucket` module's process-wide singleton after
+    closing it (the same pairing `tests/conftest.py` uses around its own
+    `aclose()`), so a later `get_redis()` call in this process - e.g. from
+    a REPL or test importing this module - builds a fresh connection instead
+    of reusing a closed one.
+
     Returns:
         The number of Redis keys deleted.
     """
@@ -941,6 +948,7 @@ async def clear_budget_counters() -> int:
             await redis.delete(key)
             deleted += 1
     await redis.aclose()
+    redis_token_bucket._redis = None
     return deleted
 
 
