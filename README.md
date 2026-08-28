@@ -180,6 +180,26 @@ pytest
 Prompt template changes are gated by CI rather than pytest - see
 [`prompts/README.md`](prompts/README.md).
 
+## Development commands
+
+The `justfile` collects the Docker, testing, linting, and migration commands above
+into short aliases. Install [`just`](https://github.com/casey/just), then run
+`just` with no arguments to list all recipes. Some of the more common ones:
+
+```bash
+just up             # start the full stack (gateway, postgres, redis, ollama, prometheus, grafana)
+just up-deps        # start only postgres + redis, for local pytest / dashboard dev
+just rebuild        # rebuild and restart the gateway after a backend code change
+just logs gateway   # tail logs for a service
+just test           # run the pytest suite
+just test-dashboard # run the dashboard test suite
+just lint           # ruff check + format check
+just fmt            # ruff check --fix + format
+just init-key       # mint a test API key
+just init-operator you@example.com  # bootstrap an operator account with a dashboard login
+just migrate        # apply pending Alembic migrations
+```
+
 ## Deployment
 
 The gateway ships as a container. `Dockerfile` is a two-stage build - Node builds
