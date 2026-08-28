@@ -50,7 +50,10 @@ import random
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,6 +136,22 @@ def _assert_reset_target_is_safe(database_url: str) -> None:
             "If this really is a disposable local database, add its host to "
             "_SAFE_RESET_HOSTS in scripts/seed_dev.py and re-run."
         )
+
+
+def _apply_migrations() -> None:
+    """Bring the schema up to date via Alembic before seeding.
+
+    Mirrors the `alembic upgrade head` step `init-test-key.sh` runs before
+    minting a key: a no-op if the schema is already current, but the thing
+    that makes `just seed` / `just seed-reset` work right after `just
+    down-clean` + `just up-deps`, where postgres starts with no schema at
+    all - without this, every insert below would fail on a bare "relation
+    does not exist" instead of a clear migration step.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(repo_root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(repo_root / "migrations"))
+    command.upgrade(cfg, "head")
 
 
 def _confirm_reset(database_url: str) -> None:
@@ -1031,6 +1050,9 @@ async def main(*, reset: bool, password: str, yes: bool) -> None:
         _assert_reset_target_is_safe(database_url)
         if not yes:
             _confirm_reset(database_url)
+
+    print("🔍 Applying migrations (if any)...")
+    _apply_migrations()
 
     async with SessionLocal() as session:
         if reset:
