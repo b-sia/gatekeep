@@ -46,9 +46,9 @@ class SmtpEmailBackend:
         msg = EmailMessage()
         msg["From"], msg["To"], msg["Subject"] = self._sender, to, subject
         msg.set_content(body)
-        async with aiosmtplib.SMTP(hostname=self._host, port=self._port) as smtp:
-            if self._use_tls:
-                await smtp.starttls()
+        async with aiosmtplib.SMTP(
+            hostname=self._host, port=self._port, start_tls=self._use_tls
+        ) as smtp:
             if self._user:
                 await smtp.login(self._user, self._password or "")
             await smtp.send_message(msg)
