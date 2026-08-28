@@ -1,3 +1,5 @@
+import { readCsrfCookie } from "./client";
+
 /** Auth API calls for signup, login, logout, and password reset. All requests
  *  carry cookies so the server-side session is established/read. */
 const BASE = "/dashboard/api/auth";
@@ -16,7 +18,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": readCsrfCookie() },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error((await res.json())?.error?.message ?? "Request failed");

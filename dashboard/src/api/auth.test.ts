@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { login, resendVerification } from "./auth";
+import { login, logout, resendVerification } from "./auth";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  document.cookie = "gk_csrf=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/";
+});
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => body } as Response;
@@ -18,6 +21,15 @@ describe("auth api", () => {
     const opts = fetchMock.mock.calls[0][1] as RequestInit;
     expect(opts.credentials).toBe("include");
     expect(opts.method).toBe("POST");
+  });
+
+  it("logout sends the gk_csrf cookie as X-CSRF-Token so the server's double-submit check passes", async () => {
+    document.cookie = "gk_csrf=abc123; path=/";
+    const fetchMock = vi.fn(async (..._args: unknown[]) => jsonResponse({ status: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await logout();
+    const opts = fetchMock.mock.calls[0][1] as RequestInit;
+    expect((opts.headers as Record<string, string>)["X-CSRF-Token"]).toBe("abc123");
   });
 
   it("resendVerification posts the email to /resend-verification", async () => {

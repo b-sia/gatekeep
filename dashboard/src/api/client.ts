@@ -57,7 +57,7 @@ async function errorMessage(response: Response, path: string): Promise<string> {
  *
  * @returns The cookie's value, or an empty string if it is not set.
  */
-function readCsrfCookie(): string {
+export function readCsrfCookie(): string {
   const match = document.cookie.match(/(?:^|;\s*)gk_csrf=([^;]*)/);
   return match ? decodeURIComponent(match[1]) : "";
 }
