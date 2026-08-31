@@ -606,7 +606,10 @@ async def chat_completions(
     except TranslationError as exc:
         return openai_error(400, str(exc), "invalid_request_error")
 
-    provider = get_provider(provider_name)
+    try:
+        provider = get_provider(provider_name)
+    except KeyError:
+        return openai_error(400, f"Unknown provider {provider_name!r}.", "invalid_request_error")
     model = payload["model"]
 
     routed_from = None
@@ -842,7 +845,10 @@ async def messages(
         )
 
     provider_name, payload = messages_to_payload(req, model_aliases=settings.model_aliases)
-    provider = get_provider(provider_name)
+    try:
+        provider = get_provider(provider_name)
+    except KeyError:
+        return anthropic_error(400, f"Unknown provider {provider_name!r}.", "invalid_request_error")
     model = payload["model"]
 
     routed_from = None

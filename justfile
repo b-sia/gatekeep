@@ -141,7 +141,7 @@ loadtest-bootstrap:
 # LatencyUser/EnforcementUser.
 loadtest scenario:
     locust -f loadtest/locustfile.py {{scenario}} --headless \
-        -u 400 -r 20 -t 5m --host http://localhost:8100 \
+        -u 400 -r 20 -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
         --csv loadtest/results/{{scenario}}
 
 # Tear down the load-test stack
