@@ -19,6 +19,16 @@ logger = logging.getLogger(__name__)
 # setting's Literal cannot drift apart.
 _MISS_OUTCOME = {"reject": "rejected", "ceiling": "ceiling", "alert_zero": "served_zero"}
 
+# Fixed per-1M-token USD price applied to both input and output tokens for
+# every `stub/*` model when `loadtest_stub_enabled` is true. Deliberately a
+# flat rate rather than a pricing-table entry - `stub` is never added to
+# BILLED_PROVIDERS (there are unboundedly many stub/* variants and the
+# exact-match table cannot wildcard them) - so a load-test scenario can
+# compute the exact request count at which a budget cap should trip. Nominal
+# value, not tied to any real provider's price; see
+# docs/superpowers/specs/2026-08-30-load-testing-harness-design.md §3.
+STUB_PRICE_PER_1M = 1.0
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate a token count for `text` using the ~4-characters-per-token
@@ -51,6 +61,13 @@ def calculate_cost(provider: str, model: str, prompt_tokens: int, completion_tok
     ``"<provider>/<model>"``). `provider`/`model` are exactly what
     `resolve_route` returns.
 
+    When `provider == "stub"` and `Settings.loadtest_stub_enabled` is true,
+    cost is `STUB_PRICE_PER_1M` per 1M tokens on both input and output,
+    checked before any pricing-table lookup - `stub` is deliberately never a
+    table entry (see routing.pricing.BILLED_PROVIDERS) and this branch is
+    unreachable when the flag is false, since `stub` is then not even a
+    registered provider (see gatekeep.app._build_providers).
+
     On a pricing miss the result depends on the provider and the configured
     `pricing_miss_policy`:
 
@@ -68,10 +85,14 @@ def calculate_cost(provider: str, model: str, prompt_tokens: int, completion_tok
     request so repeated `calculate_cost` calls for one request can't
     double-count.
     """
+    settings = get_settings()
+    if provider == "stub" and settings.loadtest_stub_enabled:
+        return (prompt_tokens / 1_000_000 * STUB_PRICE_PER_1M) + (
+            completion_tokens / 1_000_000 * STUB_PRICE_PER_1M
+        )
     price = get_pricing_table().lookup(provider, model)
     if price is not None:
         return price.cost(prompt_tokens, completion_tokens)
-    settings = get_settings()
     if provider in BILLED_PROVIDERS and settings.pricing_miss_policy == "ceiling":
         ceiling = settings.pricing_ceiling_per_1m
         return (prompt_tokens / 1_000_000 * ceiling) + (completion_tokens / 1_000_000 * ceiling)
