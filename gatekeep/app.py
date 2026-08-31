@@ -65,7 +65,7 @@ from gatekeep.api.translation import (
 )
 from gatekeep.caching.embeddings import embed_text_async
 from gatekeep.caching.embeddings import warm as warm_embedding_model
-from gatekeep.config import get_settings
+from gatekeep.config import Settings, get_settings
 from gatekeep.middleware.budget import require_budget, run_budget_reconciliation_loop
 from gatekeep.middleware.cache_exact import (
     get_cached_response,
@@ -103,6 +103,7 @@ from gatekeep.providers.base import StreamEnd, TextDelta
 from gatekeep.providers.google import GoogleProvider
 from gatekeep.providers.ollama import OllamaProvider
 from gatekeep.providers.openai import OpenAIProvider
+from gatekeep.providers.stub import StubProvider
 from gatekeep.routing.pricing import get_pricing_table
 from gatekeep.routing.routing import select_model
 from gatekeep.storage.db import SessionLocal, get_session
@@ -270,18 +271,38 @@ async def serve_dashboard(path: str = "") -> FileResponse:
 
 
 _settings = get_settings()
-_GatewayProvider = AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider
+_GatewayProvider = (
+    AnthropicProvider | OllamaProvider | OpenAIProvider | GoogleProvider | StubProvider
+)
 
-_providers: dict[str, _GatewayProvider] = {
-    "anthropic": AnthropicProvider(AsyncAnthropic(api_key=_settings.anthropic_api_key)),
-    "ollama": OllamaProvider(ollama.AsyncClient(host=_settings.ollama_host)),
-    # api_key falls back to a placeholder string (never None) so the SDK
-    # client doesn't raise at import time when the key is unset - failures
-    # surface as an upstream error on the first actual request instead, via
-    # map_provider_error. See Settings.openai_api_key/google_api_key.
-    "openai": OpenAIProvider(AsyncOpenAI(api_key=_settings.openai_api_key or "unset")),
-    "google": GoogleProvider(genai.Client(api_key=_settings.google_api_key or "unset")),
-}
+
+def _build_providers(settings: Settings) -> dict[str, _GatewayProvider]:
+    """Build the provider registry for one process.
+
+    The stub provider (gatekeep/providers/stub.py) is registered under
+    "stub" only when `settings.loadtest_stub_enabled` is true. When false, a
+    `stub/...` request's `get_provider("stub")` call misses with a
+    KeyError - the stub is inert in production regardless of the `stub/`
+    routing prefix `resolve_route` always understands. See
+    docs/superpowers/specs/2026-08-30-load-testing-harness-design.md §2.
+    """
+    providers: dict[str, _GatewayProvider] = {
+        "anthropic": AnthropicProvider(AsyncAnthropic(api_key=settings.anthropic_api_key)),
+        "ollama": OllamaProvider(ollama.AsyncClient(host=settings.ollama_host)),
+        # api_key falls back to a placeholder string (never None) so the SDK
+        # client doesn't raise at import time when the key is unset -
+        # failures surface as an upstream error on the first actual request
+        # instead, via map_provider_error. See
+        # Settings.openai_api_key/google_api_key.
+        "openai": OpenAIProvider(AsyncOpenAI(api_key=settings.openai_api_key or "unset")),
+        "google": GoogleProvider(genai.Client(api_key=settings.google_api_key or "unset")),
+    }
+    if settings.loadtest_stub_enabled:
+        providers["stub"] = StubProvider()
+    return providers
+
+
+_providers: dict[str, _GatewayProvider] = _build_providers(_settings)
 
 
 def get_provider(name: str) -> _GatewayProvider:
