@@ -46,6 +46,7 @@ def _req(**kw):
         # "gpt-4o" alone aliases to Claude, but "openai/gpt-4o" stays on OpenAI.
         ("openai/gpt-4o", ("openai", "gpt-4o")),
         ("google/gemini-flash-latest", ("google", "gemini-flash-latest")),
+        ("stub/lat50-out200", ("stub", "lat50-out200")),
     ],
 )
 def test_resolve_route(model, expected):

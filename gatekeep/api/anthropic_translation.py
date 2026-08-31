@@ -41,7 +41,7 @@ def new_message_id() -> str:
 
 def messages_to_payload(
     req: MessagesRequest, *, model_aliases: dict[str, str]
-) -> tuple[Literal["anthropic", "ollama", "openai", "google"], dict[str, Any]]:
+) -> tuple[Literal["anthropic", "ollama", "openai", "google", "stub"], dict[str, Any]]:
     """Build a provider-neutral completion payload from a Messages API request.
 
     Unlike `openai_to_payload`, the Messages API already separates `system`
