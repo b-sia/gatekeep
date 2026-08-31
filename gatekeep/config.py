@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 1_209_600
     email_token_ttl_seconds: int = 86_400
 
+    # --- Load testing ---
+    # Registers the in-app stub provider (gatekeep/providers/stub.py) under
+    # the "stub" name and lets `stub/...` models resolve to it, so a
+    # load-testing harness can exercise the gateway's own overhead (auth,
+    # rate limiting, budget checks, caching, cost accounting, routing)
+    # without calling a real upstream. Never enable this in production - see
+    # docs/superpowers/specs/2026-08-30-load-testing-harness-design.md.
+    loadtest_stub_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
