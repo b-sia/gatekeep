@@ -33,6 +33,22 @@ async def _mint_pool_keys(run_id: int, n: int) -> list[str]:
     load by the compose override (loadtest/docker-compose.loadtest.yml), so
     pool size need not be sized against a per-key rate limit - see the
     design doc §5.
+
+    Args:
+        run_id: Timestamp suffix shared by all accounts minted in this run,
+            keeping account names unique across re-runs.
+        n: Number of accounts/keys to mint.
+
+    Returns:
+        The raw keys, one per minted account, in creation order.
+
+    Raises:
+        AccountNameConflictError: if a `loadtest-pool-{run_id}-{i}` name is
+            already taken (only possible if the script is re-run within the
+            same second as a prior run).
+        KeyNameConflictError: if the account already has a key named
+            `"loadtest"` (unreachable for a freshly created account, but
+            propagated uncaught from `account_service.create_key`).
     """
     raw_keys: list[str] = []
     async with SessionLocal() as session:
@@ -47,7 +63,26 @@ async def _mint_pool_keys(run_id: int, n: int) -> list[str]:
 
 async def _mint_budget_keys(run_id: int, n: int, budget_usd: float) -> list[str]:
     """Mint `n` API keys on dedicated low-budget accounts for the budget half
-    of the enforcement scenario (design doc §6.4)."""
+    of the enforcement scenario (design doc §6.4).
+
+    Args:
+        run_id: Timestamp suffix shared by all accounts minted in this run,
+            keeping account names unique across re-runs.
+        n: Number of accounts/keys to mint.
+        budget_usd: Monthly spend cap set on each account.
+
+    Returns:
+        The raw keys, one per minted account, in creation order.
+
+    Raises:
+        AccountNameConflictError: if a `loadtest-budget-{run_id}-{i}` name is
+            already taken (only possible if the script is re-run within the
+            same second as a prior run).
+        InvalidBudgetError: if `budget_usd` is not positive.
+        KeyNameConflictError: if the account already has a key named
+            `"loadtest"` (unreachable for a freshly created account, but
+            propagated uncaught from `account_service.create_key`).
+    """
     raw_keys: list[str] = []
     async with SessionLocal() as session:
         for i in range(n):
@@ -60,7 +95,24 @@ async def _mint_budget_keys(run_id: int, n: int, budget_usd: float) -> list[str]
 
 
 async def main(pool_size: int, budget_keys: int, budget_usd: float) -> None:
-    """Mint both key pools and write them to keys.json."""
+    """Mint both key pools and write them to keys.json.
+
+    Args:
+        pool_size: Number of unlimited-budget accounts/keys to mint.
+        budget_keys: Number of low-budget accounts/keys to mint.
+        budget_usd: Monthly spend cap set on each budget account.
+
+    Raises:
+        AccountNameConflictError: propagated from `_mint_pool_keys`/
+            `_mint_budget_keys` if a name collides (shouldn't normally
+            happen given the run_id suffix, but is possible if the script
+            is re-run within the same second as a prior run).
+        InvalidBudgetError: propagated from `_mint_budget_keys` if
+            `budget_usd` is not positive.
+        KeyNameConflictError: propagated from `_mint_pool_keys`/
+            `_mint_budget_keys` (extremely unlikely here since key names are
+            fixed as `"loadtest"` per account, but still reachable).
+    """
     run_id = int(time.time())
     pool = await _mint_pool_keys(run_id, pool_size)
     budget = await _mint_budget_keys(run_id, budget_keys, budget_usd)
