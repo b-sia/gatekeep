@@ -56,27 +56,18 @@ failure rate.
 
 **Server-side (Grafana / Prometheus queries):**
 
-| Scenario | Panels / queries |
-|---|---|
-| ThroughputUser | `histogram_quantile(0.95, rate(gatekeep_gateway_overhead_seconds_bucket[1m]))`; `rate(gatekeep_request_duration_seconds_count{path=~".+"}[1m])` (RPS); error rate from Locust. The step where p95 first climbs sharply is the practical capacity ceiling. |
-| LatencyUser | `histogram_quantile(0.5\|0.95\|0.99, rate(gatekeep_gateway_overhead_seconds_bucket[5m]))`, split by whether the request hit cache (`gatekeep_cache_exact_hits`/`gatekeep_cache_exact_misses` rates) - compare against the draft SLOs below. |
-| BreakingPointUser | Locust failure rate and error types; `rate(gatekeep_rate_limit_rejections_total[1m])` (confirm 429s appear once aggregate RPS exceeds the raised process-wide limit, with no over-admission before it); Postgres/Redis connection and error metrics (host-level or `docker compose logs postgres redis`). |
-| EnforcementUser | HTTP 429 `budget_exceeded_error` responses in Locust's failure log, appearing once the low-budget key's account crosses `monthly_budget_usd`; confirm no further 200s after the block starts. |
+| Scenario          | Panels / queries                                                                                                                                                                                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ThroughputUser    | `histogram_quantile(0.95, sum by (le) (rate(gatekeep_gateway_overhead_seconds_bucket[1m])))`; `rate(gatekeep_request_duration_seconds_count{path=~".+"}[1m])` (RPS); error rate from Locust. The step where p95 first climbs sharply is the practical capacity ceiling.                                                |
+| LatencyUser       | `histogram_quantile(0.5\|0.95\|0.99, sum by (le) (rate(gatekeep_gateway_overhead_seconds_bucket[5m])))`, split by whether the request hit cache (`gatekeep_cache_exact_hits`/`gatekeep_cache_exact_misses` rates) - compare against the draft SLOs below.                                                              |
+| BreakingPointUser | Locust failure rate and error types;`rate(gatekeep_rate_limit_rejections_total[1m])` (confirm 429s appear once aggregate RPS exceeds the raised process-wide limit, with no over-admission before it); Postgres/Redis connection and error metrics (host-level or `docker compose logs postgres redis`). |
+| EnforcementUser   | HTTP 429`budget_exceeded_error` responses in Locust's failure log, appearing once the low-budget key's account crosses `monthly_budget_usd`; confirm no further 200s after the block starts.                                                                                                             |
 
 ## Draft SLOs (placeholders - replace with the first baseline's numbers)
 
 - Cache-hit gateway overhead p95 < 15 ms
 - Stub non-streaming overhead p95 < 25 ms
 - Error rate < 0.1% below capacity
-
-## Results log
-
-Record one row per baseline run. Keep this table in this file (not a
-separate results file) so history and methodology stay together.
-
-| Date | Scenario | Max sustainable RPS | p50 / p95 / p99 overhead (ms) | Error rate | Notes |
-|---|---|---|---|---|---|
-| | | | | | |
 
 ## Scaling to multiple gateway workers
 

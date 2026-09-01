@@ -136,12 +136,12 @@ loadtest-bootstrap:
 #   just loadtest LatencyUser
 #   just loadtest BreakingPointUser
 #   just loadtest EnforcementUser
+#   just loadtest LatencyUser 50 15   # override users/spawn-rate
 # -u/-r are ignored by ThroughputUser/BreakingPointUser (their own
-# LoadTestShape governs concurrency instead) and used directly by
-# LatencyUser/EnforcementUser.
-loadtest scenario:
+# LoadTestShape governs concurrency instead).
+loadtest scenario users=(if scenario == "LatencyUser" { "30" } else if scenario == "EnforcementUser" { "50" } else { "400" }) spawn_rate=(if scenario == "LatencyUser" { "10" } else if scenario == "EnforcementUser" { "10" } else { "20" }):
     locust -f loadtest/locustfile.py {{scenario}} --headless \
-        -u 400 -r 20 -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
+        -u {{users}} -r {{spawn_rate}} -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
         --csv loadtest/results/{{scenario}}
 
 # Tear down the load-test stack
