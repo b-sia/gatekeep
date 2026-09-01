@@ -175,7 +175,8 @@ class ThroughputUser(_StubTasks, HttpUser):
 
 
 class ThroughputShape(LoadTestShape):
-    """Step-ramp for ThroughputUser: +20 users every 30s up to 400.
+    """Step-ramp for ThroughputUser: 20->40->80->160 users doubling every
+    30-90s, then +80 users every 30s up to 400.
 
     Watch gateway_overhead_seconds p95 and error rate in Grafana as each
     step lands; the step where p95 first climbs sharply is the practical
