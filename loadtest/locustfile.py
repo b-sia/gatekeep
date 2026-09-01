@@ -247,10 +247,11 @@ class BreakingPointShape(LoadTestShape):
 
 
 class EnforcementUser(HttpUser):
-    """Goal 4 - enforcement under concurrency: saturates one low-budget key
-    (from bootstrap.py's "budget" pool) so the budget block fires at the
-    predicted spend under real concurrent load (rate-limit exactness is
-    covered by BreakingPointUser instead - see design doc §6.4)."""
+    """Goal 4 - enforcement under concurrency: saturates one key from a
+    low-budget account (from bootstrap.py's "budget" pool) so the budget
+    block fires at the predicted spend under real concurrent load - budget
+    is enforced per-account, not per-key (rate-limit exactness is covered
+    by BreakingPointUser instead - see design doc §6.4)."""
 
     host = os.environ.get("TARGET_HOST", "http://localhost:8100")
     wait_time = between(0, 0)
