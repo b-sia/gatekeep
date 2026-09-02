@@ -110,6 +110,20 @@ class _StubTasks:
     """
 
     def _post(self, *, cache_hit: bool, stream: bool) -> None:
+        """Send one chat-completion request and record it as a Locust task.
+
+        Picks a random key from `self.keys`, builds the request body via
+        `_body`, and posts it. For a streaming request that gets a 200, also
+        drains the SSE body so the recorded response time covers the full
+        connection lifetime, not just the headers - see the inline comment
+        below for why a dropped mid-stream connection is caught here rather
+        than left to propagate.
+
+        Args:
+            cache_hit: Whether to send the fixed cache-hit prompt (True) or a
+                fresh UUID-suffixed prompt (False).
+            stream: Whether to request a streaming (SSE) response.
+        """
         key = random.choice(self.keys)
         model = MODEL_STREAM if stream else MODEL_NON_STREAM
         body = _body(model=model, cache_hit=cache_hit, stream=stream)
@@ -138,14 +152,17 @@ class _StubTasks:
 
     @task(3)
     def non_stream_cache_miss(self) -> None:
+        """Weight-3 task: a non-streaming request with a fresh, uncached prompt."""
         self._post(cache_hit=False, stream=False)
 
     @task(1)
     def non_stream_cache_hit(self) -> None:
+        """Weight-1 task: a non-streaming request with the fixed cache-hit prompt."""
         self._post(cache_hit=True, stream=False)
 
     @task(2)
     def stream_cache_miss(self) -> None:
+        """Weight-2 task: a streaming request with a fresh, uncached prompt."""
         self._post(cache_hit=False, stream=True)
 
 
@@ -196,6 +213,8 @@ class ThroughputShape(LoadTestShape):
     ]
 
     def tick(self):
+        """Return the (users, spawn_rate) for the current stage in `stages`, or
+        `None` once the last stage's duration has elapsed to end the run."""
         run_time = self.get_run_time()
         for stage in self.stages:
             if run_time < stage["duration"]:
@@ -239,6 +258,8 @@ class BreakingPointShape(LoadTestShape):
     ]
 
     def tick(self):
+        """Return the (users, spawn_rate) for the current stage in `stages`, or
+        `None` once the last stage's duration has elapsed to end the run."""
         run_time = self.get_run_time()
         for stage in self.stages:
             if run_time < stage["duration"]:
@@ -264,5 +285,10 @@ class EnforcementUser(HttpUser):
 
     @task
     def hammer_low_budget_key(self) -> None:
+        """Send one non-streaming, cache-missing request against this user's
+        pinned low-budget key, without `catch_response` - a 429 once the
+        budget trips is recorded as a failure via Locust's default
+        status-code-based outcome, which is what the enforcement scenario
+        wants to see in its failure log."""
         body = _body(model=MODEL_NON_STREAM, cache_hit=False, stream=False)
         self.client.post("/v1/chat/completions", json=body, headers=_headers(self.key))
