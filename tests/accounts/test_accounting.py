@@ -12,6 +12,7 @@ from gatekeep.accounts.accounting import (
 )
 from gatekeep.accounts.auth_keys import generate_key, hash_key
 from gatekeep.config import get_settings
+from gatekeep.observability.metrics import unpriced_model_total
 from gatekeep.storage.models import ApiKey, RequestLog
 from tests.helpers import create_account, create_key
 
@@ -380,3 +381,42 @@ async def test_log_request_persists_explicit_outcome(session, key_and_account_id
         await session.execute(select(RequestLog).where(RequestLog.id == log.id))
     ).scalar_one()
     assert fetched.outcome == "provider_error"
+
+
+# --- stub billing ---------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_enabled(monkeypatch):
+    monkeypatch.setenv("LOADTEST_STUB_ENABLED", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_calculate_cost_stub_is_billed_at_the_fixed_price_when_enabled(stub_enabled):
+    cost = calculate_cost(
+        "stub", "lat50-out200", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 2.0  # $1/1M input + $1/1M output at the default STUB_PRICE_PER_1M
+
+
+def test_calculate_cost_stub_is_free_when_flag_disabled():
+    cost = calculate_cost(
+        "stub", "lat50-out200", prompt_tokens=1_000_000, completion_tokens=1_000_000
+    )
+    assert cost == 0.0
+
+
+def test_enforce_pricing_policy_never_rejects_stub_regardless_of_miss_policy(
+    stub_enabled, miss_policy
+):
+    miss_policy("reject")
+    assert enforce_pricing_policy("stub", "lat50-out200-itl5") is None
+
+
+def test_enforce_pricing_policy_stub_never_increments_unpriced_metric(stub_enabled):
+    before = unpriced_model_total.labels(provider="stub", outcome="rejected")._value.get()
+    enforce_pricing_policy("stub", "lat50-out200")
+    after = unpriced_model_total.labels(provider="stub", outcome="rejected")._value.get()
+    assert after == before

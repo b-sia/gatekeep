@@ -119,3 +119,31 @@ migrate:
 # Autogenerate a new migration from model changes: `just makemigration "add a column"`
 makemigration message:
     alembic revision --autogenerate -m "{{message}}"
+
+# --- Load testing (see loadtest/README.md) ---
+
+# Bring up the full stack with the load-test override (stub provider
+# enabled, rate limits raised well above target load)
+loadtest-up:
+    docker compose -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml up -d --build
+
+# Mint fresh load-test API keys into loadtest/keys.json (safe to re-run)
+loadtest-bootstrap:
+    python loadtest/bootstrap.py
+
+# Run one scenario headless against the running stack, e.g.:
+#   just loadtest ThroughputUser
+#   just loadtest LatencyUser
+#   just loadtest BreakingPointUser
+#   just loadtest EnforcementUser
+#   just loadtest LatencyUser 50 15   # override users/spawn-rate
+# -u/-r are ignored by ThroughputUser/BreakingPointUser (their own
+# LoadTestShape governs concurrency instead).
+loadtest scenario users=(if scenario == "LatencyUser" { "30" } else if scenario == "EnforcementUser" { "50" } else { "400" }) spawn_rate=(if scenario == "LatencyUser" { "10" } else if scenario == "EnforcementUser" { "10" } else { "20" }):
+    locust -f loadtest/locustfile.py {{scenario}} --headless \
+        -u {{users}} -r {{spawn_rate}} -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
+        --csv loadtest/results/{{scenario}}
+
+# Tear down the load-test stack
+loadtest-down:
+    docker compose -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml down

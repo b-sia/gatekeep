@@ -74,3 +74,18 @@ def test_signup_settings_defaults(monkeypatch):
     assert s.email_backend == "console"
     assert s.session_ttl_seconds == 1209600
     assert s.public_base_url.startswith("http")
+
+
+def test_loadtest_stub_enabled_defaults_to_false():
+    s = Settings(database_url="x", redis_url="y", anthropic_api_key="z")
+    assert s.loadtest_stub_enabled is False
+
+
+def test_loadtest_stub_enabled_reads_from_env(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/db")
+    monkeypatch.setenv("REDIS_URL", "redis://h:6379/0")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("LOADTEST_STUB_ENABLED", "true")
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.loadtest_stub_enabled is True

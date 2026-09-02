@@ -8,3 +8,6 @@ venv/
 .superpowers/
 .mcp.json
 .mcp.json.worktrees/
+loadtest/keys.json
+loadtest/results/*.csv
+loadtest/results/*.html

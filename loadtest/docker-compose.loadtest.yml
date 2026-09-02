@@ -1,0 +1,41 @@
+# Load-test override for docker-compose.yml. Usage:
+#   just loadtest-up    # docker compose -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml up -d
+# See loadtest/README.md for the full runbook.
+#
+# Postgres/Redis/Prometheus/Grafana are unchanged from the base compose file
+# (docker compose merges services by name; not redeclaring a service here
+# means "use the base definition as-is").
+services:
+  gateway:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gatekeep:gatekeep@postgres:5432/gatekeep
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-sk-ant-unused-loadtest}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OLLAMA_HOST: http://ollama:11434
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-llama3.2}
+      # Registers the stub provider and stub/ model routing - see
+      # gatekeep/config.py's loadtest_stub_enabled and
+      # gatekeep/app.py's _build_providers.
+      LOADTEST_STUB_ENABLED: "true"
+      # Rate limiting is one process-wide token bucket shared by every
+      # account (see the design doc's "Relevant existing architecture").
+      # Raised well above any scenario's target RPS - keeping the same
+      # capacity/refill ratio as the defaults (100/60 and 300/60) - so the
+      # limiter is never the throughput/latency bottleneck. The
+      # BreakingPointUser Locust scenario still exercises 429s by ramping
+      # past this raised ceiling.
+      RATE_LIMIT_TOKENS_PER_MIN: "600000"
+      RATE_LIMIT_REFILL_RATE: "10000"
+      PRE_AUTH_RATE_LIMIT_TOKENS_PER_MIN: "1800000"
+      PRE_AUTH_RATE_LIMIT_REFILL_RATE: "30000"
+      # PRICING_MISS_POLICY intentionally left at its default ("reject"):
+      # stub traffic is never treated as unpriced regardless of this policy
+      # (see gatekeep/accounts/accounting.py's STUB_PRICE_PER_1M branch), so
+      # it only ever governs real billed-provider models, which load-test
+      # scenarios never send.
+    # Single gateway worker by default, for clean per-request overhead
+    # numbers in the throughput/latency/breaking-point scenarios. For a
+    # second capacity pass measuring multi-worker scaling, uncomment:
+    #   command: ["uvicorn", "gatekeep.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
