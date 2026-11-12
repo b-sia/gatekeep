@@ -74,17 +74,17 @@ init-operator email:
 
 # Populate the dev DB with demo accounts, logins, keys, prompts, and history (idempotent; safe to re-run)
 seed:
-    uv run --frozen python scripts/seed_dev.py
+    uv run --locked python scripts/seed_dev.py
 
 # Wipe the seed-owned tables and repopulate from scratch (use after nuking the DB)
 seed-reset:
-    uv run --frozen python scripts/seed_dev.py --reset
+    uv run --locked python scripts/seed_dev.py --reset
 
 # --- Testing & linting ---
 
 # Run the Python test suite (needs TEST_DATABASE_URL + up-deps running)
 test:
-    uv run --frozen pytest
+    uv run --locked pytest
 
 # Run the dashboard test suite
 test-dashboard:
@@ -92,20 +92,20 @@ test-dashboard:
 
 # Lint (and format-check) Python sources
 lint:
-    uv run --frozen ruff check .
-    uv run --frozen ruff format --check .
+    uv run --locked ruff check .
+    uv run --locked ruff format --check .
 
 # Auto-fix lint issues and format Python sources
 fmt:
-    uv run --frozen ruff check --fix .
-    uv run --frozen ruff format .
+    uv run --locked ruff check --fix .
+    uv run --locked ruff format .
 
 # --- Dependencies ---
 
 # Create/update .venv from uv.lock (all extras, pre-commit hooks installed)
 sync:
-    uv sync --frozen --all-extras
-    uv run --frozen pre-commit install
+    uv sync --locked --all-extras
+    uv run --locked pre-commit install
 
 # Re-resolve uv.lock after editing pyproject.toml (keeps existing pins where possible)
 lock:
@@ -129,11 +129,11 @@ dashboard-build:
 
 # Apply pending Alembic migrations
 migrate:
-    uv run --frozen alembic upgrade head
+    uv run --locked alembic upgrade head
 
 # Autogenerate a new migration from model changes: `just makemigration "add a column"`
 makemigration message:
-    uv run --frozen alembic revision --autogenerate -m "{{message}}"
+    uv run --locked alembic revision --autogenerate -m "{{message}}"
 
 # --- Load testing (see loadtest/README.md) ---
 
@@ -144,7 +144,7 @@ loadtest-up:
 
 # Mint fresh load-test API keys into loadtest/keys.json (safe to re-run)
 loadtest-bootstrap:
-    uv run --frozen --extra loadtest python loadtest/bootstrap.py
+    uv run --locked --extra loadtest python loadtest/bootstrap.py
 
 # Run one scenario headless against the running stack, e.g.:
 #   just loadtest ThroughputUser
@@ -155,7 +155,7 @@ loadtest-bootstrap:
 # -u/-r are ignored by ThroughputUser/BreakingPointUser (their own
 # LoadTestShape governs concurrency instead).
 loadtest scenario users=(if scenario == "LatencyUser" { "30" } else if scenario == "EnforcementUser" { "50" } else { "400" }) spawn_rate=(if scenario == "LatencyUser" { "10" } else if scenario == "EnforcementUser" { "10" } else { "20" }):
-    uv run --frozen --extra loadtest locust -f loadtest/locustfile.py {{scenario}} --headless \
+    uv run --locked --extra loadtest locust -f loadtest/locustfile.py {{scenario}} --headless \
         -u {{users}} -r {{spawn_rate}} -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
         --csv loadtest/results/{{scenario}}
 

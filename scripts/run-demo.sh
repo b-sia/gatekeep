@@ -49,4 +49,4 @@ echo ""
 echo "Starting Demo Chat Application..."
 echo ""
 # `uv run` installs the locked demo dependencies into .venv first if needed.
-uv run --frozen --extra demo python -m demo.app 2>&1 | sed 's/^/  [demo] /'
+uv run --locked --extra demo python -m demo.app 2>&1 | sed 's/^/  [demo] /'

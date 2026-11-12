@@ -95,7 +95,7 @@ Or from the OpenAI client library, by pointing `base_url` at the gateway:
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(
-    api_key="gk-your-key",              # a Gatekeep key, not an OpenAI one
+    api_key="gk-your-key",  # a Gatekeep key, not an OpenAI one
     base_url="http://localhost:8100/v1",
 )
 
@@ -163,7 +163,7 @@ Create the local `.venv` from the lockfile so `pytest` and the CLI run against
 your editor's Python, and install the pre-commit hooks:
 
 ```bash
-uv sync --frozen --all-extras
+uv sync --locked --all-extras
 uv run pre-commit install
 ```
 
@@ -184,13 +184,14 @@ Prompt template changes are gated by CI rather than pytest - see
 ## Dependencies
 
 Every Python dependency, including transitive ones, is pinned in `uv.lock`. The
-Docker image, CI, and local `.venv` all install from it with `--frozen`, so a
+Docker image, CI, and local `.venv` all install from it with `--locked`, so a
 rebuild never picks up a new upstream release on its own. `pyproject.toml` only
 declares the allowed ranges.
 
 - **Add or change a dependency:** edit `pyproject.toml`, then run `uv lock` and
-  commit both files. The `uv-lock` pre-commit hook and the CI check both fail
-  while `uv.lock` is out of date.
+  commit both files. While `uv.lock` is out of date, the `uv-lock` pre-commit
+  hook, the `lock-check` CI workflow (runs on every PR), the Docker build, and
+  every `just` recipe fail instead of running against a stale environment.
 - **Upgrade on purpose:** `uv lock --upgrade-package <name>` for one package, or
   `uv lock --upgrade` for everything. Then rebuild the image and run the tests.
 

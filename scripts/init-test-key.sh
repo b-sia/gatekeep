@@ -50,17 +50,17 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
-# `uv run --frozen` creates/updates .venv from uv.lock (including the editable
+# `uv run --locked` creates/updates .venv from uv.lock (including the editable
 # gatekeep install) before each command, so there is no separate "is gatekeep
 # installed" check - a missing or stale install is repaired automatically, and
 # the exact locked dependency versions are used.
 
 # Bring the schema up to date (no-op if already at head).
 echo "🔍 Applying migrations (if any)..."
-uv run --frozen alembic upgrade head
+uv run --locked alembic upgrade head
 
 echo "🔑 Minting API key for account '$ACCOUNT_NAME'..."
-RAW_KEY=$(uv run --frozen python scripts/create_key.py $OPERATOR_FLAG $EMAIL_FLAG "$ACCOUNT_NAME" "$KEY_NAME")
+RAW_KEY=$(uv run --locked python scripts/create_key.py $OPERATOR_FLAG $EMAIL_FLAG "$ACCOUNT_NAME" "$KEY_NAME")
 
 # Get default model from environment, .env file, or fallback
 if [ -z "$DEFAULT_MODEL" ] && [ -f .env ]; then

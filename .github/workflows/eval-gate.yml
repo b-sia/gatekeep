@@ -36,9 +36,7 @@ jobs:
         with:
           version: "0.12.22"
           python-version: "3.11"
-      - name: Check uv.lock is up to date
-        run: uv lock --check
       - name: Install
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Run eval gate
-        run: uv run --frozen bash scripts/ci-eval-check.sh
+        run: uv run --locked bash scripts/ci-eval-check.sh
