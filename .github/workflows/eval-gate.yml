@@ -32,10 +32,14 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.12.22"
           python-version: "3.11"
+      # The gate only needs the runtime package (alembic + the gatekeep CLI),
+      # so skip the dev group. --no-dev is repeated on `uv run` because it
+      # would otherwise re-sync the default groups before running.
       - name: Install
-        run: pip install -e ".[dev]"
+        run: uv sync --locked --no-dev
       - name: Run eval gate
-        run: bash scripts/ci-eval-check.sh
+        run: uv run --locked --no-dev bash scripts/ci-eval-check.sh

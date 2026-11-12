@@ -74,17 +74,17 @@ init-operator email:
 
 # Populate the dev DB with demo accounts, logins, keys, prompts, and history (idempotent; safe to re-run)
 seed:
-    python scripts/seed_dev.py
+    uv run --locked python scripts/seed_dev.py
 
 # Wipe the seed-owned tables and repopulate from scratch (use after nuking the DB)
 seed-reset:
-    python scripts/seed_dev.py --reset
+    uv run --locked python scripts/seed_dev.py --reset
 
 # --- Testing & linting ---
 
 # Run the Python test suite (needs TEST_DATABASE_URL + up-deps running)
 test:
-    pytest
+    uv run --locked pytest
 
 # Run the dashboard test suite
 test-dashboard:
@@ -92,13 +92,29 @@ test-dashboard:
 
 # Lint (and format-check) Python sources
 lint:
-    ruff check .
-    ruff format --check .
+    uv run --locked ruff check .
+    uv run --locked ruff format --check .
 
 # Auto-fix lint issues and format Python sources
 fmt:
-    ruff check --fix .
-    ruff format .
+    uv run --locked ruff check --fix .
+    uv run --locked ruff format .
+
+# --- Dependencies ---
+
+# Create/update .venv from uv.lock (all extras, pre-commit hooks installed)
+sync:
+    uv sync --locked --all-extras
+    uv run --locked pre-commit install
+
+# Re-resolve uv.lock after editing pyproject.toml (keeps existing pins where possible)
+lock:
+    uv lock
+
+# Upgrade every dependency to the newest allowed version, or only the named
+# ones: `just upgrade sqlalchemy redis`
+upgrade *packages:
+    {{ if packages == "" { "uv lock --upgrade" } else { "uv lock " + prepend("--upgrade-package ", packages) } }}
 
 # --- Dashboard SPA ---
 
@@ -114,11 +130,11 @@ dashboard-build:
 
 # Apply pending Alembic migrations
 migrate:
-    alembic upgrade head
+    uv run --locked alembic upgrade head
 
 # Autogenerate a new migration from model changes: `just makemigration "add a column"`
 makemigration message:
-    alembic revision --autogenerate -m "{{message}}"
+    uv run --locked alembic revision --autogenerate -m "{{message}}"
 
 # --- Load testing (see loadtest/README.md) ---
 
@@ -129,7 +145,7 @@ loadtest-up:
 
 # Mint fresh load-test API keys into loadtest/keys.json (safe to re-run)
 loadtest-bootstrap:
-    python loadtest/bootstrap.py
+    uv run --locked --extra loadtest python loadtest/bootstrap.py
 
 # Run one scenario headless against the running stack, e.g.:
 #   just loadtest ThroughputUser
@@ -140,7 +156,7 @@ loadtest-bootstrap:
 # -u/-r are ignored by ThroughputUser/BreakingPointUser (their own
 # LoadTestShape governs concurrency instead).
 loadtest scenario users=(if scenario == "LatencyUser" { "30" } else if scenario == "EnforcementUser" { "50" } else { "400" }) spawn_rate=(if scenario == "LatencyUser" { "10" } else if scenario == "EnforcementUser" { "10" } else { "20" }):
-    locust -f loadtest/locustfile.py {{scenario}} --headless \
+    uv run --locked --extra loadtest locust -f loadtest/locustfile.py {{scenario}} --headless \
         -u {{users}} -r {{spawn_rate}} -t 5m --host ${TARGET_HOST:-http://localhost:8100} \
         --csv loadtest/results/{{scenario}}
 

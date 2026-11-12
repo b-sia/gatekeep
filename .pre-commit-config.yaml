@@ -1,7 +1,13 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.2
+    # Keep in sync with the ruff pin in pyproject.toml's dev dependency group.
+    rev: v0.16.4
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.22
+    hooks:
+      # Fails the commit if uv.lock is out of date with pyproject.toml.
+      - id: uv-lock

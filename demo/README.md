@@ -11,8 +11,11 @@ The gateway must already be up (`docker-compose up -d`) and you need a key from
 
 ```bash
 export GATEKEEP_API_KEY=gk-your-key
-python demo/app.py
+uv run --locked --extra demo python -m demo.app
 ```
+
+`uv run` installs the locked `demo` extra (`httpx`, `python-dotenv`) into
+`.venv` first if needed.
 
 Open `http://localhost:8200` and chat. Use the model dropdown to switch between
 providers and the toggle to turn streaming on and off. The page's "How this works"

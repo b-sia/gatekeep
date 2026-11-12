@@ -17,7 +17,8 @@ Your App -> Gatekeep (auth + routing) -> Provider (Claude, OpenAI, Google, Ollam
 - Docker and Docker Compose - runs the gateway plus Postgres (with `pgvector`),
   Redis, Ollama, Prometheus, and Grafana.
 - An `ANTHROPIC_API_KEY`. Other provider keys are optional.
-- For development only: Python 3.11+, `psql`, and Node.js 20+ (dashboard SPA).
+- For development only: [`uv`](https://docs.astral.sh/uv/), Python 3.11+, and
+  Node.js 20+ (dashboard SPA).
 
 ## Installation
 
@@ -94,7 +95,7 @@ Or from the OpenAI client library, by pointing `base_url` at the gateway:
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(
-    api_key="gk-your-key",              # a Gatekeep key, not an OpenAI one
+    api_key="gk-your-key",  # a Gatekeep key, not an OpenAI one
     base_url="http://localhost:8100/v1",
 )
 
@@ -158,13 +159,19 @@ Rate-limit, cache, and budget-alert tuning are documented in
 
 ## Testing
 
-Install the package locally so `pytest` and the CLI run against your editor's
-Python:
+Create the local `.venv` from the lockfile so `pytest` and the CLI run against
+your editor's Python, and install the pre-commit hooks:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --locked --all-extras
+uv run pre-commit install
 ```
+
+The dev tools (`pytest`, `ruff`, `pre-commit`) are a `dev` dependency group, not
+an extra, so `pip install -e ".[dev]"` installs none of them (pip only prints a
+warning). If you can't use uv, pip 25.1+ installs the group with
+`pip install -e ".[demo,loadtest]" --group dev`, but it resolves fresh versions
+instead of the ones pinned in `uv.lock`.
 
 Tests need a live Postgres (with `pgvector`) and Redis - the same services
 `docker-compose` provides. They run against `TEST_DATABASE_URL`, **not**
@@ -174,11 +181,25 @@ automatically if it does not exist.
 
 ```bash
 docker-compose up -d postgres redis   # dependencies only, no gateway image build
-pytest
+uv run pytest
 ```
 
 Prompt template changes are gated by CI rather than pytest - see
 [`prompts/README.md`](prompts/README.md).
+
+## Dependencies
+
+Every Python dependency, including transitive ones, is pinned in `uv.lock`. The
+Docker image, CI, and local `.venv` all install from it with `--locked`, so a
+rebuild never picks up a new upstream release on its own. `pyproject.toml` only
+declares the allowed ranges.
+
+- **Add or change a dependency:** edit `pyproject.toml`, then run `uv lock` and
+  commit both files. While `uv.lock` is out of date, the `uv-lock` pre-commit
+  hook, the `lock-check` CI workflow (runs on every PR), the Docker build, and
+  every `just` recipe fail instead of running against a stale environment.
+- **Upgrade on purpose:** `uv lock --upgrade-package <name>` for one package, or
+  `uv lock --upgrade` for everything. Then rebuild the image and run the tests.
 
 ## Development commands
 
@@ -200,6 +221,8 @@ just init-operator you@example.com  # bootstrap an operator account with a dashb
 just migrate        # apply pending Alembic migrations
 just seed           # populate a fresh dev DB with demo accounts, prompts, and usage history
 just seed-reset     # wipe seeded data and repopulate from scratch (e.g. after `just down-clean`)
+just sync           # create/update .venv from uv.lock and install pre-commit hooks
+just upgrade <pkg>  # bump one dependency in uv.lock (omit <pkg> to bump everything)
 ```
 
 `just seed` fills in everything the dashboard, account-management, and prompts tabs need for local

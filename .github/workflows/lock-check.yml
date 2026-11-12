@@ -1,0 +1,19 @@
+name: lock-check
+
+# Runs on every PR and push to master (no path filter), so a pyproject.toml
+# change without a matching `uv lock` can never merge unnoticed.
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  lock-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.22"
+      - name: Check uv.lock is up to date with pyproject.toml
+        run: uv lock --check

@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, make_url, pool
 
 import gatekeep.storage.models  # noqa: F401  (register tables)
 from gatekeep.config import get_settings
@@ -10,8 +10,13 @@ from gatekeep.storage.db import Base
 config = context.config
 
 # Alembic runs synchronously; convert the async URL to a sync psycopg2 one.
-sync_url = get_settings().database_url.replace("+asyncpg", "")
-config.set_main_option("sqlalchemy.url", sync_url)
+# The driver is named explicitly because a bare "postgresql://" resolves to
+# psycopg (v3) on SQLAlchemy 2.1+, which isn't installed.
+sync_url = make_url(get_settings().database_url).set(drivername="postgresql+psycopg2")
+config.set_main_option(
+    "sqlalchemy.url",
+    sync_url.render_as_string(hide_password=False).replace("%", "%%"),
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
