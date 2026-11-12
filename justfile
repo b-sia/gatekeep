@@ -111,9 +111,10 @@ sync:
 lock:
     uv lock
 
-# Upgrade every dependency to the newest allowed version, or one: `just upgrade sqlalchemy`
-upgrade *package:
-    {{ if package == "" { "uv lock --upgrade" } else { "uv lock --upgrade-package " + package } }}
+# Upgrade every dependency to the newest allowed version, or only the named
+# ones: `just upgrade sqlalchemy redis`
+upgrade *packages:
+    {{ if packages == "" { "uv lock --upgrade" } else { "uv lock " + prepend("--upgrade-package ", packages) } }}
 
 # --- Dashboard SPA ---
 

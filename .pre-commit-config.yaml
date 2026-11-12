@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep in sync with the ruff pin in pyproject.toml's dev extra.
+    # Keep in sync with the ruff pin in pyproject.toml's dev dependency group.
     rev: v0.16.4
     hooks:
       - id: ruff-check

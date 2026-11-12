@@ -36,7 +36,10 @@ jobs:
         with:
           version: "0.12.22"
           python-version: "3.11"
+      # The gate only needs the runtime package (alembic + the gatekeep CLI),
+      # so skip the dev group. --no-dev is repeated on `uv run` because it
+      # would otherwise re-sync the default groups before running.
       - name: Install
-        run: uv sync --locked
+        run: uv sync --locked --no-dev
       - name: Run eval gate
-        run: uv run --locked bash scripts/ci-eval-check.sh
+        run: uv run --locked --no-dev bash scripts/ci-eval-check.sh

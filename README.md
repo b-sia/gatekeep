@@ -167,6 +167,12 @@ uv sync --locked --all-extras
 uv run pre-commit install
 ```
 
+The dev tools (`pytest`, `ruff`, `pre-commit`) are a `dev` dependency group, not
+an extra, so `pip install -e ".[dev]"` installs none of them (pip only prints a
+warning). If you can't use uv, pip 25.1+ installs the group with
+`pip install -e ".[demo,loadtest]" --group dev`, but it resolves fresh versions
+instead of the ones pinned in `uv.lock`.
+
 Tests need a live Postgres (with `pgvector`) and Redis - the same services
 `docker-compose` provides. They run against `TEST_DATABASE_URL`, **not**
 `DATABASE_URL`: each test drops and recreates the whole schema, so `conftest.py`
