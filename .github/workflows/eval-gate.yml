@@ -32,10 +32,13 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.12.22"
           python-version: "3.11"
+      - name: Check uv.lock is up to date
+        run: uv lock --check
       - name: Install
-        run: pip install -e ".[dev]"
+        run: uv sync --frozen
       - name: Run eval gate
-        run: bash scripts/ci-eval-check.sh
+        run: uv run --frozen bash scripts/ci-eval-check.sh

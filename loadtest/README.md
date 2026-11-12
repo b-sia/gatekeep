@@ -15,7 +15,6 @@ full design.
 just loadtest-up          # bring up postgres/redis/ollama/prometheus/grafana
                            # + gateway with the stub enabled and rate limits raised
 just loadtest-bootstrap    # mint keys into loadtest/keys.json (git-ignored)
-pip install -e ".[loadtest]"
 ```
 
 Grafana is at `http://localhost:3000` (anonymous viewer access), Prometheus

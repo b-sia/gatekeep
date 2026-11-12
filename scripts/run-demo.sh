@@ -46,12 +46,7 @@ echo "🔑 Using API Key from .env:"
 echo "   $GATEKEEP_API_KEY"
 echo ""
 
-# Check if demo dependencies are installed
-if ! python3 -c "import fastapi, httpx" 2>/dev/null; then
-    echo "⚠️  Installing dependencies..."
-    pip install -e . > /dev/null
-fi
-
 echo "Starting Demo Chat Application..."
 echo ""
-python3 -m demo.app 2>&1 | sed 's/^/  [demo] /'
+# `uv run` installs the locked demo dependencies into .venv first if needed.
+uv run --frozen --extra demo python -m demo.app 2>&1 | sed 's/^/  [demo] /'
