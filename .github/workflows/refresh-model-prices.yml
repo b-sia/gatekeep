@@ -4,6 +4,12 @@ name: refresh-model-prices
 # pricing dataset. Runs weekly (and on demand); opens a PR with the diff so a
 # human reviews every price change before it reaches the enforcement path,
 # rather than a stale table silently mispricing new models.
+#
+# The PR is opened with a GitHub App installation token, not GITHUB_TOKEN:
+# the repo does not let Actions create PRs, and PRs opened by GITHUB_TOKEN
+# would not trigger CI (lock-check) anyway. Requires the repo variable
+# GATEKEEP_PRICING_BOT_CLIENT_ID and the secret GATEKEEP_PRICING_BOT (the
+# App's private key); the App needs Contents + Pull requests read/write.
 
 on:
   schedule:
@@ -11,16 +17,24 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GATEKEEP_PRICING_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.GATEKEEP_PRICING_BOT }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -28,8 +42,9 @@ jobs:
         run: python scripts/refresh_model_prices.py
 
       - name: Open PR on change
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
+          token: ${{ steps.app-token.outputs.token }}
           commit-message: "chore: refresh vendored model pricing from litellm"
           title: "chore: refresh vendored model pricing"
           branch: chore/refresh-model-prices
